@@ -1,18 +1,16 @@
 /**
  * /v1/roundtable — M3.A roundtable orchestration.
  *
- * M3.A.1 (this file currently): POST + GET only.
- *   POST /v1/roundtable                       → create + run analyzer + persist
- *   GET  /v1/roundtable/:id                   → full state + messages
+ * M3.A.1: POST + GET (creation + analyzer)
+ * M3.A.2 (current): POST round + PUT retry — fans out one round in parallel via SSE annotations
  *
- * M3.A.2 will add:
- *   POST /v1/roundtable/:id/round/:round/start
+ * M3.A.3 will add:
  *   POST /v1/roundtable/:id/summarize
- *   PUT  /v1/roundtable/:id/round/:round/participant/:index/retry
  *   GET  /v1/roundtable/:id/export
  */
 
 import type { FastifyInstance } from 'fastify';
+import { PassThrough } from 'node:stream';
 import { z } from 'zod';
 import {
   TaoriError,
@@ -35,6 +33,7 @@ import {
 } from '../roundtable/model-pick.js';
 import { runAnalyzer, buildFallbackOutput } from '../roundtable/analyzer.js';
 import { estimateRoundtableCostRange } from '../roundtable/cost-estimate.js';
+import { runRound } from '../roundtable/round-runner.js';
 
 export function registerRoundtableRoute(
   app: FastifyInstance,
@@ -223,6 +222,280 @@ export function registerRoundtableRoute(
     const messages = rtMsgRepo.listByRoundtable(rt.id);
     return { roundtable: rt, messages };
   });
+
+  /**
+   * POST /v1/roundtable/:id/round — start the next round (current_round + 1).
+   *
+   * Streams `8:` annotation frames (Vercel AI SDK data-stream format) so the
+   * renderer can reuse useChat-style tee logic. Multiplexes participant deltas
+   * via `participant_index`. Ends with a single `d:` finish frame.
+   */
+  app.post<{ Params: { id: string } }>(
+    '/v1/roundtable/:id/round',
+    async (req, reply) => {
+      const rt = rtRepo.get(req.params.id);
+      if (!rt) {
+        throw new TaoriError({
+          code: 'not_found',
+          message: `Roundtable ${req.params.id} not found`,
+        });
+      }
+      const next = (rt.current_round ?? 0) + 1;
+      if (next > 2) {
+        throw new TaoriError({
+          code: 'conflict',
+          message: 'no_more_rounds',
+          details: { hint: '已达到最大轮数' },
+        });
+      }
+      if (next === 2 && rt.mode !== 'deep') {
+        throw new TaoriError({
+          code: 'conflict',
+          message: 'fast_mode_no_round_two',
+          details: { hint: '快速模式只有一轮' },
+        });
+      }
+      if (rt.status === 'completed' || rt.status === 'failed') {
+        throw new TaoriError({
+          code: 'conflict',
+          message: `roundtable_${rt.status}`,
+          details: { hint: '已结束的圆桌不能继续' },
+        });
+      }
+      if (rt.status === 'round1' || rt.status === 'round2' || rt.status === 'summarizing') {
+        throw new TaoriError({
+          code: 'conflict',
+          message: 'roundtable_busy',
+          details: { hint: '圆桌正在运行中' },
+        });
+      }
+
+      const priorMessages =
+        next === 2 ? rtMsgRepo.listByRoundtable(rt.id) : [];
+
+      const stream = new PassThrough();
+      const origin = req.headers.origin;
+      if (
+        typeof origin === 'string' &&
+        (/^https?:\/\/(127\.0\.0\.1|localhost)(:\d+)?$/.test(origin) ||
+          origin === 'tauri://localhost' ||
+          origin.startsWith('http://tauri.localhost'))
+      ) {
+        reply.header('Access-Control-Allow-Origin', origin);
+        reply.header('Vary', 'Origin');
+        reply.header('Access-Control-Expose-Headers', 'x-vercel-ai-data-stream');
+      }
+      reply
+        .type('text/plain; charset=utf-8')
+        .header('Cache-Control', 'no-cache, no-transform')
+        .header('Connection', 'keep-alive')
+        .header('x-vercel-ai-data-stream', 'v1');
+
+      if (typeof reply.raw.socket?.setNoDelay === 'function') {
+        reply.raw.socket.setNoDelay(true);
+      }
+
+      const abortController = new AbortController();
+      reply.raw.on('close', () => {
+        if (!stream.writableEnded) abortController.abort();
+      });
+      reply.send(stream);
+
+      // Lead annotation so renderers know which roundtable this stream binds to.
+      stream.write(
+        `8:${JSON.stringify([
+          {
+            type: 'meta',
+            roundtable_id: rt.id,
+            conversation_id: rt.conversation_id,
+            round: next,
+          },
+        ])}\n`,
+      );
+
+      try {
+        const result = await runRound(
+          {
+            modelsRepo,
+            providersRepo,
+            costsRepo,
+            rtRepo,
+            rtMsgRepo,
+            keystore: deps.keystore,
+            log: req.log,
+          },
+          {
+            roundtable: rt,
+            round: next as 1 | 2,
+            priorRoundMessages: priorMessages,
+            stream,
+            signal: abortController.signal,
+          },
+        );
+        stream.write(
+          `d:${JSON.stringify({
+            finishReason:
+              result.failed.length >= Math.ceil(rt.participants.length / 2)
+                ? 'error'
+                : 'stop',
+            usage: { promptTokens: 0, completionTokens: 0 },
+          })}\n`,
+        );
+      } catch (e) {
+        req.log.error({ err: e }, 'roundtable.round.unhandled');
+        stream.write(
+          `3:${JSON.stringify(
+            `roundtable_round_failed: ${e instanceof Error ? e.message : String(e)}`,
+          )}\n`,
+        );
+        stream.write(
+          `d:${JSON.stringify({ finishReason: 'error', usage: { promptTokens: 0, completionTokens: 0 } })}\n`,
+        );
+        rtRepo.setStatus(rt.id, 'failed');
+      } finally {
+        stream.end();
+      }
+    },
+  );
+
+  /**
+   * PUT /v1/roundtable/:id/round/:round/participant/:index/retry — retry a
+   * single participant's row in place. Streams the same annotation set as a
+   * full round but only for the given index.
+   *
+   * Failure-count rule (spec §3.3): same as first attempt — record failure on
+   * provider error (except content_filter). Connect 3 strikes → renderer
+   * disables the retry button.
+   */
+  app.put<{
+    Params: { id: string; round: string; index: string };
+  }>(
+    '/v1/roundtable/:id/round/:round/participant/:index/retry',
+    async (req, reply) => {
+      const rt = rtRepo.get(req.params.id);
+      if (!rt) {
+        throw new TaoriError({
+          code: 'not_found',
+          message: `Roundtable ${req.params.id} not found`,
+        });
+      }
+      const round = Number(req.params.round);
+      const index = Number(req.params.index);
+      if (!Number.isInteger(round) || (round !== 1 && round !== 2)) {
+        throw new TaoriError({
+          code: 'validation_error',
+          message: 'round must be 1 or 2',
+        });
+      }
+      if (
+        !Number.isInteger(index) ||
+        index < 0 ||
+        index >= rt.participants.length
+      ) {
+        throw new TaoriError({
+          code: 'validation_error',
+          message: 'participant index out of range',
+        });
+      }
+      const existing = rtMsgRepo.findOne(rt.id, round, index);
+      if (!existing) {
+        throw new TaoriError({
+          code: 'not_found',
+          message: 'roundtable message row not found — run the round first',
+        });
+      }
+
+      // Reset row to streaming/empty so listeners see a clean retry.
+      rtMsgRepo.update(existing.id, {
+        status: 'pending',
+        content: '',
+        classification: null,
+        error_message: null,
+      });
+
+      const stream = new PassThrough();
+      const origin = req.headers.origin;
+      if (
+        typeof origin === 'string' &&
+        (/^https?:\/\/(127\.0\.0\.1|localhost)(:\d+)?$/.test(origin) ||
+          origin === 'tauri://localhost' ||
+          origin.startsWith('http://tauri.localhost'))
+      ) {
+        reply.header('Access-Control-Allow-Origin', origin);
+        reply.header('Vary', 'Origin');
+        reply.header('Access-Control-Expose-Headers', 'x-vercel-ai-data-stream');
+      }
+      reply
+        .type('text/plain; charset=utf-8')
+        .header('Cache-Control', 'no-cache, no-transform')
+        .header('Connection', 'keep-alive')
+        .header('x-vercel-ai-data-stream', 'v1');
+
+      const abortController = new AbortController();
+      reply.raw.on('close', () => {
+        if (!stream.writableEnded) abortController.abort();
+      });
+      reply.send(stream);
+
+      stream.write(
+        `8:${JSON.stringify([
+          {
+            type: 'meta',
+            roundtable_id: rt.id,
+            conversation_id: rt.conversation_id,
+            round,
+            retry_index: index,
+          },
+        ])}\n`,
+      );
+
+      // Build a temporary single-participant runner: call runRound with a
+      // patched roundtable whose participants array is one element. Because
+      // round-runner.findOne keys on (roundtable_id, round, participant_index),
+      // we restore the original index via a one-element synthetic so the row
+      // gets reused in place. The simpler path is to re-implement the body
+      // inline — but since runRound already handles classification, cost
+      // records and recordFailure correctly, we do the inline path here only
+      // for the single message; reuse helper functions where possible.
+      try {
+        const priorMessages =
+          round === 2 ? rtMsgRepo.listByRoundtable(rt.id) : [];
+        await runRound(
+          {
+            modelsRepo,
+            providersRepo,
+            costsRepo,
+            rtRepo,
+            rtMsgRepo,
+            keystore: deps.keystore,
+            log: req.log,
+          },
+          {
+            roundtable: rt,
+            round: round as 1 | 2,
+            priorRoundMessages: priorMessages,
+            stream,
+            signal: abortController.signal,
+            targetIndices: [index],
+          },
+        );
+        stream.write(
+          `d:${JSON.stringify({ finishReason: 'stop', usage: { promptTokens: 0, completionTokens: 0 } })}\n`,
+        );
+      } catch (e) {
+        stream.write(
+          `3:${JSON.stringify(
+            `roundtable_retry_failed: ${e instanceof Error ? e.message : String(e)}`,
+          )}\n`,
+        );
+        stream.write(
+          `d:${JSON.stringify({ finishReason: 'error', usage: { promptTokens: 0, completionTokens: 0 } })}\n`,
+        );
+      } finally {
+        stream.end();
+      }
+    },
+  );
 
   // M3.A.1 placeholder so future pieces have a stable shape — quiet TS unused-var.
   void z;
