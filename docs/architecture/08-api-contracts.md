@@ -4,6 +4,20 @@
 > **来源约束：** [03-process-and-ipc.md](./03-process-and-ipc.md) 的端点表 + [04-data-and-storage.md](./04-data-and-storage.md) 的 Schema。
 > **实现位置：** 所有请求/响应的 Zod schema 落在 `packages/shared/src/schemas/`，前后端共用。
 
+> **R5 实现对齐说明（2025-Q1）。** 经过 M1–R4 多轮迭代后，本文与代码已存在以下已知偏差。**以代码 + 102 sidecar 测试 + 51 web e2e 为准**；本节列出的偏差不会回填到代码，需要的话以新 milestone 推进：
+>
+> - **响应包装不一致：** M1 路由（`/v1/providers`、`/v1/models`、`/v1/conversations`、`/health`、`/v1/files/parse`）返回**裸对象**（不带 `{ok,data}` 包装）；M2+ 路由（`/v1/costs/*`、`/v1/memories/*`、`/v1/tools/*`、`/v1/admin/*`）使用 `{ok,data}` 包装。下方"响应包装"小节描述的是 M2+ 风格，实际 M1 路由不遵循。前端按路径分别处理。
+> - **`/v1/files` 未实现：** 实现选择**内联 `data_b64`** 走 `/v1/chat`（消息 attachments 字段），不落盘。`/v1/files/parse` 是 R4 后新增的 PDF/text 解析端点。下方 §9 的 `/v1/files` 一组端点延迟到 M2+。
+> - **`/v1/models/batch` 未实现：** 渲染端使用 N×POST `/v1/models`，已通过 R3.1 reorder 端点保证次序。批量端点延迟到 M2+。
+> - **`/v1/costs/records` 未实现：** 仅 `/v1/costs/summary` 已落地，per-record 列表延迟。
+> - **GET `/v1/conversations/:id/messages` 不返回完整 attachments：** 实测每条消息只回 `attachments_count`（避免 MB 级 base64 上线）。如需原始附件请再发请求（M2+）。
+> - **`/v1/conversations` 列表不带 `message_count` / `total_cost_usd`：** 这两个字段从 `/v1/costs/summary` 单独取。
+> - **`PATCH /v1/conversations/:id`：** 接受 `{title?, archived?}`（至少其一）。`archived: true` 会从默认 list 中过滤。
+> - **路径细节：** `POST /v1/providers/:id/discover-models` → 实际为 `POST /v1/providers/:id/discover`；`POST /v1/providers/test` 实际接受 `{type, base_url, api_key}` 表单（不需先建实体）。
+> - **`failure_kind` 枚举包含 `auth`：** 凭据/鉴权失败独立分类（M1.4 + R3.2 实装）。
+> - **`recordSuccess` 不清除 `demoted` 标记：** 自动降级后必须**手动重新启用**，避免抖动。详见 [产品 §04 failure-resilience](../product/04-failure-resilience.md)。
+> - **UI 模型选择器（FR-4）：** demoted 模型在下拉中带 `⚠️`，disabled-until-active 模型带 `🚫` 且置灰，不再被静默隐藏。
+
 ## 通用约定
 
 ### 端点前缀

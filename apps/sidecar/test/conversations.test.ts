@@ -114,6 +114,46 @@ describe('conversations route', () => {
     expect((res.json() as { title: string }).title).toBe('Renamed Topic');
   });
 
+  it('PATCH /v1/conversations/:id supports archived flag (R5 m-2)', async () => {
+    await app.inject({
+      method: 'POST',
+      url: '/v1/chat',
+      headers: authJson,
+      payload: { model_id: 'm', messages: [{ role: 'user', content: 'msg' }] },
+    });
+    const conv = new ConversationsRepo(db).list()[0]!;
+
+    const archive = await app.inject({
+      method: 'PATCH',
+      url: `/v1/conversations/${conv.id}`,
+      headers: authJson,
+      payload: { archived: true },
+    });
+    expect(archive.statusCode).toBe(200);
+    expect((archive.json() as { archived: boolean }).archived).toBe(true);
+
+    // Archived conversations are excluded from the default list().
+    const list1 = await app.inject({
+      method: 'GET',
+      url: '/v1/conversations',
+      headers: authJson,
+    });
+    expect(
+      (list1.json() as { conversations: { id: string }[] }).conversations.find(
+        (c) => c.id === conv.id,
+      ),
+    ).toBeUndefined();
+
+    // Un-archive restores it.
+    const restore = await app.inject({
+      method: 'PATCH',
+      url: `/v1/conversations/${conv.id}`,
+      headers: authJson,
+      payload: { archived: false },
+    });
+    expect((restore.json() as { archived: boolean }).archived).toBe(false);
+  });
+
   it('DELETE /v1/conversations/:id cascades to messages', async () => {
     await app.inject({
       method: 'POST',

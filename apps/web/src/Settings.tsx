@@ -278,6 +278,21 @@ export function Settings({
                               {isDefault && <span title="默认">⭐ </span>}
                               {m.display_name}
                               {m.supports_vision && <span title="支持视觉"> 👁</span>}
+                              {m.disabled_until && m.disabled_until > Date.now() ? (
+                                <span
+                                  title={`暂时停用至 ${new Date(m.disabled_until).toLocaleTimeString()}`}
+                                  data-testid="settings-disabled-badge"
+                                >
+                                  {' '}🚫
+                                </span>
+                              ) : m.demoted ? (
+                                <span
+                                  title="已自动降级（需手动重新启用）"
+                                  data-testid="settings-demoted-badge"
+                                >
+                                  {' '}⚠️
+                                </span>
+                              ) : null}
                             </span>
                             {tier && (
                               <span

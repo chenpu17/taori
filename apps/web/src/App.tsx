@@ -1356,7 +1356,7 @@ function ChatPanel({
                 // price_per_call). The backend pickCheapestActive endpoint is
                 // not yet exposed; this client-side pick mirrors its semantics.
                 const candidates = chatModels
-                  .filter((m) => m.capability === model.capability && !m.demoted && m.id !== model.id)
+                  .filter((m) => m.capability === model.capability && !m.demoted && !(m.disabled_until && m.disabled_until > Date.now()) && m.id !== model.id)
                   .sort((a, b) => {
                     const ka = a.price_per_call ?? a.price_input_per_1m ?? Number.POSITIVE_INFINITY;
                     const kb = b.price_per_call ?? b.price_input_per_1m ?? Number.POSITIVE_INFINITY;
@@ -1412,7 +1412,7 @@ function ChatPanel({
             const hasImage = next.some((n) => n.kind === 'image');
             if (hasImage && !model.supports_vision) {
               const visionPick = chatModels.find(
-                (m) => m.supports_vision && !m.demoted,
+                (m) => m.supports_vision && !m.demoted && !(m.disabled_until && m.disabled_until > Date.now()),
               );
               if (visionPick && visionPick.id !== model.id) {
                 onModelChange(visionPick.id);
@@ -1480,7 +1480,7 @@ function ChatPanel({
           model={pendingConfirm.model ?? model}
           conversationId={conversationId}
           hasCheaperPeer={chatModels.some(
-            (m) => m.capability === (pendingConfirm.model ?? model).capability && !m.demoted && m.id !== (pendingConfirm.model ?? model).id,
+            (m) => m.capability === (pendingConfirm.model ?? model).capability && !m.demoted && !(m.disabled_until && m.disabled_until > Date.now()) && m.id !== (pendingConfirm.model ?? model).id,
           )}
           onContinue={pendingConfirm.onContinue}
           onCheaper={pendingConfirm.onCheaper}
@@ -1925,12 +1925,20 @@ function ModelSelector({
       data-testid="active-model"
       aria-label="选择模型"
     >
-      {models.map((m) => (
-        <option key={m.id} value={m.id}>
-          {m.display_name}
-          {m.supports_vision ? ' 👁' : ''}
-        </option>
-      ))}
+      {models.map((m) => {
+        const disabledNow = !!m.disabled_until && m.disabled_until > Date.now();
+        // Per FR-4 in 08-m1-spec / 04-failure-resilience: demoted models stay
+        // selectable but get ⚠️; disabled-until models render 🚫 and the
+        // option is disabled outright (browser will block selection).
+        const indicator = disabledNow ? ' 🚫' : m.demoted ? ' ⚠️' : '';
+        return (
+          <option key={m.id} value={m.id} disabled={disabledNow}>
+            {m.display_name}
+            {m.supports_vision ? ' 👁' : ''}
+            {indicator}
+          </option>
+        );
+      })}
     </select>
   );
 }

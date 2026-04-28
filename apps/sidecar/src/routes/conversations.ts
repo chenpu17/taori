@@ -17,9 +17,14 @@ import { TaoriError } from '@taori/shared';
 import { ConversationsRepo, MessagesRepo } from '../db/repos/index.js';
 import type { BuildServerArgs } from '../server.js';
 
-const RenameSchema = z.object({
-  title: z.string().min(1).max(120).nullable(),
-});
+const PatchSchema = z
+  .object({
+    title: z.string().min(1).max(120).nullable().optional(),
+    archived: z.boolean().optional(),
+  })
+  .refine((d) => d.title !== undefined || d.archived !== undefined, {
+    message: 'must provide title or archived',
+  });
 
 export function registerConversationsRoute(
   app: FastifyInstance,
@@ -71,19 +76,25 @@ export function registerConversationsRoute(
   app.patch<{ Params: { id: string } }>(
     '/v1/conversations/:id',
     async (req) => {
-      const parsed = RenameSchema.safeParse(req.body);
+      const parsed = PatchSchema.safeParse(req.body);
       if (!parsed.success) {
         throw new TaoriError({
           code: 'validation_error',
           message: parsed.error.errors.map((e) => e.message).join('; '),
         });
       }
-      const updated = convRepo.rename(req.params.id, parsed.data.title);
+      let updated = convRepo.get(req.params.id);
       if (!updated) {
         throw new TaoriError({
           code: 'not_found',
           message: `Conversation ${req.params.id} not found`,
         });
+      }
+      if (parsed.data.title !== undefined) {
+        updated = convRepo.rename(req.params.id, parsed.data.title) ?? updated;
+      }
+      if (parsed.data.archived !== undefined) {
+        updated = convRepo.setArchived(req.params.id, parsed.data.archived) ?? updated;
       }
       return updated;
     },

@@ -1,5 +1,13 @@
 # 04 · 数据与存储
 
+> **R5 实现对齐说明。** 以代码 + 测试为准，本文与实际 schema 已知偏差：
+> - **`files`：** `mime_type`（不是 `mime`）；`original_path`（不是 `storage_path`）；多了 `message_id` 外键；`filename` 字段不存在。
+> - **`roundtables.status`：** 实际枚举包含 `cancelled`。
+> - **`memories.scope`：** 实际枚举包含 `user`（除 `global` / `conversation`）。
+> - **`messages.source_type`：** 实际枚举包含 `tool_call`（除 `chat` / `image_gen`）。
+> - **`failure_kind`：** 实际枚举包含 `auth`（凭据/鉴权失败独立分类）。
+> - **`conversations.archived`：** 默认 `false`；通过 `PATCH /v1/conversations/:id` 切换。
+
 ## SQLite Schema（Drizzle ORM，核心 9 张表）
 
 > **类型层级说明：** 下表使用 **TypeScript/Drizzle 概念类型**（`text` / `integer` / `real` / `boolean`）描述。映射到 SQLite 实际存储类型（[storage classes](https://www.sqlite.org/datatype3.html)）时：`boolean` → `INTEGER`（0/1），`text` → `TEXT`，`integer` → `INTEGER`，`real` → `REAL`。所有时间戳为 Unix epoch 毫秒（`INTEGER`）。

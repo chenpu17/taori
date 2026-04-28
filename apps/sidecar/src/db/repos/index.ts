@@ -517,6 +517,16 @@ export class ConversationsRepo {
     return (row as ConversationRow | undefined) ?? null;
   }
 
+  setArchived(id: string, archived: boolean): ConversationRow | null {
+    const row = this.db
+      .update(conversations)
+      .set({ archived, updated_at: Date.now() })
+      .where(eq(conversations.id, id))
+      .returning()
+      .get();
+    return (row as ConversationRow | undefined) ?? null;
+  }
+
   /** Hard delete: drops messages + cost rows via FK cascades / app-level cleanup. */
   delete(id: string): boolean {
     const res = this.db.delete(conversations).where(eq(conversations.id, id)).run();

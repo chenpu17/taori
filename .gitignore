@@ -10,3 +10,4 @@ apps/desktop/src-tauri/target/
 apps/desktop/src-tauri/binaries/
 apps/sidecar/data/
 .taori-dev/
+test-results/
