@@ -121,7 +121,7 @@ function makeSseStream(chunks: string[], finishReason = 'stop'): string {
 async function seedFallbackRoundtable(
   ctx: Ctx,
   count = 3,
-  mode: 'fast' | 'deep' = 'fast',
+  mode: 'fast' | 'deep' = 'deep',
 ): Promise<{ id: string; modelIds: string[] }> {
   const prov = ctx.providers.create({
     name: 'P',
@@ -252,7 +252,7 @@ describe('M3.A.2 — POST /v1/roundtable/:id/round', () => {
   });
 
   it('fast mode: second round POST → 409 fast_mode_no_round_two', async () => {
-    const { id } = await seedFallbackRoundtable(ctx, 3);
+    const { id } = await seedFallbackRoundtable(ctx, 3, 'fast');
     vi.spyOn(globalThis, 'fetch').mockImplementation(
       async () =>
         new Response(makeSseStream(['ok']), {

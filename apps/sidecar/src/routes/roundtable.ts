@@ -34,6 +34,8 @@ import {
 import { runAnalyzer, buildFallbackOutput } from '../roundtable/analyzer.js';
 import { estimateRoundtableCostRange } from '../roundtable/cost-estimate.js';
 import { runRound } from '../roundtable/round-runner.js';
+import { runSummary } from '../roundtable/summarizer.js';
+import { renderRoundtableMarkdown } from '../roundtable/export.js';
 
 export function registerRoundtableRoute(
   app: FastifyInstance,
@@ -332,12 +334,39 @@ export function registerRoundtableRoute(
             signal: abortController.signal,
           },
         );
+
+        // Spec §6.1: fast 模式 round 1 完成后**自动**触发 summarize（同一 SSE
+        // 响应里 round_done 紧跟 summary_*）。仅在未触发 majority-fail 时执行。
+        const half = Math.ceil(rt.participants.length / 2);
+        const majorityFailed = result.failed.length >= half;
+        const shouldAutoSummarize =
+          rt.mode === 'fast' && next === 1 && !majorityFailed;
+        if (shouldAutoSummarize) {
+          rtRepo.setStatus(rt.id, 'summarizing');
+          const allMessages = rtMsgRepo.listByRoundtable(rt.id);
+          await runSummary(
+            {
+              modelsRepo,
+              providersRepo,
+              costsRepo,
+              rtRepo,
+              rtMsgRepo,
+              keystore: deps.keystore,
+              log: req.log,
+            },
+            {
+              roundtable: { ...rt, status: 'summarizing' },
+              messages: allMessages,
+              stream,
+              signal: abortController.signal,
+              revertStatusOnFail: 'round1',
+            },
+          );
+        }
+
         stream.write(
           `d:${JSON.stringify({
-            finishReason:
-              result.failed.length >= Math.ceil(rt.participants.length / 2)
-                ? 'error'
-                : 'stop',
+            finishReason: majorityFailed ? 'error' : 'stop',
             usage: { promptTokens: 0, completionTokens: 0 },
           })}\n`,
         );
@@ -497,6 +526,178 @@ export function registerRoundtableRoute(
     },
   );
 
-  // M3.A.1 placeholder so future pieces have a stable shape — quiet TS unused-var.
+  /**
+   * POST /v1/roundtable/:id/summarize — explicit summarize trigger.
+   *
+   * Used by:
+   *   - 深度模式 round 2 done → user clicks 总结
+   *   - 快速模式 auto-chain failed mid-stream → user retries
+   *   - 任何 summary_failed → 用户重试
+   *
+   * Status precondition: rt.status must be one of {round1, round2}. Other
+   * states (analyzing/summarizing/completed/failed) → 409.
+   */
+  app.post<{ Params: { id: string } }>(
+    '/v1/roundtable/:id/summarize',
+    async (req, reply) => {
+      const rt = rtRepo.get(req.params.id);
+      if (!rt) {
+        throw new TaoriError({
+          code: 'not_found',
+          message: `Roundtable ${req.params.id} not found`,
+        });
+      }
+      if (rt.status === 'analyzing') {
+        throw new TaoriError({
+          code: 'conflict',
+          message: 'roundtable_analyzing',
+          details: { hint: '话题分析尚未完成' },
+        });
+      }
+      if (rt.status === 'summarizing') {
+        throw new TaoriError({
+          code: 'conflict',
+          message: 'roundtable_busy',
+          details: { hint: '总结正在进行中' },
+        });
+      }
+      if (rt.status === 'completed' || rt.status === 'failed' || rt.status === 'cancelled') {
+        throw new TaoriError({
+          code: 'conflict',
+          message: `roundtable_${rt.status}`,
+          details: { hint: '已结束的圆桌不能再次总结' },
+        });
+      }
+      // Must have at least one round of messages with at least one complete row.
+      const messages = rtMsgRepo.listByRoundtable(rt.id);
+      const hasContent = messages.some(
+        (m) => m.status === 'complete' && m.content.trim(),
+      );
+      if (!hasContent) {
+        throw new TaoriError({
+          code: 'conflict',
+          message: 'no_content_to_summarize',
+          details: { hint: '没有任何完成的发言可总结' },
+        });
+      }
+
+      const revertStatus = rt.status; // 'round1' | 'round2'
+      rtRepo.setStatus(rt.id, 'summarizing');
+
+      const stream = new PassThrough();
+      const origin = req.headers.origin;
+      if (
+        typeof origin === 'string' &&
+        (/^https?:\/\/(127\.0\.0\.1|localhost)(:\d+)?$/.test(origin) ||
+          origin === 'tauri://localhost' ||
+          origin.startsWith('http://tauri.localhost'))
+      ) {
+        reply.header('Access-Control-Allow-Origin', origin);
+        reply.header('Vary', 'Origin');
+        reply.header('Access-Control-Expose-Headers', 'x-vercel-ai-data-stream');
+      }
+      reply
+        .type('text/plain; charset=utf-8')
+        .header('Cache-Control', 'no-cache, no-transform')
+        .header('Connection', 'keep-alive')
+        .header('x-vercel-ai-data-stream', 'v1');
+      if (typeof reply.raw.socket?.setNoDelay === 'function') {
+        reply.raw.socket.setNoDelay(true);
+      }
+
+      const abortController = new AbortController();
+      reply.raw.on('close', () => {
+        if (!stream.writableEnded) abortController.abort();
+      });
+      reply.send(stream);
+
+      stream.write(
+        `8:${JSON.stringify([
+          {
+            type: 'rt.meta',
+            roundtable_id: rt.id,
+            conversation_id: rt.conversation_id,
+            round: rt.current_round,
+          },
+        ])}\n`,
+      );
+
+      try {
+        const result = await runSummary(
+          {
+            modelsRepo,
+            providersRepo,
+            costsRepo,
+            rtRepo,
+            rtMsgRepo,
+            keystore: deps.keystore,
+            log: req.log,
+          },
+          {
+            roundtable: { ...rt, status: 'summarizing' },
+            messages,
+            stream,
+            signal: abortController.signal,
+            revertStatusOnFail: revertStatus as 'round1' | 'round2',
+          },
+        );
+        stream.write(
+          `d:${JSON.stringify({
+            finishReason: result.ok ? 'stop' : 'error',
+            usage: { promptTokens: 0, completionTokens: 0 },
+          })}\n`,
+        );
+      } catch (e) {
+        req.log.error({ err: e }, 'roundtable.summarize.unhandled');
+        // Make sure we don't leave the row stuck in 'summarizing'.
+        const fresh = rtRepo.get(rt.id);
+        if (fresh?.status === 'summarizing') {
+          rtRepo.setStatus(rt.id, revertStatus);
+        }
+        stream.write(
+          `3:${JSON.stringify(
+            `roundtable_summarize_failed: ${e instanceof Error ? e.message : String(e)}`,
+          )}\n`,
+        );
+        stream.write(
+          `d:${JSON.stringify({ finishReason: 'error', usage: { promptTokens: 0, completionTokens: 0 } })}\n`,
+        );
+      } finally {
+        stream.end();
+      }
+    },
+  );
+
+  /**
+   * GET /v1/roundtable/:id/export — render markdown per spec §3.4.
+   */
+  app.get<{ Params: { id: string } }>(
+    '/v1/roundtable/:id/export',
+    async (req, reply) => {
+      const rt = rtRepo.get(req.params.id);
+      if (!rt) {
+        throw new TaoriError({
+          code: 'not_found',
+          message: `Roundtable ${req.params.id} not found`,
+        });
+      }
+      const messages = rtMsgRepo.listByRoundtable(rt.id);
+      const messageIds = messages.map((m) => m.id);
+      const costs = costsRepo.listForRoundtable({
+        conversationId: rt.conversation_id,
+        roundtableId: rt.id,
+        messageIds,
+      });
+      const md = renderRoundtableMarkdown({ roundtable: rt, messages, costs });
+      reply.header('Content-Type', 'text/markdown; charset=utf-8');
+      reply.header(
+        'Content-Disposition',
+        `attachment; filename="roundtable-${rt.id}.md"`,
+      );
+      return md;
+    },
+  );
+
+  // Reserve `z` for future request-body schemas.
   void z;
 }

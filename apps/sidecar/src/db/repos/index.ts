@@ -669,6 +669,29 @@ export class CostsRepo {
   }
 
   /**
+   * M3.A.3 — list every cost record tied to a roundtable (analyzer + each
+   * participant message + summarizer). Filters by conversation + feature so
+   * we don't accidentally pull in unrelated chat records.
+   */
+  listForRoundtable(args: {
+    conversationId: string;
+    roundtableId: string;
+    messageIds: string[];
+  }): CostRecord[] {
+    const ids = new Set<string>([args.roundtableId, ...args.messageIds]);
+    if (ids.size === 0) return [];
+    const rows = this.db
+      .select()
+      .from(cost_records)
+      .where(
+        sql`conversation_id = ${args.conversationId} AND feature = 'roundtable'`,
+      )
+      .orderBy(asc(cost_records.created_at))
+      .all() as CostRecord[];
+    return rows.filter((r) => r.source_id !== null && ids.has(r.source_id));
+  }
+
+  /**
    * Pre-send estimate input (M1 §5.1): rolling average output_tokens for a
    * given model id. Limits the sample to the most recent 50 successful calls
    * to keep estimates responsive after price/behaviour changes. Returns
