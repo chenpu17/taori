@@ -120,6 +120,42 @@ CREATE TABLE IF NOT EXISTS memories (
   updated_at INTEGER NOT NULL
 );
 CREATE UNIQUE INDEX IF NOT EXISTS memories_scope_key_uniq ON memories(scope, scope_id, key);
+
+CREATE TABLE IF NOT EXISTS roundtables (
+  id TEXT PRIMARY KEY,
+  conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+  topic TEXT NOT NULL,
+  mode TEXT NOT NULL,
+  participants TEXT NOT NULL,
+  summarizer_model_id TEXT REFERENCES models(id) ON DELETE SET NULL,
+  analyzer_fallback INTEGER NOT NULL DEFAULT 0,
+  status TEXT NOT NULL,
+  current_round INTEGER NOT NULL DEFAULT 0,
+  summary TEXT,
+  estimated_cost_usd_low REAL,
+  estimated_cost_usd_high REAL,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL,
+  completed_at INTEGER
+);
+CREATE INDEX IF NOT EXISTS roundtables_conv_idx ON roundtables(conversation_id, created_at);
+
+CREATE TABLE IF NOT EXISTS roundtable_messages (
+  id TEXT PRIMARY KEY,
+  roundtable_id TEXT NOT NULL REFERENCES roundtables(id) ON DELETE CASCADE,
+  round INTEGER NOT NULL,
+  participant_index INTEGER NOT NULL,
+  model_id TEXT REFERENCES models(id) ON DELETE SET NULL,
+  content TEXT NOT NULL DEFAULT '',
+  status TEXT NOT NULL DEFAULT 'pending',
+  classification TEXT,
+  error_message TEXT,
+  visible_to_others INTEGER NOT NULL DEFAULT 1,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS roundtable_messages_rt_idx ON roundtable_messages(roundtable_id, round, participant_index);
+CREATE UNIQUE INDEX IF NOT EXISTS roundtable_messages_uniq ON roundtable_messages(roundtable_id, round, participant_index);
 `;
 
 export type Db = BetterSQLite3Database<typeof schema>;

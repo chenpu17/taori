@@ -191,3 +191,68 @@ export const cost_records = sqliteTable(
     sourceIdx: index('cost_records_source_idx').on(t.source_type, t.source_id),
   }),
 );
+
+/**
+ * M3.A roundtable instance. participants/summary stored as JSON text columns
+ * (Drizzle serialization left to repo). status/mode are constrained to a
+ * small enum at the application layer (see RoundtableStatus / RoundtableMode
+ * in @taori/shared).
+ */
+export const roundtables = sqliteTable(
+  'roundtables',
+  {
+    id: text('id').primaryKey(),
+    conversation_id: text('conversation_id')
+      .notNull()
+      .references(() => conversations.id, { onDelete: 'cascade' }),
+    topic: text('topic').notNull(),
+    mode: text('mode').notNull(),
+    participants: text('participants').notNull(),
+    summarizer_model_id: text('summarizer_model_id').references(() => models.id, {
+      onDelete: 'set null',
+    }),
+    analyzer_fallback: integer('analyzer_fallback', { mode: 'boolean' })
+      .notNull()
+      .default(false),
+    status: text('status').notNull(),
+    current_round: integer('current_round').notNull().default(0),
+    summary: text('summary'),
+    estimated_cost_usd_low: real('estimated_cost_usd_low'),
+    estimated_cost_usd_high: real('estimated_cost_usd_high'),
+    created_at: integer('created_at').notNull(),
+    updated_at: integer('updated_at').notNull(),
+    completed_at: integer('completed_at'),
+  },
+  (t) => ({
+    convIdx: index('roundtables_conv_idx').on(t.conversation_id, t.created_at),
+  }),
+);
+
+export const roundtable_messages = sqliteTable(
+  'roundtable_messages',
+  {
+    id: text('id').primaryKey(),
+    roundtable_id: text('roundtable_id')
+      .notNull()
+      .references(() => roundtables.id, { onDelete: 'cascade' }),
+    round: integer('round').notNull(),
+    participant_index: integer('participant_index').notNull(),
+    model_id: text('model_id').references(() => models.id, {
+      onDelete: 'set null',
+    }),
+    content: text('content').notNull().default(''),
+    status: text('status').notNull().default('pending'),
+    classification: text('classification'),
+    error_message: text('error_message'),
+    visible_to_others: integer('visible_to_others', { mode: 'boolean' })
+      .notNull()
+      .default(true),
+    created_at: integer('created_at').notNull(),
+    updated_at: integer('updated_at').notNull(),
+  },
+  (t) => ({
+    rtIdx: index('roundtable_messages_rt_idx').on(t.roundtable_id, t.round, t.participant_index),
+    uniqIdx: uniqueIndex('roundtable_messages_uniq')
+      .on(t.roundtable_id, t.round, t.participant_index),
+  }),
+);

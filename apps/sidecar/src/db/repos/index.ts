@@ -9,7 +9,25 @@
 
 import { eq, and, isNotNull, asc, sql } from 'drizzle-orm';
 import { type Db } from '../index.js';
-import { providers, models, conversations, messages, cost_records, memories, files } from '../schema.js';
+import {
+  providers,
+  models,
+  conversations,
+  messages,
+  cost_records,
+  memories,
+  files,
+  roundtables,
+  roundtable_messages,
+} from '../schema.js';
+import type {
+  Participant,
+  RoundtableStoredMode,
+  RoundtableStatus,
+  SummaryStorage,
+  RoundtableMessageStatus,
+  RoundtableMessageClassification,
+} from '@taori/shared';
 import {
   makeId,
   type Provider,
@@ -894,5 +912,260 @@ export class FilesRepo {
       .set({ extracted_text: text })
       .where(eq(files.id, id))
       .run();
+  }
+}
+
+// ===========================================================================
+// M3.A — Roundtables / Roundtable messages
+// ===========================================================================
+
+export interface RoundtableInsert {
+  id?: string;
+  conversation_id: string;
+  topic: string;
+  mode: RoundtableStoredMode;
+  participants: Participant[];
+  summarizer_model_id: string | null;
+  analyzer_fallback: boolean;
+  status: RoundtableStatus;
+  current_round?: number;
+  estimated_cost_usd_low: number | null;
+  estimated_cost_usd_high: number | null;
+}
+
+export interface RoundtableRow {
+  id: string;
+  conversation_id: string;
+  topic: string;
+  mode: RoundtableStoredMode;
+  participants: Participant[];
+  summarizer_model_id: string | null;
+  analyzer_fallback: boolean;
+  status: RoundtableStatus;
+  current_round: number;
+  summary: SummaryStorage | null;
+  estimated_cost_usd_low: number | null;
+  estimated_cost_usd_high: number | null;
+  created_at: number;
+  updated_at: number;
+  completed_at: number | null;
+}
+
+function decodeRoundtable(row: any): RoundtableRow {
+  return {
+    id: row.id,
+    conversation_id: row.conversation_id,
+    topic: row.topic,
+    mode: row.mode as RoundtableStoredMode,
+    participants: JSON.parse(row.participants) as Participant[],
+    summarizer_model_id: row.summarizer_model_id,
+    analyzer_fallback: !!row.analyzer_fallback,
+    status: row.status as RoundtableStatus,
+    current_round: row.current_round,
+    summary: row.summary ? (JSON.parse(row.summary) as SummaryStorage) : null,
+    estimated_cost_usd_low: row.estimated_cost_usd_low,
+    estimated_cost_usd_high: row.estimated_cost_usd_high,
+    created_at: row.created_at,
+    updated_at: row.updated_at,
+    completed_at: row.completed_at,
+  };
+}
+
+export class RoundtablesRepo {
+  constructor(private db: Db) {}
+
+  insert(input: RoundtableInsert): RoundtableRow {
+    const id = input.id ?? makeId('roundtable');
+    const now = Date.now();
+    const row = this.db
+      .insert(roundtables)
+      .values({
+        id,
+        conversation_id: input.conversation_id,
+        topic: input.topic,
+        mode: input.mode,
+        participants: JSON.stringify(input.participants),
+        summarizer_model_id: input.summarizer_model_id,
+        analyzer_fallback: input.analyzer_fallback,
+        status: input.status,
+        current_round: input.current_round ?? 0,
+        summary: null,
+        estimated_cost_usd_low: input.estimated_cost_usd_low,
+        estimated_cost_usd_high: input.estimated_cost_usd_high,
+        created_at: now,
+        updated_at: now,
+        completed_at: null,
+      })
+      .returning()
+      .get();
+    return decodeRoundtable(row);
+  }
+
+  get(id: string): RoundtableRow | null {
+    const row = this.db
+      .select()
+      .from(roundtables)
+      .where(eq(roundtables.id, id))
+      .get();
+    return row ? decodeRoundtable(row) : null;
+  }
+
+  listByConversation(conversationId: string): RoundtableRow[] {
+    const rows = this.db
+      .select()
+      .from(roundtables)
+      .where(eq(roundtables.conversation_id, conversationId))
+      .orderBy(asc(roundtables.created_at))
+      .all();
+    return rows.map(decodeRoundtable);
+  }
+
+  setStatus(id: string, status: RoundtableStatus): void {
+    this.db
+      .update(roundtables)
+      .set({
+        status,
+        updated_at: Date.now(),
+        completed_at:
+          status === 'completed' || status === 'failed' ? Date.now() : null,
+      })
+      .where(eq(roundtables.id, id))
+      .run();
+  }
+
+  setRound(id: string, round: number): void {
+    this.db
+      .update(roundtables)
+      .set({ current_round: round, updated_at: Date.now() })
+      .where(eq(roundtables.id, id))
+      .run();
+  }
+
+  setSummary(id: string, summary: SummaryStorage): void {
+    this.db
+      .update(roundtables)
+      .set({ summary: JSON.stringify(summary), updated_at: Date.now() })
+      .where(eq(roundtables.id, id))
+      .run();
+  }
+}
+
+export interface RoundtableMessageInsert {
+  roundtable_id: string;
+  round: number;
+  participant_index: number;
+  model_id: string | null;
+  content?: string;
+  status?: RoundtableMessageStatus;
+  visible_to_others?: boolean;
+}
+
+export interface RoundtableMessageRow {
+  id: string;
+  roundtable_id: string;
+  round: number;
+  participant_index: number;
+  model_id: string | null;
+  content: string;
+  status: RoundtableMessageStatus;
+  classification: RoundtableMessageClassification | null;
+  error_message: string | null;
+  visible_to_others: boolean;
+  created_at: number;
+  updated_at: number;
+}
+
+function decodeRoundtableMessage(row: any): RoundtableMessageRow {
+  return {
+    id: row.id,
+    roundtable_id: row.roundtable_id,
+    round: row.round,
+    participant_index: row.participant_index,
+    model_id: row.model_id,
+    content: row.content ?? '',
+    status: row.status as RoundtableMessageStatus,
+    classification: row.classification as RoundtableMessageClassification | null,
+    error_message: row.error_message,
+    visible_to_others: !!row.visible_to_others,
+    created_at: row.created_at,
+    updated_at: row.updated_at,
+  };
+}
+
+export class RoundtableMessagesRepo {
+  constructor(private db: Db) {}
+
+  insert(input: RoundtableMessageInsert): RoundtableMessageRow {
+    const id = makeId('roundtable_message');
+    const now = Date.now();
+    const row = this.db
+      .insert(roundtable_messages)
+      .values({
+        id,
+        roundtable_id: input.roundtable_id,
+        round: input.round,
+        participant_index: input.participant_index,
+        model_id: input.model_id,
+        content: input.content ?? '',
+        status: input.status ?? 'pending',
+        classification: null,
+        error_message: null,
+        visible_to_others: input.visible_to_others ?? true,
+        created_at: now,
+        updated_at: now,
+      })
+      .returning()
+      .get();
+    return decodeRoundtableMessage(row);
+  }
+
+  /** UPDATE the row in place — used during streaming and retry. */
+  update(
+    id: string,
+    patch: Partial<{
+      content: string;
+      status: RoundtableMessageStatus;
+      classification: RoundtableMessageClassification | null;
+      error_message: string | null;
+      model_id: string | null;
+    }>,
+  ): void {
+    this.db
+      .update(roundtable_messages)
+      .set({ ...patch, updated_at: Date.now() })
+      .where(eq(roundtable_messages.id, id))
+      .run();
+  }
+
+  listByRoundtable(roundtableId: string): RoundtableMessageRow[] {
+    const rows = this.db
+      .select()
+      .from(roundtable_messages)
+      .where(eq(roundtable_messages.roundtable_id, roundtableId))
+      .orderBy(
+        asc(roundtable_messages.round),
+        asc(roundtable_messages.participant_index),
+      )
+      .all();
+    return rows.map(decodeRoundtableMessage);
+  }
+
+  findOne(
+    roundtableId: string,
+    round: number,
+    participantIndex: number,
+  ): RoundtableMessageRow | null {
+    const row = this.db
+      .select()
+      .from(roundtable_messages)
+      .where(
+        and(
+          eq(roundtable_messages.roundtable_id, roundtableId),
+          eq(roundtable_messages.round, round),
+          eq(roundtable_messages.participant_index, participantIndex),
+        ),
+      )
+      .get();
+    return row ? decodeRoundtableMessage(row) : null;
   }
 }

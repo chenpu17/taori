@@ -13,6 +13,7 @@ export const ID_PREFIXES = {
   message: 'msg_',
   file: 'file_',
   roundtable: 'rt_',
+  roundtable_message: 'rtmsg_',
   cost: 'cost_',
   memory: 'mem_',
 } as const;

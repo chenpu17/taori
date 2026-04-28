@@ -26,6 +26,7 @@ import { registerMemoriesRoute } from './routes/memories.js';
 import { registerConversationsRoute } from './routes/conversations.js';
 import { registerAdminRoute } from './routes/admin.js';
 import { registerToolsRoute } from './routes/tools.js';
+import { registerRoundtableRoute } from './routes/roundtable.js';
 import { CapabilityBus } from './bus/index.js';
 import { createFileReadTool } from './bus/builtins/file_read.js';
 import { createImageGenerateTool } from './bus/builtins/image_generate.js';
@@ -146,6 +147,7 @@ export function buildServer(args: BuildServerArgs): FastifyInstance {
   );
 
   registerToolsRoute(app, { bus });
+  registerRoundtableRoute(app, args);
 
   return app;
 }
