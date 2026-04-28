@@ -18,7 +18,7 @@
  * "本会话不再提醒" only writes `cost_confirm_disabled_conversations` (does
  * NOT pollute M2's per-model `disabled_models` list).
  */
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import type { ReactElement } from 'react';
 import { api } from './api.js';
 import { formatUsd, ROUNDTABLE_DEFAULTS, ROUNDTABLE_MEMORY_KEYS } from '@taori/shared';
@@ -78,6 +78,15 @@ export function RoundtableLaunchDialog(
   const [step, setStep] = useState<Step>({ kind: 'edit' });
   const [prefs, setPrefs] = useState<ConfirmPrefs>(DEFAULT_PREFS);
   const [skipConv, setSkipConv] = useState(false);
+  // Tracks whether the component is still mounted; if a parent unmounts the
+  // dialog during analysis (rare edge case), avoid setState-after-unmount.
+  const mountedRef = useRef(true);
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
 
   // Load roundtable cost-confirm prefs once on mount.
   useEffect(() => {
@@ -126,17 +135,21 @@ export function RoundtableLaunchDialog(
     };
   }, [conversationId]);
 
-  // Esc dismisses the dialog (cancel path).
+  // Esc dismisses the dialog (cancel path) — but NOT during analyzing,
+  // because the server-side createRoundtable call is already in flight and
+  // closing here would orphan that roundtable record (spec §5.1: 启动调用
+  // 在用户点开始后才发出，分析期间应等待结果).
   useEffect(() => {
     const onKey = (e: KeyboardEvent): void => {
       if (e.key === 'Escape') {
         e.preventDefault();
+        if (step.kind === 'analyzing') return;
         onCancel();
       }
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [onCancel]);
+  }, [onCancel, step.kind]);
 
   const trimmedTopic = useMemo(() => topic.trim(), [topic]);
 
@@ -149,6 +162,7 @@ export function RoundtableLaunchDialog(
         mode,
         ...(conversationId ? { conversation_id: conversationId } : {}),
       });
+      if (!mountedRef.current) return;
       const low = created.estimated_cost_usd_low ?? 0;
       const high = created.estimated_cost_usd_high ?? 0;
       const inDisabled = prefs.disabledConvs.includes(created.conversation_id);
@@ -167,6 +181,7 @@ export function RoundtableLaunchDialog(
         needsConfirm,
       });
     } catch (e) {
+      if (!mountedRef.current) return;
       setStep({
         kind: 'error',
         message: e instanceof Error ? e.message : String(e),

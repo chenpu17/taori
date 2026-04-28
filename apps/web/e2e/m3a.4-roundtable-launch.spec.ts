@@ -107,6 +107,32 @@ test('M3.A.4 cancel from edit step closes dialog without creating roundtable', a
   await expect(page.getByTestId('roundtable-active-banner')).toHaveCount(0);
 });
 
+test('M3.A.4 Esc during analyzing is ignored (no orphan close)', async ({
+  page,
+}) => {
+  // Slow down the POST so we can press Esc while it's in flight.
+  await page.route('**/v1/roundtable', async (route) => {
+    if (route.request().method() === 'POST') {
+      await new Promise((r) => setTimeout(r, 1500));
+    }
+    await route.continue();
+  });
+
+  await page.goto('/');
+  await expect(page.getByTestId('chat-panel')).toBeVisible({ timeout: 10_000 });
+  await page.getByTestId('composer-input').fill('topic');
+  await page.getByTestId('composer-roundtable').click();
+  const dlg = page.getByTestId('roundtable-launch-dialog');
+  await dlg.getByTestId('roundtable-launch-start').click();
+  await expect(dlg.getByTestId('roundtable-analyzing')).toBeVisible();
+  // Press Esc — should NOT close the dialog.
+  await page.keyboard.press('Escape');
+  // Wait for analyzer to resolve and preview to appear.
+  await expect(dlg.getByTestId('roundtable-preview')).toBeVisible({
+    timeout: 15_000,
+  });
+});
+
 test('M3.A.4 disabled_conversations skips confirm checkbox visibility', async ({
   page,
 }) => {
