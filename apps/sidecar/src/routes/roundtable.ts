@@ -48,6 +48,16 @@ export function registerRoundtableRoute(
   const costsRepo = new CostsRepo(deps.db);
   const rtRepo = new RoundtablesRepo(deps.db);
   const rtMsgRepo = new RoundtableMessagesRepo(deps.db);
+  // M3.A.6 — In-memory in-flight tracker. The DB `status` column is a coarse
+  // FSM that lingers in 'round1' / 'round2' / 'summarizing' even after the
+  // stream finishes (spec has no idle-between-rounds state). To safely allow
+  // 再来一轮 / 总结结束 / 重试 / 取消 we instead track whether a stream is
+  // **actively** running per roundtable id.
+  //
+  // ASSUMES SINGLE SIDECAR PROCESS PER DESKTOP INSTANCE (see
+  // docs/architecture/03-process-and-ipc.md). If horizontal scaling is ever
+  // introduced, migrate this to a SQLite advisory flag or external lock.
+  const inFlightStreams = new Set<string>();
 
   app.post('/v1/roundtable', async (req, reply) => {
     const parsed = CreateRoundtableRequestSchema.safeParse(req.body);
@@ -318,11 +328,19 @@ export function registerRoundtableRoute(
           details: { hint: '已结束的圆桌不能继续' },
         });
       }
-      if (rt.status === 'round1' || rt.status === 'round2' || rt.status === 'summarizing') {
+      if (inFlightStreams.has(rt.id)) {
         throw new TaoriError({
           code: 'conflict',
           message: 'roundtable_busy',
           details: { hint: '圆桌正在运行中' },
+        });
+      }
+      // Reject if the round being requested has already been recorded.
+      if (next <= (rt.current_round ?? 0)) {
+        throw new TaoriError({
+          code: 'conflict',
+          message: 'round_already_done',
+          details: { hint: '该轮已完成' },
         });
       }
 
@@ -370,6 +388,7 @@ export function registerRoundtableRoute(
       );
 
       try {
+        inFlightStreams.add(rt.id);
         const result = await runRound(
           {
             modelsRepo,
@@ -446,6 +465,7 @@ export function registerRoundtableRoute(
         );
         rtRepo.setStatus(rt.id, 'failed');
       } finally {
+        inFlightStreams.delete(rt.id);
         stream.end();
       }
     },
@@ -495,6 +515,13 @@ export function registerRoundtableRoute(
         throw new TaoriError({
           code: 'not_found',
           message: 'roundtable message row not found — run the round first',
+        });
+      }
+      if (inFlightStreams.has(rt.id)) {
+        throw new TaoriError({
+          code: 'conflict',
+          message: 'roundtable_busy',
+          details: { hint: '圆桌正在运行中' },
         });
       }
 
@@ -551,6 +578,7 @@ export function registerRoundtableRoute(
       // records and recordFailure correctly, we do the inline path here only
       // for the single message; reuse helper functions where possible.
       try {
+        inFlightStreams.add(rt.id);
         const priorMessages =
           round === 2 ? rtMsgRepo.listByRoundtable(rt.id) : [];
         await runRound(
@@ -585,6 +613,7 @@ export function registerRoundtableRoute(
           `d:${JSON.stringify({ finishReason: 'error', usage: { promptTokens: 0, completionTokens: 0 } })}\n`,
         );
       } finally {
+        inFlightStreams.delete(rt.id);
         stream.end();
       }
     },
@@ -630,6 +659,13 @@ export function registerRoundtableRoute(
           code: 'conflict',
           message: `roundtable_${rt.status}`,
           details: { hint: '已结束的圆桌不能再次总结' },
+        });
+      }
+      if (inFlightStreams.has(rt.id)) {
+        throw new TaoriError({
+          code: 'conflict',
+          message: 'roundtable_busy',
+          details: { hint: '圆桌正在运行中' },
         });
       }
       // Must have at least one round of messages with at least one complete row.
@@ -687,6 +723,7 @@ export function registerRoundtableRoute(
       );
 
       try {
+        inFlightStreams.add(rt.id);
         const result = await runSummary(
           {
             modelsRepo,
@@ -727,6 +764,7 @@ export function registerRoundtableRoute(
           `d:${JSON.stringify({ finishReason: 'error', usage: { promptTokens: 0, completionTokens: 0 } })}\n`,
         );
       } finally {
+        inFlightStreams.delete(rt.id);
         stream.end();
       }
     },
