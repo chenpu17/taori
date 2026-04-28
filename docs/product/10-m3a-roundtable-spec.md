@@ -134,6 +134,7 @@
 
 ```ts
 type RoundtableAnnotation =
+  | { type: 'rt.meta'; roundtable_id: string; conversation_id: string; round: number; retry_index?: number }
   | { type: 'rt.round_start'; round: number; participants_total: number }
   | { type: 'rt.participant_delta'; participant_index: number; model_id: string; text_chunk: string }
   | { type: 'rt.participant_done'; participant_index: number; model_id: string; content: string; cost_record_id: string }

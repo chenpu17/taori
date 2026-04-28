@@ -136,6 +136,13 @@ export type RoundtableMessage = z.infer<typeof RoundtableMessageSchema>;
 
 /** Annotation payloads streamed via the data-stream `8:` frame. */
 export type RoundtableAnnotation =
+  | {
+      type: 'rt.meta';
+      roundtable_id: string;
+      conversation_id: string;
+      round: number;
+      retry_index?: number;
+    }
   | { type: 'rt.round_start'; round: number; participants_total: number }
   | {
       type: 'rt.participant_delta';

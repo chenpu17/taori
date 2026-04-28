@@ -305,7 +305,7 @@ export function registerRoundtableRoute(
       stream.write(
         `8:${JSON.stringify([
           {
-            type: 'meta',
+            type: 'rt.meta',
             roundtable_id: rt.id,
             conversation_id: rt.conversation_id,
             round: next,
@@ -440,7 +440,7 @@ export function registerRoundtableRoute(
       stream.write(
         `8:${JSON.stringify([
           {
-            type: 'meta',
+            type: 'rt.meta',
             roundtable_id: rt.id,
             conversation_id: rt.conversation_id,
             round,
