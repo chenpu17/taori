@@ -1,0 +1,12 @@
+{
+  "name": "@taori/desktop",
+  "version": "0.0.0",
+  "private": true,
+  "scripts": {
+    "tauri": "tauri",
+    "build": "tauri build"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "2.1.0"
+  }
+}

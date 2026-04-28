@@ -1,0 +1,38 @@
+{
+  "name": "@taori/sidecar",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "main": "./dist/index.js",
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "start": "node dist/index.js",
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "dependencies": {
+    "@ai-sdk/openai": "1.0.20",
+    "@fastify/cors": "10.0.1",
+    "@taori/shared": "workspace:*",
+    "ai": "4.0.27",
+    "better-sqlite3": "11.7.0",
+    "dotenv": "16.4.7",
+    "drizzle-orm": "0.38.2",
+    "fastify": "5.2.0",
+    "fastify-type-provider-zod": "4.0.2",
+    "nanoid": "5.0.9",
+    "pdf-parse": "1.1.1",
+    "undici": "7.2.0",
+    "zod": "3.25.76"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "7.6.12",
+    "@types/node": "22.10.2",
+    "@types/pdf-parse": "^1.1.5",
+    "tsx": "4.19.2",
+    "typescript": "5.6.3",
+    "vitest": "2.1.8"
+  }
+}
