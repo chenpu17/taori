@@ -464,6 +464,33 @@ describe('M3.A.3 — fast-mode auto-chain summarize via POST /round', () => {
     expect(call).toBe(3);
     expect(ctx.rt.get(id)!.status).toBe('failed');
   });
+  it('fast mode all participants empty content → auto-chain skipped', async () => {
+    const { id } = await seed(ctx, { mode: 'fast', seedMessages: false, status: 'analyzing' });
+    ctx.rt.setStatus(id, 'analyzing');
+
+    let call = 0;
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async () => {
+      call++;
+      // All 3 participants succeed but with empty content.
+      return new Response(makeSseStream(['']), {
+        status: 200,
+        headers: { 'content-type': 'text/event-stream' },
+      });
+    });
+
+    const res = await ctx.app.inject({
+      method: 'POST',
+      url: `/v1/roundtable/${id}/round`,
+      headers: { authorization: `Bearer ${bearer}` },
+    });
+    expect(res.statusCode).toBe(200);
+    expect(res.payload).not.toContain('"rt.summary_delta"');
+    expect(res.payload).not.toContain('"rt.summary_done"');
+    // No summarizer call — only 3 participant calls.
+    expect(call).toBe(3);
+    // Status stays at round1 — caller may retry participants then summarize.
+    expect(ctx.rt.get(id)!.status).toBe('round1');
+  });
 });
 
 describe('M3.A.3 — GET /v1/roundtable/:id/export', () => {
@@ -571,3 +598,4 @@ describe('M3.A.3 — GET /v1/roundtable/:id/export', () => {
     expect(res.statusCode).toBe(404);
   });
 });
+

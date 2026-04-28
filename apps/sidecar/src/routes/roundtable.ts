@@ -342,8 +342,17 @@ export function registerRoundtableRoute(
         const shouldAutoSummarize =
           rt.mode === 'fast' && next === 1 && !majorityFailed;
         if (shouldAutoSummarize) {
-          rtRepo.setStatus(rt.id, 'summarizing');
           const allMessages = rtMsgRepo.listByRoundtable(rt.id);
+          const hasContent = allMessages.some(
+            (m) => m.status === 'complete' && m.content.trim().length > 0,
+          );
+          if (!hasContent) {
+            req.log.warn(
+              { roundtable_id: rt.id },
+              'auto_chain_skipped_no_content',
+            );
+          } else {
+          rtRepo.setStatus(rt.id, 'summarizing');
           await runSummary(
             {
               modelsRepo,
@@ -362,6 +371,7 @@ export function registerRoundtableRoute(
               revertStatusOnFail: 'round1',
             },
           );
+          }
         }
 
         stream.write(
