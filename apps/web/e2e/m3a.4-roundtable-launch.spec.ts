@@ -90,7 +90,7 @@ test('M3.A.4 launch dialog → analyzer fallback → preview → continue → ba
   // Continue → banner appears, dialog closes.
   await dlg.getByTestId('roundtable-launch-continue').click();
   await expect(dlg).toBeHidden();
-  await expect(page.getByTestId('roundtable-active-banner')).toBeVisible();
+  await expect(page.getByTestId('roundtable-panel')).toBeVisible();
 });
 
 test('M3.A.4 cancel from edit step closes dialog without creating roundtable', async ({
@@ -104,7 +104,7 @@ test('M3.A.4 cancel from edit step closes dialog without creating roundtable', a
   await expect(dlg).toBeVisible();
   await dlg.getByTestId('roundtable-launch-cancel').click();
   await expect(dlg).toBeHidden();
-  await expect(page.getByTestId('roundtable-active-banner')).toHaveCount(0);
+  await expect(page.getByTestId('roundtable-panel')).toHaveCount(0);
 });
 
 test('M3.A.4 Esc during analyzing is ignored (no orphan close)', async ({

@@ -1050,7 +1050,11 @@ export class RoundtablesRepo {
         status,
         updated_at: Date.now(),
         completed_at:
-          status === 'completed' || status === 'failed' ? Date.now() : null,
+          status === 'completed' ||
+          status === 'failed' ||
+          status === 'cancelled'
+            ? Date.now()
+            : null,
       })
       .where(eq(roundtables.id, id))
       .run();

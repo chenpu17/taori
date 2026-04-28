@@ -6,6 +6,7 @@ import { api } from './api.js';
 import { Onboarding } from './Onboarding.js';
 import { Settings } from './Settings.js';
 import { RoundtableLaunchDialog } from './Roundtable.js';
+import { RoundtablePanel } from './RoundtablePanel.js';
 import { priceTier, PRICE_TIER_LABEL, formatUsd, estimateInputTokens, estimateCostUsd } from '@taori/shared';
 import type { Model } from '@taori/shared';
 
@@ -906,6 +907,26 @@ function ChatPanel({
     };
   }, [conversationId, setMessages]);
 
+  // M3.A.5 — when conversation switches, also detect whether this
+  // conversation has an associated roundtable and restore the panel.
+  useEffect(() => {
+    if (!conversationId) {
+      setActiveRoundtableId(null);
+      return;
+    }
+    let cancelled = false;
+    api
+      .getActiveRoundtableForConversation(conversationId)
+      .then((res) => {
+        if (cancelled) return;
+        setActiveRoundtableId(res.roundtable_id);
+      })
+      .catch((e) => console.warn('[roundtable] detect failed:', e));
+    return () => {
+      cancelled = true;
+    };
+  }, [conversationId]);
+
   // M2.1 — when the user switches conversations, clear per-message
   // bookkeeping and the orphan-card binding so we don't accidentally render
   // an old failure card under the new conversation. We intentionally keep
@@ -1138,6 +1159,13 @@ function ChatPanel({
           </span>
         )}
       </div>
+      {activeRoundtableId ? (
+        <RoundtablePanel
+          roundtableId={activeRoundtableId}
+          onExit={() => setActiveRoundtableId(null)}
+        />
+      ) : (
+        <>
       <div className="messages" data-testid="messages">
         {historyLoading && (
           <div className="msg system" data-testid="history-loading">加载历史…</div>
@@ -1401,6 +1429,8 @@ function ChatPanel({
         realtime={realtime}
         onScopeClick={(scope) => setCostPanelScope(scope)}
       />
+        </>
+      )}
       {pendingConfirm && (
         <CostConfirmDialog
           estimate={pendingConfirm.estimate}
@@ -1456,22 +1486,7 @@ function ChatPanel({
           }}
         />
       )}
-      {activeRoundtableId && (
-        <div
-          className="roundtable-banner"
-          data-testid="roundtable-active-banner"
-          role="status"
-        >
-          🔍 圆桌已创建（id: <code>{activeRoundtableId}</code>）。圆桌面板将在后续阶段渲染。
-          <button
-            type="button"
-            data-testid="roundtable-banner-dismiss"
-            onClick={() => setActiveRoundtableId(null)}
-          >
-            ×
-          </button>
-        </div>
-      )}
+      {activeRoundtableId && null}
     </div>
   );
 }

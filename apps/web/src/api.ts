@@ -288,6 +288,14 @@ export const api = {
     ),
   getRoundtable: (id: string) =>
     authedFetch(`/v1/roundtable/${id}`).then((r) =>
-      json<{ roundtable: Roundtable; messages: RoundtableMessage[] }>(r),
+      json<{
+        roundtable: Roundtable;
+        messages: RoundtableMessage[];
+        total_cost_usd: number;
+      }>(r),
+    ),
+  getActiveRoundtableForConversation: (id: string) =>
+    authedFetch(`/v1/conversations/${id}/roundtable`).then((r) =>
+      json<{ roundtable_id: string | null }>(r),
     ),
 };

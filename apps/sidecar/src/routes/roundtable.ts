@@ -222,8 +222,62 @@ export function registerRoundtableRoute(
       });
     }
     const messages = rtMsgRepo.listByRoundtable(rt.id);
-    return { roundtable: rt, messages };
+    const costs = costsRepo.listForRoundtable({
+      conversationId: rt.conversation_id,
+      roundtableId: rt.id,
+      messageIds: messages.map((m) => m.id),
+    });
+    const total_cost_usd = costs.reduce(
+      (s, c) => s + (c.actual_cost_usd ?? 0),
+      0,
+    );
+    return { roundtable: rt, messages, total_cost_usd };
   });
+
+  /**
+   * POST /v1/roundtable/:id/cancel — user-initiated cancel.
+   *
+   * Marks status='cancelled' if not already terminal. Does NOT abort an
+   * in-flight stream (the renderer aborts via AbortController locally); the
+   * sidecar guarantees subsequent /round and /summarize calls reject with 409
+   * because cancelled is a terminal status.
+   */
+  app.post<{ Params: { id: string } }>(
+    '/v1/roundtable/:id/cancel',
+    async (req, reply) => {
+      const rt = rtRepo.get(req.params.id);
+      if (!rt) {
+        throw new TaoriError({
+          code: 'not_found',
+          message: `Roundtable ${req.params.id} not found`,
+        });
+      }
+      if (
+        rt.status === 'completed' ||
+        rt.status === 'failed' ||
+        rt.status === 'cancelled'
+      ) {
+        return reply.code(200).send({ ok: true, status: rt.status });
+      }
+      rtRepo.setStatus(rt.id, 'cancelled');
+      return reply.code(200).send({ ok: true, status: 'cancelled' });
+    },
+  );
+
+  /**
+   * GET /v1/conversations/:id/roundtable — returns the most recent roundtable
+   * associated with the given conversation, or `{roundtable_id: null}` if none.
+   * Used by the renderer to restore the roundtable panel on conversation
+   * switch (spec §5.3).
+   */
+  app.get<{ Params: { id: string } }>(
+    '/v1/conversations/:id/roundtable',
+    async (req) => {
+      const list = rtRepo.listByConversation(req.params.id);
+      const last = list[list.length - 1];
+      return { roundtable_id: last?.id ?? null };
+    },
+  );
 
   /**
    * POST /v1/roundtable/:id/round — start the next round (current_round + 1).
