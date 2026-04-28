@@ -221,4 +221,116 @@ describe('providers + models', () => {
     });
     expect(res.statusCode).toBe(404);
   });
+
+  // ───────────────────────────── MC-3 reorder ─────────────────────────────
+  it('POST /v1/models/reorder updates fallback_order in submitted order', async () => {
+    // 1. seed a provider with three chat models. We bypass discovery and
+    // directly POST /v1/models to keep the test focused on the reorder route.
+    let res = await app.inject({
+      method: 'POST',
+      url: '/v1/providers',
+      headers: authJson,
+      payload: {
+        name: 'P-MC3',
+        type: 'openrouter',
+        base_url: 'https://openrouter.ai/api/v1',
+      },
+    });
+    expect(res.statusCode).toBe(201);
+    const prov = res.json();
+
+    const ids: string[] = [];
+    for (const name of ['m-a', 'm-b', 'm-c']) {
+      res = await app.inject({
+        method: 'POST',
+        url: '/v1/models',
+        headers: authJson,
+        payload: {
+          provider_id: prov.id,
+          model_name: name,
+          capability: 'chat',
+          display_name: name.toUpperCase(),
+        },
+      });
+      expect(res.statusCode).toBe(201);
+      ids.push(res.json().id);
+    }
+
+    // Reorder: c, a, b → fallback_order = 0, 1, 2 respectively.
+    res = await app.inject({
+      method: 'POST',
+      url: '/v1/models/reorder',
+      headers: authJson,
+      payload: { capability: 'chat', ordered_ids: [ids[2], ids[0], ids[1]] },
+    });
+    expect(res.statusCode).toBe(200);
+    const reordered = res.json().models as { id: string; fallback_order: number }[];
+    expect(reordered.map((m) => m.id)).toEqual([ids[2], ids[0], ids[1]]);
+    expect(reordered.map((m) => m.fallback_order)).toEqual([0, 1, 2]);
+
+    // GET /v1/models reflects the new order within the chat capability.
+    res = await app.inject({ method: 'GET', url: '/v1/models', headers: auth });
+    const all = res.json().models as { id: string; capability: string; fallback_order: number }[];
+    const chatOrder = all.filter((m) => m.capability === 'chat').map((m) => m.id);
+    expect(chatOrder).toEqual([ids[2], ids[0], ids[1]]);
+  });
+
+  it('POST /v1/models/reorder rejects unknown id → 404', async () => {
+    const res = await app.inject({
+      method: 'POST',
+      url: '/v1/models/reorder',
+      headers: authJson,
+      payload: { capability: 'chat', ordered_ids: ['mdl_does_not_exist'] },
+    });
+    expect(res.statusCode).toBe(404);
+  });
+
+  it('POST /v1/models/reorder rejects mixed-capability set → 400', async () => {
+    // Reuse models from previous tests; just need at least one chat model.
+    const list = (await app.inject({ method: 'GET', url: '/v1/models', headers: auth })).json()
+      .models as { id: string; capability: string }[];
+    const someChat = list.find((m) => m.capability === 'chat');
+    expect(someChat).toBeTruthy();
+    const res = await app.inject({
+      method: 'POST',
+      url: '/v1/models/reorder',
+      headers: authJson,
+      // image capability with chat id → should fail capability_mismatch.
+      payload: { capability: 'image', ordered_ids: [someChat!.id] },
+    });
+    expect(res.statusCode).toBe(400);
+    expect(res.json().message).toMatch(/capability/i);
+  });
+
+  it('POST /v1/models/reorder rejects duplicate ids → 400', async () => {
+    const list = (await app.inject({ method: 'GET', url: '/v1/models', headers: auth })).json()
+      .models as { id: string; capability: string }[];
+    const someChat = list.find((m) => m.capability === 'chat');
+    expect(someChat).toBeTruthy();
+    const res = await app.inject({
+      method: 'POST',
+      url: '/v1/models/reorder',
+      headers: authJson,
+      payload: { capability: 'chat', ordered_ids: [someChat!.id, someChat!.id] },
+    });
+    expect(res.statusCode).toBe(400);
+    expect(res.json().message).toMatch(/duplicate/i);
+  });
+
+  it('POST /v1/models/reorder rejects subset (set_mismatch) → 400', async () => {
+    // Only submitting one of the three seeded chat models is a partial set;
+    // the route must reject so we never persist a gapped fallback_order.
+    const list = (await app.inject({ method: 'GET', url: '/v1/models', headers: auth })).json()
+      .models as { id: string; capability: string }[];
+    const chats = list.filter((m) => m.capability === 'chat');
+    expect(chats.length).toBeGreaterThanOrEqual(2);
+    const res = await app.inject({
+      method: 'POST',
+      url: '/v1/models/reorder',
+      headers: authJson,
+      payload: { capability: 'chat', ordered_ids: [chats[0].id] },
+    });
+    expect(res.statusCode).toBe(400);
+    expect(res.json().message).toMatch(/every model/i);
+  });
 });

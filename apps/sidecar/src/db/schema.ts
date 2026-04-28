@@ -75,6 +75,11 @@ export const models = sqliteTable(
       t.provider_id,
       t.model_name,
     ),
+    // MC-3 list() / nextFallback() both order by (capability, fallback_order).
+    capabilityOrderIdx: index('models_capability_fallback_order_idx').on(
+      t.capability,
+      t.fallback_order,
+    ),
   }),
 );
 

@@ -127,6 +127,13 @@ export const ModelUpdateSchema = z.object({
 });
 export type ModelUpdate = z.infer<typeof ModelUpdateSchema>;
 
+/** MC-3 reorder — set fallback_order = index for each id within a capability. */
+export const ModelReorderRequestSchema = z.object({
+  capability: ModelCapabilitySchema,
+  ordered_ids: z.array(z.string().min(1)).min(1).max(200),
+});
+export type ModelReorderRequest = z.infer<typeof ModelReorderRequestSchema>;
+
 /** Discovered model from a provider's listing endpoint (e.g. OpenRouter). */
 export const DiscoveredModelSchema = z.object({
   model_name: z.string(),

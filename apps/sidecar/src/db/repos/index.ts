@@ -160,7 +160,12 @@ export class ModelsRepo {
   constructor(private db: Db) {}
 
   list(): Model[] {
-    return this.db.select().from(models).all().map(toModel);
+    return this.db
+      .select()
+      .from(models)
+      .orderBy(asc(models.capability), asc(models.fallback_order))
+      .all()
+      .map(toModel);
   }
 
   listByProvider(providerId: string): Model[] {
@@ -319,6 +324,64 @@ export class ModelsRepo {
       .returning()
       .get();
     return toModel(row);
+  }
+
+  /**
+   * MC-3 — bulk reorder ALL models for a capability. Sets `fallback_order = i`
+   * for each `orderedIds[i]`. Requires the caller to submit the FULL set of
+   * model ids for the capability (no subset reorder) so we never leave gaps
+   * or duplicate fallback_order values, both of which would break
+   * `nextFallback()` ordering.
+   *
+   * Validation + writes happen inside a single SQLite transaction so concurrent
+   * reorder requests for the same capability cannot interleave: better-sqlite3
+   * serializes transactions on a single thread, so the second tx observes the
+   * first's writes (or fails with set_mismatch if the membership shifted).
+   *
+   * Throws Error('not_found' | 'capability_mismatch' | 'duplicate_ids' |
+   * 'set_mismatch') for the renderer to surface.
+   */
+  reorder(capability: ModelCapability, orderedIds: string[]): Model[] {
+    const seen = new Set<string>();
+    for (const id of orderedIds) {
+      if (seen.has(id)) throw new Error('duplicate_ids');
+      seen.add(id);
+    }
+    const now = Date.now();
+    this.db.transaction((tx) => {
+      const existing = tx
+        .select()
+        .from(models)
+        .where(eq(models.capability, capability))
+        .all();
+      const existingIds = new Set(existing.map((r) => r.id));
+      for (const id of orderedIds) {
+        if (!existingIds.has(id)) {
+          // Either the id doesn't exist at all OR it belongs to another
+          // capability. Distinguish for a clearer renderer message.
+          const any = tx.select().from(models).where(eq(models.id, id)).get();
+          if (!any) throw new Error('not_found');
+          throw new Error('capability_mismatch');
+        }
+      }
+      if (existing.length !== orderedIds.length) {
+        throw new Error('set_mismatch');
+      }
+      orderedIds.forEach((id, idx) => {
+        tx
+          .update(models)
+          .set({ fallback_order: idx, updated_at: now })
+          .where(eq(models.id, id))
+          .run();
+      });
+    });
+    return this.db
+      .select()
+      .from(models)
+      .where(eq(models.capability, capability))
+      .orderBy(asc(models.fallback_order))
+      .all()
+      .map(toModel);
   }
 
   /**

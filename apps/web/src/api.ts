@@ -105,6 +105,12 @@ export const api = {
     authedFetch(`/v1/models/${id}`, { method: 'DELETE' }).then((r) =>
       json<void>(r),
     ),
+  reorderModels: (capability: ModelCapability, ordered_ids: string[]) =>
+    authedFetch('/v1/models/reorder', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ capability, ordered_ids }),
+    }).then((r) => json<{ capability: ModelCapability; models: Model[] }>(r)),
 
   costsRealtime: (conversationId?: string | null) => {
     const qs = conversationId ? `?conversation_id=${encodeURIComponent(conversationId)}` : '';

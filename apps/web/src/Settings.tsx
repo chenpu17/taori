@@ -143,6 +143,31 @@ export function Settings({
     }
   };
 
+  /**
+   * MC-3 — move a model up/down within its capability (changes fallback_order).
+   * The model selector + auto-fallback retry both consume this ordering.
+   */
+  const onMove = async (m: Model, dir: -1 | 1): Promise<void> => {
+    const peers = models
+      .filter((x) => x.capability === m.capability)
+      .sort((a, b) => a.fallback_order - b.fallback_order);
+    const idx = peers.findIndex((x) => x.id === m.id);
+    const target = idx + dir;
+    if (idx < 0 || target < 0 || target >= peers.length) return;
+    const next = peers.slice();
+    [next[idx], next[target]] = [next[target], next[idx]];
+    try {
+      await api.reorderModels(
+        m.capability,
+        next.map((x) => x.id),
+      );
+      await refresh();
+      notifyParent();
+    } catch (e) {
+      window.alert(`调整顺序失败：${e instanceof Error ? e.message : String(e)}`);
+    }
+  };
+
   // Group models by capability for MC-2/MC-3 visualization.
   const grouped: Record<ModelCapability, Model[]> = {
     chat: [],
@@ -153,6 +178,11 @@ export function Settings({
     tts: [],
   };
   for (const m of models) (grouped[m.capability] ?? grouped.chat).push(m);
+  // MC-3: render in fallback_order so the displayed order matches the order
+  // used by chat fallback retry / model selector.
+  for (const cap of Object.keys(grouped) as ModelCapability[]) {
+    grouped[cap].sort((a, b) => a.fallback_order - b.fallback_order);
+  }
 
   return (
     <div
@@ -228,10 +258,12 @@ export function Settings({
                   <div key={cap} className="settings-cap-group" data-cap={cap}>
                     <h4>{capabilityLabel(cap)}</h4>
                     <ul className="settings-model-list">
-                      {list.map((m) => {
+                      {list.map((m, idx) => {
                         const tier = priceTier(m.price_input_per_1m);
                         const isDefault = m.is_default_for === cap;
                         const t = results[m.id];
+                        const isFirst = idx === 0;
+                        const isLast = idx === list.length - 1;
                         return (
                           <li
                             key={m.id}
@@ -239,6 +271,9 @@ export function Settings({
                             data-model-id={m.id}
                             className={!m.enabled ? 'disabled' : ''}
                           >
+                            <span className="m-order" title="备援顺序">
+                              {idx + 1}
+                            </span>
                             <span className="m-name">
                               {isDefault && <span title="默认">⭐ </span>}
                               {m.display_name}
@@ -259,6 +294,26 @@ export function Settings({
                               </span>
                             )}
                             <span className="m-actions">
+                              <button
+                                type="button"
+                                onClick={() => void onMove(m, -1)}
+                                disabled={isFirst}
+                                data-testid="settings-move-up"
+                                title="上移（提升备援优先级）"
+                                aria-label={`上移 ${m.display_name}`}
+                              >
+                                ▲
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => void onMove(m, 1)}
+                                disabled={isLast}
+                                data-testid="settings-move-down"
+                                title="下移（降低备援优先级）"
+                                aria-label={`下移 ${m.display_name}`}
+                              >
+                                ▼
+                              </button>
                               {!isDefault && m.enabled && (
                                 <button
                                   type="button"

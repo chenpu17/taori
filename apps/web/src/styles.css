@@ -237,6 +237,10 @@ h1 { margin: 0; font-size: 16px; font-weight: 600; }
   margin-bottom: 4px;
 }
 .settings-model-list li.disabled { opacity: 0.55; }
+.settings-model-list .m-order {
+  font-variant-numeric: tabular-nums; font-size: 11px; color: var(--muted);
+  min-width: 18px; text-align: right;
+}
 .settings-model-list .m-name { flex: 1; min-width: 200px; }
 .settings-model-list .m-price { font-size: 11px; color: var(--muted); }
 .settings-model-list .m-actions { display:flex; gap: 4px; flex-wrap: wrap; }
@@ -245,7 +249,10 @@ h1 { margin: 0; font-size: 16px; font-weight: 600; }
   border: 1px solid var(--border); background: transparent; color: var(--fg);
   cursor: pointer;
 }
-.settings-model-list .m-actions button:hover { background: var(--border); }
+.settings-model-list .m-actions button:disabled {
+  opacity: 0.4; cursor: not-allowed;
+}
+.settings-model-list .m-actions button:hover:not(:disabled) { background: var(--border); }
 .test-result { width: 100%; font-size: 12px; padding-left: 4px; }
 .test-result.ok { color: var(--ok, #2e7d32); }
 .test-result.bad { color: var(--bad, #c62828); }

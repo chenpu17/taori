@@ -49,6 +49,7 @@ CREATE TABLE IF NOT EXISTS models (
 );
 CREATE UNIQUE INDEX IF NOT EXISTS models_alias_uniq ON models(alias) WHERE alias IS NOT NULL;
 CREATE UNIQUE INDEX IF NOT EXISTS models_provider_model_uniq ON models(provider_id, model_name) WHERE provider_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS models_capability_fallback_order_idx ON models(capability, fallback_order);
 
 CREATE TABLE IF NOT EXISTS conversations (
   id TEXT PRIMARY KEY,

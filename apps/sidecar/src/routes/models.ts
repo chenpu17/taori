@@ -21,6 +21,7 @@ import {
   ModelCreateSchema,
   ModelUpdateSchema,
   ModelCapabilitySchema,
+  ModelReorderRequestSchema,
   TaoriError,
 } from '@taori/shared';
 import { ProvidersRepo, ModelsRepo } from '../db/repos/index.js';
@@ -134,6 +135,59 @@ export function registerModelsRoute(
       reply.code(204).send();
     },
   );
+
+  /**
+   * POST /v1/models/reorder — MC-3 备援顺序. Body: { capability, ordered_ids }.
+   * The new fallback_order is set to the array index. The route is atomic
+   * (transactional) and requires the FULL set of model ids for the capability:
+   * partial sets would leave gaps / duplicate fallback_order values which
+   * break `nextFallback()` ordering.
+   *
+   * Errors:
+   *   - 400 validation_error: schema fail / duplicates / wrong capability /
+   *     set_mismatch (ids submitted ≠ models in this capability)
+   *   - 404 not_found: at least one id does not exist
+   */
+  app.post('/v1/models/reorder', async (req) => {
+    const parsed = ModelReorderRequestSchema.safeParse(req.body);
+    if (!parsed.success) {
+      throw new TaoriError({
+        code: 'validation_error',
+        message: parsed.error.errors.map((e) => e.message).join('; '),
+      });
+    }
+    try {
+      const ordered = repo.reorder(parsed.data.capability, parsed.data.ordered_ids);
+      return { capability: parsed.data.capability, models: ordered };
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      if (msg === 'not_found') {
+        throw new TaoriError({
+          code: 'not_found',
+          message: 'one or more model ids not found',
+        });
+      }
+      if (msg === 'capability_mismatch') {
+        throw new TaoriError({
+          code: 'validation_error',
+          message: 'all ids must belong to the given capability',
+        });
+      }
+      if (msg === 'duplicate_ids') {
+        throw new TaoriError({
+          code: 'validation_error',
+          message: 'ordered_ids contains duplicates',
+        });
+      }
+      if (msg === 'set_mismatch') {
+        throw new TaoriError({
+          code: 'validation_error',
+          message: 'ordered_ids must include every model in this capability',
+        });
+      }
+      throw e;
+    }
+  });
 
   /**
    * POST /v1/models/:id/test — MC-4 availability probe.
