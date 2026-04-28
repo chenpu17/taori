@@ -431,6 +431,14 @@ function ChatPanel({
   onOpenSettings: () => void;
 }): JSX.Element {
   const conversationIdRef = useRef<string | null>(null);
+  // Tracks which conversation_id we've already lifted into React state via
+  // onConversationCreated. Distinct from conversationIdRef because the tee
+  // reader updates conversationIdRef mid-stream (for auto-fallback's persist
+  // call) but must NOT trigger a state lift during streaming — that would
+  // re-render and break useChat's in-flight failure-decision flow (M2 §1.4).
+  // onFinish then uses this ref to decide whether the parent still needs to
+  // be notified.
+  const announcedConvIdRef = useRef<string | null>(null);
   const [costByMsg, setCostByMsg] = useState<
     Record<string, { input_tokens: number; output_tokens: number; actual_usd: number | null }>
   >({});
@@ -525,7 +533,22 @@ function ChatPanel({
   // the `8:[{type:"failure_decision",...}]` annotation reliably even when
   // useChat discards the in-flight assistant message on error.
   const failureFetch = useCallback<typeof fetch>(async (input, init) => {
-    const res = await fetch(input as RequestInfo, init);
+    // Strip role='system' from outgoing /v1/chat payload — those are
+    // renderer-side notes (e.g. auto-fallback notice) that should be
+    // displayed in the timeline but NOT sent to the LLM (M2 §1.4).
+    let nextInit = init;
+    if (init && typeof init.body === 'string') {
+      try {
+        const parsed = JSON.parse(init.body) as { messages?: Array<{ role: string }> };
+        if (Array.isArray(parsed.messages) && parsed.messages.some((m) => m.role === 'system')) {
+          parsed.messages = parsed.messages.filter((m) => m.role !== 'system');
+          nextInit = { ...init, body: JSON.stringify(parsed) };
+        }
+      } catch {
+        // not JSON — leave alone
+      }
+    }
+    const res = await fetch(input as RequestInfo, nextInit);
     if (!res.ok || !res.body) return res;
     // ReadableStream.tee() is browser-native; in jsdom-style envs it can be
     // missing. Fall through gracefully so chat keeps working — failure card
@@ -553,6 +576,19 @@ function ChatPanel({
               for (const ann of arr) {
                 if (ann?.type === 'meta' && typeof ann.message_id === 'string') {
                   pendingMsgId = ann.message_id;
+                }
+                if (
+                  ann?.type === 'meta' &&
+                  typeof ann.conversation_id === 'string' &&
+                  conversationIdRef.current !== ann.conversation_id
+                ) {
+                  // The forced-error path may finish before useChat's onFinish
+                  // captures the conversation_id annotation, leaving the auto-
+                  // fallback effect without a target convId for persistence.
+                  // Mirror to the ref only — invoking onConversationCreated
+                  // here would re-render mid-stream and break the
+                  // failure-decision card flow (M2 §1.4).
+                  conversationIdRef.current = ann.conversation_id;
                 }
                 if (ann?.type === 'failure_decision' && pendingMsgId) {
                   const decision: FailureDecision = {
@@ -620,12 +656,21 @@ function ChatPanel({
     headers: { Authorization: `Bearer ${endpoint.bearer}` },
     body: { model_id: model.id, conversation_id: conversationId ?? undefined },
     onError: (e) => console.error('[useChat] onError:', e),
-    onFinish: (_msg, opts) => {
-      const annotations = (opts as { annotations?: unknown[] })?.annotations ?? [];
+    onFinish: (msg, opts) => {
+      // Vercel AI SDK attaches per-message annotations on msg.annotations;
+      // older code paths used opts.annotations. Read both for safety
+      // (M1 §1.2 — conversation_id propagation).
+      const annotations =
+        ((opts as { annotations?: unknown[] })?.annotations as unknown[])
+        ?? ((msg as { annotations?: unknown[] })?.annotations as unknown[])
+        ?? [];
       for (const a of annotations as Array<Record<string, unknown>>) {
         if (a?.type === 'meta' && typeof a.conversation_id === 'string') {
           if (conversationIdRef.current !== a.conversation_id) {
             conversationIdRef.current = a.conversation_id;
+          }
+          if (announcedConvIdRef.current !== a.conversation_id) {
+            announcedConvIdRef.current = a.conversation_id;
             onConversationCreated(a.conversation_id);
           }
         }
@@ -679,6 +724,9 @@ function ChatPanel({
       // ref. Adopt it here so submitImagePicker can call invokeTool correctly.
       if (route.conversation_id && conversationIdRef.current !== route.conversation_id) {
         conversationIdRef.current = route.conversation_id;
+      }
+      if (route.conversation_id && announcedConvIdRef.current !== route.conversation_id) {
+        announcedConvIdRef.current = route.conversation_id;
         onConversationCreated(route.conversation_id);
       }
       setImagePickerError(null);
@@ -881,8 +929,12 @@ function ChatPanel({
   // message would be overwritten by a (possibly empty / racy) DB read.
   useEffect(() => {
     if (!conversationId) return;
-    if (conversationIdRef.current === conversationId) return;
+    if (conversationIdRef.current === conversationId) {
+      announcedConvIdRef.current = conversationId;
+      return;
+    }
     conversationIdRef.current = conversationId;
+    announcedConvIdRef.current = conversationId;
     let cancelled = false;
     setHistoryLoading(true);
     api
@@ -890,10 +942,10 @@ function ChatPanel({
       .then((res) => {
         if (cancelled) return;
         const mapped: AiMessage[] = res.messages
-          .filter((m) => m.role !== 'system')
+          .filter((m) => m.role === 'user' || m.role === 'assistant' || m.role === 'system')
           .map((m) => ({
             id: m.id,
-            role: m.role as 'user' | 'assistant',
+            role: m.role as 'user' | 'assistant' | 'system',
             content: m.content ?? '',
           }));
         setMessages(mapped);
@@ -996,6 +1048,9 @@ function ChatPanel({
         if (a?.type === 'meta' && typeof a.conversation_id === 'string') {
           if (conversationIdRef.current !== a.conversation_id) {
             conversationIdRef.current = a.conversation_id;
+          }
+          if (announcedConvIdRef.current !== a.conversation_id) {
+            announcedConvIdRef.current = a.conversation_id;
             onConversationCreated(a.conversation_id);
           }
         }
@@ -1066,6 +1121,13 @@ function ChatPanel({
     // — we don't block the retry on it.
     if (conversationIdRef.current) {
       void api.appendSystemMessage(conversationIdRef.current, note).catch(() => {});
+      // Lift the conversation_id to React state so the next regenerate's
+      // useChat body carries it (failed streams skip onFinish, so this
+      // is the only place that announces convId after a failure path).
+      if (announcedConvIdRef.current !== conversationIdRef.current) {
+        announcedConvIdRef.current = conversationIdRef.current;
+        onConversationCreated(conversationIdRef.current);
+      }
     }
     onModelChange(target.id);
     // Defer reload until the new model_id has propagated through useChat's
@@ -1177,7 +1239,7 @@ function ChatPanel({
   const tier = priceTier(model.price_input_per_1m);
 
   return (
-    <div className="chat" data-testid="chat-panel">
+    <div className="chat" data-testid="chat-panel" data-active-conv={conversationId ?? ''}>
       <div className="chat-header">
         <ModelSelector
           models={chatModels}
