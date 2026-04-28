@@ -126,17 +126,50 @@ export function registerChatRoute(
         details: { model_id: model.id, supports_vision: false },
       });
     }
-    // M1 §4 FILE-2 acknowledged-deferred: PDF parsing requires a parser
-    // dependency (pdf-parse / pdfjs-dist) plus binary asset handling. We
-    // accept the schema kind so renderer can show a clear UX, but reject
-    // here with a typed validation error instead of silently dropping.
-    const pdf = attachments.find((a) => a.kind === 'pdf');
-    if (pdf) {
-      throw new TaoriError({
-        code: 'validation_error',
-        message: '当前版本暂不支持 PDF 解析，请使用纯文本/Markdown 文件或图片（视觉模型）。',
-        details: { kind: 'pdf', name: pdf.name ?? null },
-      });
+    // R4.1 — PDF parsing. We parse the PDF here and replace its base64 with
+    // the extracted UTF-8 text (re-encoded as base64). Downstream
+    // (`buildUpstreamMessages`) treats `kind:'pdf'` identically to text and
+    // wraps it in a fenced block so the model sees the file as plain text.
+    // The kind is preserved so the renderer keeps the 📕 chip and the DB
+    // record reflects the user's actual upload type.
+    const PDF_TEXT_CAP = 200_000; // characters; matches TEXT_CAP downstream.
+    for (let i = 0; i < attachments.length; i++) {
+      const a = attachments[i]!;
+      if (a.kind !== 'pdf') continue;
+      let parsed: string;
+      try {
+        const buf = Buffer.from(a.data_b64, 'base64');
+        // Use the inner module path to avoid pdf-parse@1.1.1 index.js debug
+        // mode which tries to read a bundled fixture and fails with ENOENT.
+        // eslint-disable-next-line @typescript-eslint/ban-ts-comment
+        // @ts-expect-error -- no .d.ts for the inner path; we keep typing via cast.
+        const mod = (await import('pdf-parse/lib/pdf-parse.js')) as unknown as {
+          default: (b: Buffer) => Promise<{ text: string }>;
+        };
+        const result = await mod.default(buf);
+        parsed = (result.text ?? '').trim();
+      } catch (e) {
+        throw new TaoriError({
+          code: 'validation_error',
+          message: `PDF 解析失败：${a.name ?? 'document.pdf'} — 文件可能损坏或为扫描件。`,
+          details: { kind: 'pdf', name: a.name ?? null, err: e instanceof Error ? e.message : String(e) },
+        });
+      }
+      if (!parsed) {
+        throw new TaoriError({
+          code: 'validation_error',
+          message: `PDF ${a.name ?? ''} 没有可提取的文本（可能是纯图片扫描件）。请改用图片附件 + 视觉模型。`,
+          details: { kind: 'pdf', name: a.name ?? null },
+        });
+      }
+      if (parsed.length > PDF_TEXT_CAP) {
+        parsed = parsed.slice(0, PDF_TEXT_CAP) + `\n…（已截断，原 PDF 文本超过 ${Math.round(PDF_TEXT_CAP / 1024)}KB）`;
+      }
+      attachments[i] = {
+        ...a,
+        mime: 'text/plain',
+        data_b64: Buffer.from(parsed, 'utf-8').toString('base64'),
+      };
     }
     if (attachments.length > 0 && !model) {
       throw new TaoriError({
@@ -568,7 +601,7 @@ function buildUpstreamMessages(ctx: ProduceCtx): any {
   for (const a of ctx.attachments) {
     if (a.kind === 'image') {
       imageParts.push({ type: 'image', image: `data:${a.mime};base64,${a.data_b64}` });
-    } else if (a.kind === 'text') {
+    } else if (a.kind === 'text' || a.kind === 'pdf') {
       let decoded = '';
       try {
         decoded = Buffer.from(a.data_b64, 'base64').toString('utf-8');
@@ -595,9 +628,11 @@ function buildUpstreamMessages(ctx: ProduceCtx): any {
       // width space between each pair of backticks; the model still reads
       // them as backticks but the closing fence is no longer matchable.
       const safe = decoded.replace(/```/g, '`\u200b`\u200b`');
-      const name = a.name ?? 'attachment.txt';
-      const lang = name.endsWith('.md') ? 'markdown' : '';
-      textBlocks.push(`【附件：${name}】\n\`\`\`${lang}\n${safe}${truncatedNotice}\n\`\`\``);
+      const fallbackName = a.kind === 'pdf' ? 'document.pdf' : 'attachment.txt';
+      const name = a.name ?? fallbackName;
+      const lang = a.kind === 'pdf' ? '' : (name.endsWith('.md') ? 'markdown' : '');
+      const labelPrefix = a.kind === 'pdf' ? '【附件 PDF（已解析为文本）：' : '【附件：';
+      textBlocks.push(`${labelPrefix}${name}】\n\`\`\`${lang}\n${safe}${truncatedNotice}\n\`\`\``);
     }
   }
   for (let i = 0; i < ctx.messages.length; i++) {

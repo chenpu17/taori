@@ -99,7 +99,8 @@ async function extract(path: string | null, mime: string): Promise<string> {
   }
   if (lower === 'application/pdf') {
     const buf = await fs.readFile(path);
-    const mod = (await import('pdf-parse')) as unknown as {
+    // @ts-expect-error -- pdf-parse has no types for its inner module path.
+    const mod = (await import('pdf-parse/lib/pdf-parse.js')) as unknown as {
       default: (b: Buffer) => Promise<{ text: string }>;
     };
     const parsed = await mod.default(buf);

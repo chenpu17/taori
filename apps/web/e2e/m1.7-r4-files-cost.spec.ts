@@ -1,8 +1,8 @@
 /**
  * M1.7 — R4 (files / cost extras) acceptance tests.
  *
- *   1. PDF drop attaches as a file chip but server rejects with a clear error
- *      (M1 §4 FILE-2 acknowledged-deferred behaviour).
+ *   1. Corrupt PDF drop attaches as a file chip but pdf-parse fails with a
+ *      typed parse error (R4 — valid PDFs now go through; see r4.1).
  *   2. Pre-send estimate bar appears once the user types and is hidden when
  *      the input is empty (M1 §5.1).
  *   3. Danger-zone clear-all-data wipes models + providers and forces the app
@@ -28,7 +28,7 @@ test('R4a: estimate bar appears when user types, hides when empty', async ({ pag
   await expect(page.getByTestId('estimate-bar')).toBeVisible();
 });
 
-test('R4c: PDF drop attaches as chip but send is rejected with typed error', async ({ page }) => {
+test('R4c: corrupt PDF surfaces typed parse error to user', async ({ page }) => {
   await seedDefaultModel(env);
   await page.goto('/');
   await expect(page.getByTestId('composer-form')).toBeVisible();
@@ -41,7 +41,8 @@ test('R4c: PDF drop attaches as chip but send is rejected with typed error', asy
   await page.getByTestId('composer-form').dispatchEvent('drop', { dataTransfer });
   await expect(page.getByTestId('attachment-thumb')).toHaveCount(1);
   await expect(page.getByTestId('attachment-thumb')).toHaveAttribute('data-kind', 'pdf');
-  // Send → sidecar must surface a typed validation error.
+  // Corrupt PDF (4 bytes) → sidecar's pdf-parse throws → typed error to user.
+  // Valid PDFs are exercised in r4.1-pdf-parse.spec.ts.
   await page.getByTestId('composer-input').fill('summarize');
   await page.getByTestId('composer-send').click();
   await expect(page.getByTestId('chat-error')).toBeVisible({ timeout: 8000 });

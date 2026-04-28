@@ -265,6 +265,18 @@ h1 { margin: 0; font-size: 16px; font-weight: 600; }
 }
 .estimate-hint { font-size: 11px; opacity: 0.85; }
 
+/* R4.2 — context-window warning bar (warn at 85%, exceed at 100%) */
+.context-warning {
+  padding: 6px 12px; font-size: 12px; line-height: 1.4;
+  border-top: 1px solid var(--border);
+}
+.context-warning.context-warn {
+  background: rgba(245, 158, 11, 0.10); color: #92400e;
+}
+.context-warning.context-exceed {
+  background: rgba(220, 38, 38, 0.12); color: #991b1b; font-weight: 500;
+}
+
 /* M1 §4 file attachments — non-image chip */
 .attachment[data-kind="text"], .attachment[data-kind="pdf"] {
   display: inline-flex; align-items: center; gap: 6px;

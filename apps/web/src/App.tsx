@@ -1138,6 +1138,36 @@ function ChatPanel({
     });
   }, [input, messages, avgOutput, model.price_input_per_1m, model.price_output_per_1m, model.price_per_call]);
 
+  // R4.2 — context-window warning. Surface a banner when the estimated input
+  // tokens cross 85% of the model's context_length, with a hard "exceeded"
+  // state at 100%. Uses the same crude estimator as the cost bar so the two
+  // numbers stay consistent. Skipped when the model has no declared
+  // context_length (e.g. the M0 mock provider).
+  const contextStatus = useMemo<{
+    state: 'ok' | 'warn' | 'exceed';
+    used: number;
+    limit: number;
+    pct: number;
+  } | null>(() => {
+    const limit = model.context_length;
+    if (!limit || limit <= 0) return null;
+    const historyText = messages.map((m) => m.content).join('\n');
+    let used = estimateInputTokens(input + '\n' + historyText);
+    // Include pending text/PDF attachments — they end up inlined into the
+    // upstream prompt so they consume the same context budget. Image tokens
+    // are model-specific and ignored here. base64 inflates source by 4/3, so
+    // decoded length ≈ b64.length * 0.75; estimateInputTokens is ~chars/4.
+    for (const p of pending) {
+      if (p.kind === 'text' || p.kind === 'pdf') {
+        used += Math.round((p.data_b64.length * 0.75) / 4);
+      }
+    }
+    const pct = used / limit;
+    if (pct >= 1) return { state: 'exceed', used, limit, pct };
+    if (pct >= 0.85) return { state: 'warn', used, limit, pct };
+    return { state: 'ok', used, limit, pct };
+  }, [input, messages, pending, model.context_length]);
+
   const tier = priceTier(model.price_input_per_1m);
 
   return (
@@ -1284,6 +1314,18 @@ function ChatPanel({
         <div className="vision-warning" data-testid="drop-error" role="alert">{dropError}</div>
       )}
       <EstimateBar estimate={estimate} sampleCount={avgOutput?.n ?? 0} hasInput={input.trim().length > 0} />
+      {contextStatus && contextStatus.state !== 'ok' && (
+        <div
+          className={`context-warning context-${contextStatus.state}`}
+          data-testid="context-warning"
+          data-state={contextStatus.state}
+          role={contextStatus.state === 'exceed' ? 'alert' : 'status'}
+        >
+          {contextStatus.state === 'exceed'
+            ? `已超出当前模型上下文（${contextStatus.used.toLocaleString()} / ${contextStatus.limit.toLocaleString()} tokens）。请精简输入或换更大上下文的模型。`
+            : `输入接近上下文上限（${(contextStatus.pct * 100).toFixed(0)}%，${contextStatus.used.toLocaleString()} / ${contextStatus.limit.toLocaleString()} tokens）。继续可能被截断。`}
+        </div>
+      )}
       <form
         onSubmit={(e) => {
           e.preventDefault();
