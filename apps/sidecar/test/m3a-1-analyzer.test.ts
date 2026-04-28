@@ -246,18 +246,15 @@ describe('M3.A.1 — POST /v1/roundtable', () => {
   });
 
   it('uses fallback personas when analyzer has no key, persists state', async () => {
-    // Provider exists but key never written → keystore.read returns null → fallback path.
     const prov = ctx.providers.create({
       name: 'P',
       type: 'openai',
       base_url: 'http://x',
-      // No api_key argument → api_key_ref will still be set; we just skip
-      // writing the secret to keystore so analyzer fails with no_key.
       api_key: 'placeholder',
     });
-    // overwrite keystore to ensure read fails: drop the key
-    // (MemoryStore has no delete; instead we create a provider with no api_key_ref)
-    ctx.providers.update(prov.id, { api_key_ref: null } as any);
+    // We never write the secret to the keystore → keystore.read returns null →
+    // analyzer takes the no_key branch, route falls back to fixed personas.
+    void prov;
 
     ctx.models.create({
       provider_id: prov.id,
@@ -287,10 +284,30 @@ describe('M3.A.1 — POST /v1/roundtable', () => {
       estimated_cost_usd_low: number | null;
     };
     expect(body.analyzer_fallback).toBe(true);
-    expect(body.status).toBe('ready');
+    expect(body.status).toBe('analyzing');
     expect(body.participants).toHaveLength(3);
     expect(body.mode).toBe('fast'); // 'auto' resolves to 'fast' in fallback
     expect(body.estimated_cost_usd_low).toBeGreaterThan(0);
+
+    // P0-#3: even in no_key fallback path, an analyzer cost_record must be
+    // written for audit trail (success=false, actual_cost_usd=null).
+    const { cost_records } = await import('../src/db/schema.js');
+    const costRows = ctx.db.select().from(cost_records).all();
+    const analyzerRow = costRows.find(
+      (r: any) => r.source_type === 'topic_analyzer' && r.source_id === body.id,
+    );
+    expect(analyzerRow).toBeDefined();
+    expect((analyzerRow as any).success).toBe(false);
+
+    // P0-#2: the auto-created conversation must be of type='roundtable'.
+    const { conversations } = await import('../src/db/schema.js');
+    const convRow = ctx.db
+      .select()
+      .from(conversations)
+      .all()
+      .find((c: any) => c.id === (body as any).conversation_id);
+    expect(convRow).toBeDefined();
+    expect((convRow as any).type).toBe('roundtable');
 
     // Round-trip via GET
     const getRes = await ctx.app.inject({

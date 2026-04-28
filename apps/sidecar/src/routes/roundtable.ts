@@ -59,7 +59,7 @@ export function registerRoundtableRoute(
       });
     }
     const body = parsed.data;
-    const conv = convRepo.ensure(body.conversation_id);
+    const conv = convRepo.ensure(body.conversation_id, { type: 'roundtable' });
     const requestedMode = body.mode ?? 'auto';
 
     const allEnabledChat = modelsRepo
@@ -142,6 +142,30 @@ export function registerRoundtableRoute(
     const participantModels = analyzerOutput.participants
       .map((p) => modelsRepo.get(p.model_id))
       .filter((m): m is NonNullable<typeof m> => m !== null);
+    if (participantModels.length < analyzerOutput.participants.length) {
+      // Defensive: a model the analyzer picked got deleted between candidate
+      // listing and resolution. Re-roll via fallback path so we never persist
+      // a roundtable with missing participant models.
+      req.log.warn(
+        {
+          expected: analyzerOutput.participants.length,
+          got: participantModels.length,
+        },
+        'roundtable.create.participant_models_missing_rerolling',
+      );
+      const fallbackModels = pickFallbackParticipantModels(modelsRepo, 3);
+      analyzerOutput = buildFallbackOutput({
+        participantModels: fallbackModels,
+        summarizerModelId: fallbackModels[0]!.id,
+        requestedMode,
+      });
+      analyzerFailed = true;
+      participantModels.length = 0;
+      for (const p of analyzerOutput.participants) {
+        const m = modelsRepo.get(p.model_id);
+        if (m) participantModels.push(m);
+      }
+    }
     const summarizerModel = modelsRepo.get(analyzerOutput.summarizer_model_id);
     if (!summarizerModel) {
       throw new TaoriError({
@@ -166,7 +190,7 @@ export function registerRoundtableRoute(
       participants: analyzerOutput.participants,
       summarizer_model_id: analyzerOutput.summarizer_model_id,
       analyzer_fallback: analyzerFailed,
-      status: 'ready',
+      status: 'analyzing',
       current_round: 0,
       estimated_cost_usd_low: estimate.low,
       estimated_cost_usd_high: estimate.high,

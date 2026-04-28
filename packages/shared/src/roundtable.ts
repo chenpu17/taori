@@ -15,7 +15,6 @@ export type RoundtableStoredMode = z.infer<typeof RoundtableStoredModeSchema>;
 
 export const RoundtableStatusSchema = z.enum([
   'analyzing',
-  'ready',
   'round1',
   'round2',
   'summarizing',

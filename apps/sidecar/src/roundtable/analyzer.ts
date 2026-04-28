@@ -164,7 +164,20 @@ export async function runAnalyzer(
   conversationId: string,
 ): Promise<AnalyzerSuccess | AnalyzerFailure> {
   if (!input.analyzerProvider.api_key_ref) {
-    return { ok: false, reason: 'no_key', message: 'analyzer model provider has no api key', costInsert: null };
+    return {
+      ok: false,
+      reason: 'no_key',
+      message: 'analyzer model provider has no api key',
+      costInsert: makeCostInsert(
+        conversationId,
+        pendingRoundtableId,
+        input.analyzerModel,
+        null,
+        null,
+        false,
+        0,
+      ),
+    };
   }
   let apiKey: string | null = null;
   try {
@@ -173,7 +186,20 @@ export async function runAnalyzer(
     deps.log.warn({ err: e }, 'roundtable.analyzer.keystore_read_failed');
   }
   if (!apiKey) {
-    return { ok: false, reason: 'no_key', message: 'keystore returned empty key', costInsert: null };
+    return {
+      ok: false,
+      reason: 'no_key',
+      message: 'keystore returned empty key',
+      costInsert: makeCostInsert(
+        conversationId,
+        pendingRoundtableId,
+        input.analyzerModel,
+        null,
+        null,
+        false,
+        0,
+      ),
+    };
   }
 
   const provider = createOpenAI({

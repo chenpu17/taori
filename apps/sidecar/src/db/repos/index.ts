@@ -460,15 +460,15 @@ export class ConversationsRepo {
     return res.changes > 0;
   }
 
-  /** Insert a fresh chat conversation; returns its id. */
-  create(opts: { id?: string; title?: string | null } = {}): ConversationRow {
+  /** Insert a fresh conversation; returns the row. */
+  create(opts: { id?: string; title?: string | null; type?: 'chat' | 'roundtable' } = {}): ConversationRow {
     const now = Date.now();
     const id = opts.id ?? makeId('conversation');
     const row = this.db
       .insert(conversations)
       .values({
         id,
-        type: 'chat',
+        type: opts.type ?? 'chat',
         title: opts.title ?? null,
         created_at: now,
         updated_at: now,
@@ -480,13 +480,13 @@ export class ConversationsRepo {
   }
 
   /** Idempotent: if id exists, returns it; otherwise creates a fresh row. */
-  ensure(id: string | undefined): ConversationRow {
+  ensure(id: string | undefined, opts: { type?: 'chat' | 'roundtable' } = {}): ConversationRow {
     if (id) {
       const existing = this.get(id);
       if (existing) return existing;
-      return this.create({ id });
+      return this.create({ id, type: opts.type });
     }
-    return this.create();
+    return this.create({ type: opts.type });
   }
 
   touch(id: string): void {
