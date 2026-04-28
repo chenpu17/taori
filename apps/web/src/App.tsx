@@ -5,6 +5,7 @@ import { getSidecarEndpoint, authedFetch } from './sidecar.js';
 import { api } from './api.js';
 import { Onboarding } from './Onboarding.js';
 import { Settings } from './Settings.js';
+import { RoundtableLaunchDialog } from './Roundtable.js';
 import { priceTier, PRICE_TIER_LABEL, formatUsd, estimateInputTokens, estimateCostUsd } from '@taori/shared';
 import type { Model } from '@taori/shared';
 
@@ -500,6 +501,15 @@ function ChatPanel({
   const [imagePickerError, setImagePickerError] = useState<string | null>(null);
   const [imagePickerSubmitting, setImagePickerSubmitting] = useState(false);
   const [imageModels, setImageModels] = useState<Model[]>([]);
+  // M3.A.4 — roundtable launch dialog state. Open by clicking the "🔍 圆桌"
+  // button next to send. After confirm, parent receives the roundtable id;
+  // M3.A.5 will use it to swap chat-bubble view for the roundtable panel.
+  const [roundtableDialog, setRoundtableDialog] = useState<{
+    initialTopic: string;
+  } | null>(null);
+  const [activeRoundtableId, setActiveRoundtableId] = useState<string | null>(
+    null,
+  );
   // Wired up to openImagePicker after it's declared. Lets the failureFetch
   // tee reader fire the picker without needing the callback in scope.
   const capabilityRouteRef = useRef<
@@ -1365,13 +1375,26 @@ function ChatPanel({
             ■ 停止
           </button>
         ) : (
-          <button
-            type="submit"
-            disabled={!input.trim() || (pending.some((p) => p.kind === 'image') && !model.supports_vision)}
-            data-testid="composer-send"
-          >
-            发送
-          </button>
+          <>
+            <button
+              type="button"
+              data-testid="composer-roundtable"
+              className="roundtable-btn"
+              title="🔍 圆桌讨论：让多个模型从不同视角围绕同一话题讨论"
+              onClick={() =>
+                setRoundtableDialog({ initialTopic: input })
+              }
+            >
+              🔍 圆桌
+            </button>
+            <button
+              type="submit"
+              disabled={!input.trim() || (pending.some((p) => p.kind === 'image') && !model.supports_vision)}
+              data-testid="composer-send"
+            >
+              发送
+            </button>
+          </>
         )}
       </form>
       <CostStatusBar
@@ -1419,6 +1442,35 @@ function ChatPanel({
           onCancel={() => setImagePicker(null)}
           onEscapeIntent={() => void escapeImageIntent()}
         />
+      )}
+      {roundtableDialog && (
+        <RoundtableLaunchDialog
+          initialTopic={roundtableDialog.initialTopic}
+          conversationId={conversationId}
+          onCancel={() => setRoundtableDialog(null)}
+          onLaunched={(result) => {
+            setRoundtableDialog(null);
+            setActiveRoundtableId(result.id);
+            // Pull the new conversation into the sidebar list.
+            onConversationUpdated();
+          }}
+        />
+      )}
+      {activeRoundtableId && (
+        <div
+          className="roundtable-banner"
+          data-testid="roundtable-active-banner"
+          role="status"
+        >
+          🔍 圆桌已创建（id: <code>{activeRoundtableId}</code>）。圆桌面板将在后续阶段渲染。
+          <button
+            type="button"
+            data-testid="roundtable-banner-dismiss"
+            onClick={() => setActiveRoundtableId(null)}
+          >
+            ×
+          </button>
+        </div>
       )}
     </div>
   );

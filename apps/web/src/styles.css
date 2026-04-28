@@ -426,3 +426,59 @@ h1 { margin: 0; font-size: 16px; font-weight: 600; }
 .session-cost-panel .billed-failure {
   color: #b8860b; padding: 1px 4px; border: 1px solid #f0c060; border-radius: 3px; font-size: 10px;
 }
+
+/* M3.A.4 — roundtable launch dialog + active banner */
+.roundtable-btn {
+  background: #f7f3ff;
+  border: 1px solid #d4c4f0;
+  color: #5b3aa3;
+  font-weight: 500;
+}
+.roundtable-btn:hover { background: #ece2ff; }
+.modal-card.roundtable-launch { width: 540px; max-width: 92vw; }
+.roundtable-field {
+  display: flex; flex-direction: column; gap: 4px; margin: 8px 0;
+  font-size: 13px;
+}
+.roundtable-field span { font-weight: 600; color: #444; }
+.roundtable-field textarea,
+.roundtable-field select {
+  font-size: 13px; padding: 6px 8px; border: 1px solid #ddd; border-radius: 4px;
+  font-family: inherit;
+}
+.roundtable-loading { padding: 24px 0; text-align: center; }
+.roundtable-error {
+  color: #b00020; padding: 12px; background: #fef0f0; border-radius: 4px;
+  font-size: 13px; margin: 8px 0;
+}
+.roundtable-meta {
+  display: flex; flex-direction: column; gap: 4px;
+  margin: 8px 0 12px; font-size: 13px;
+}
+.roundtable-meta strong { font-weight: 600; }
+.roundtable-fallback { color: #b8860b; margin: 6px 0; }
+.roundtable-participants ol {
+  list-style: none; padding: 0; margin: 8px 0; display: flex; flex-direction: column; gap: 8px;
+}
+.roundtable-participants li {
+  border: 1px solid #eee; border-radius: 4px; padding: 8px 10px; background: #fafafa;
+}
+.roundtable-participants .role-badge {
+  display: inline-block; background: #5b3aa3; color: white; padding: 2px 8px;
+  border-radius: 3px; font-size: 11px; font-weight: 600; margin-right: 8px;
+}
+.roundtable-participants .participant-name { font-weight: 600; }
+.roundtable-participants .participant-persona { margin-top: 4px; font-size: 12px; }
+.roundtable-banner {
+  margin: 8px 12px 0; padding: 10px 12px;
+  background: #f7f3ff; border: 1px solid #d4c4f0; border-radius: 4px;
+  color: #5b3aa3; font-size: 13px;
+  display: flex; align-items: center; gap: 8px; justify-content: space-between;
+}
+.roundtable-banner code {
+  background: rgba(91,58,163,0.1); padding: 1px 6px; border-radius: 3px; font-size: 12px;
+}
+.roundtable-banner button {
+  background: transparent; border: none; color: #5b3aa3; cursor: pointer;
+  font-size: 18px; line-height: 1; padding: 0 4px;
+}

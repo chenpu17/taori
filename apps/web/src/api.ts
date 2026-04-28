@@ -18,6 +18,10 @@ import type {
   ModelUpdate,
   ModelDiscoveryResponse,
   ModelCapability,
+  Roundtable,
+  RoundtableMode,
+  RoundtableMessage,
+  Participant,
 } from '@taori/shared';
 
 async function json<T>(res: Response): Promise<T> {
@@ -258,5 +262,32 @@ export const api = {
           cost?: { actual_usd: number };
         };
       }>(r),
+    ),
+
+  // M3.A — roundtable APIs (M3.A.4 wires create + GET; M3.A.5 wires round/summarize/export).
+  createRoundtable: (input: { topic: string; mode?: RoundtableMode; conversation_id?: string }) =>
+    authedFetch('/v1/roundtable', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(input),
+    }).then((r) =>
+      json<{
+        id: string;
+        conversation_id: string;
+        topic: string;
+        mode: 'fast' | 'deep';
+        participants: Participant[];
+        summarizer_model_id: string | null;
+        analyzer_fallback: boolean;
+        status: string;
+        current_round: number;
+        estimated_cost_usd_low: number | null;
+        estimated_cost_usd_high: number | null;
+        created_at: number;
+      }>(r),
+    ),
+  getRoundtable: (id: string) =>
+    authedFetch(`/v1/roundtable/${id}`).then((r) =>
+      json<{ roundtable: Roundtable; messages: RoundtableMessage[] }>(r),
     ),
 };
