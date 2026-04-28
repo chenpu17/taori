@@ -185,6 +185,47 @@ describe('conversations route', () => {
     });
     expect(res.statusCode).toBe(404);
   });
+
+  it('POST /v1/conversations/:id/messages persists a system note (M2 §1.4)', async () => {
+    await app.inject({
+      method: 'POST',
+      url: '/v1/chat',
+      headers: authJson,
+      payload: { model_id: 'm', messages: [{ role: 'user', content: 'hello' }] },
+    });
+    const convRepo = new ConversationsRepo(db);
+    const msgRepo = new MessagesRepo(db);
+    const conv = convRepo.list()[0]!;
+
+    const ok = await app.inject({
+      method: 'POST',
+      url: `/v1/conversations/${conv.id}/messages`,
+      headers: authJson,
+      payload: { role: 'system', content: '已自动切换到「Backup Model」并重试。' },
+    });
+    expect(ok.statusCode).toBe(201);
+    const body = ok.json() as { message: { role: string; content: string } };
+    expect(body.message.role).toBe('system');
+
+    const all = msgRepo.listByConversation(conv.id);
+    expect(all.some((m) => m.role === 'system' && m.content?.includes('自动切换'))).toBe(true);
+
+    const bad = await app.inject({
+      method: 'POST',
+      url: `/v1/conversations/${conv.id}/messages`,
+      headers: authJson,
+      payload: { role: 'user', content: 'should reject' },
+    });
+    expect(bad.statusCode).toBe(400);
+
+    const missing = await app.inject({
+      method: 'POST',
+      url: '/v1/conversations/conv_nope/messages',
+      headers: authJson,
+      payload: { role: 'system', content: 'x' },
+    });
+    expect(missing.statusCode).toBe(404);
+  });
 });
 
 describe('models test endpoint (MC-4)', () => {

@@ -202,7 +202,13 @@ export function createImageGenerateTool(
           content_type: adapterResult.mime,
           assistant_message_id: msgRow.id,
         },
-        cost: { actual_usd: pricePerCall },
+        cost: {
+          actual_usd: pricePerCall,
+          model_id: model.id,
+          model_name_snapshot: model.model_name,
+          price_per_call_snapshot: model.price_per_call ?? null,
+          assistant_message_id: msgRow.id,
+        },
       };
     },
   };

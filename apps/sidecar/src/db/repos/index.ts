@@ -389,13 +389,22 @@ export class ModelsRepo {
    * docs/product/08-m1-spec.md §7.5.2:
    *   - 3 strikes within 24h → `demoted = true`
    *   - 5 strikes within 24h → `disabled_until = now + 24h`
-   * Only `quota`, `rate_limit`, and `network` count as strikes; `unknown`
-   * and `content_filter` are excluded (auth issues / content policy belong
-   * to the user, not the model). Strikes naturally age out — once the most
-   * recent failure is older than 24h we reset the counter on the next call.
+   * Strike-counting set per docs/product/09-m2-spec.md §7.2 / §11.2:
+   * `quota`, `rate_limit`, `network`, `auth`, and `unknown` all count as
+   * strikes (a model that's repeatedly misconfigured or unreachable should
+   * be demoted just like one that's rate-limited). `content_filter` is
+   * excluded — that's a per-prompt user-side policy issue, not a model
+   * health signal. Strikes age out: once the most recent failure is older
+   * than 24h, the counter resets on the next call.
    */
   recordFailure(modelId: string, classification: string): Model | null {
-    const STRIKE_KINDS = new Set(['quota', 'rate_limit', 'network']);
+    const STRIKE_KINDS = new Set([
+      'quota',
+      'rate_limit',
+      'network',
+      'auth',
+      'unknown',
+    ]);
     if (!STRIKE_KINDS.has(classification)) return this.get(modelId);
     const existing = this.get(modelId);
     if (!existing) return null;

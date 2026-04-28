@@ -1052,15 +1052,21 @@ function ChatPanel({
     if (!target) return;
     autoFallbackTriggeredMsgs.current.add(lastFailureMsgId);
     autoFallbackUsedConvs.current.add(conv);
+    const note = `已自动切换到「${target.display_name}」并重试。`;
     // Inject a system note so the user sees what happened (M2 §1.4).
     setMessages((prev) => [
       ...prev,
       {
         id: `auto-fallback-${lastFailureMsgId}`,
         role: 'system',
-        content: `已自动切换到「${target.display_name}」并重试。`,
+        content: note,
       },
     ]);
+    // Persist the note so it survives reload (spec 09-m2 §1.4). Best-effort
+    // — we don't block the retry on it.
+    if (conversationIdRef.current) {
+      void api.appendSystemMessage(conversationIdRef.current, note).catch(() => {});
+    }
     onModelChange(target.id);
     // Defer reload until the new model_id has propagated through useChat's
     // body. One macrotask is enough — useChat captures body on submit.

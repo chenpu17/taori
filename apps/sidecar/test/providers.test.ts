@@ -92,7 +92,7 @@ describe('providers + models', () => {
     expect(res.statusCode).toBe(200);
     const body = res.json();
     expect(body.ok).toBe(false);
-    expect(body.error.classification).toBe('unknown');
+    expect(body.error.classification).toBe('auth');
   });
 
   it('full CRUD cycle: create provider with key → list → discover → create model → set default → delete', async () => {

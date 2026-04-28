@@ -48,7 +48,19 @@ export interface ToolDescriptor<I = unknown, O = unknown> {
    */
   execute(input: I, ctx: ToolContext): Promise<{
     output: O;
-    cost?: { actual_usd?: number; tokens_in?: number; tokens_out?: number };
+    cost?: {
+      actual_usd?: number;
+      tokens_in?: number;
+      tokens_out?: number;
+      /** When the tool fanned out to a model, capture its identity so
+       *  `cost_records` can attribute spend per model (spec 09-m2-spec §3.3). */
+      model_id?: string | null;
+      model_name_snapshot?: string | null;
+      price_per_call_snapshot?: number | null;
+      /** Override `source_id` to point at the assistant message the tool
+       *  emitted, not the user message that triggered the invocation. */
+      assistant_message_id?: string | null;
+    };
   }>;
 }
 
@@ -147,22 +159,30 @@ export class CapabilityBus {
     success: boolean,
     actual_usd: number,
     duration_ms?: number,
-    cost?: { tokens_in?: number; tokens_out?: number },
+    cost?: {
+      tokens_in?: number;
+      tokens_out?: number;
+      model_id?: string | null;
+      model_name_snapshot?: string | null;
+      price_per_call_snapshot?: number | null;
+      assistant_message_id?: string | null;
+    },
   ): void {
     const featureCol: CostInsert['feature'] =
       capability === 'image' ? 'image' : 'tool_call';
     const insert: CostInsert = {
       conversation_id: ctx.conversationId ?? null,
       source_type: 'tool_call',
-      source_id: ctx.sourceMessageId ?? null,
+      source_id: cost?.assistant_message_id ?? ctx.sourceMessageId ?? null,
       feature: featureCol,
-      model_id: null,
-      model_name_snapshot: tool ? tool.name : 'unknown_tool',
+      model_id: cost?.model_id ?? null,
+      model_name_snapshot:
+        cost?.model_name_snapshot ?? (tool ? tool.name : 'unknown_tool'),
       input_tokens: cost?.tokens_in ?? null,
       output_tokens: cost?.tokens_out ?? null,
       price_input_per_1m_snapshot: null,
       price_output_per_1m_snapshot: null,
-      price_per_call_snapshot: null,
+      price_per_call_snapshot: cost?.price_per_call_snapshot ?? null,
       estimated_cost_usd: null,
       actual_cost_usd: actual_usd,
       success,

@@ -30,13 +30,9 @@ describe('classifyProviderError (spec §7.5.2)', () => {
     );
   });
 
-  it('401/403 → unknown (auth)', () => {
-    expect(classifyProviderError({ status: 401 }).classification).toBe(
-      'unknown',
-    );
-    expect(classifyProviderError({ status: 403 }).classification).toBe(
-      'unknown',
-    );
+  it('401/403 → auth', () => {
+    expect(classifyProviderError({ status: 401 }).classification).toBe('auth');
+    expect(classifyProviderError({ status: 403 }).classification).toBe('auth');
   });
 
   it('500+ → network', () => {
@@ -77,22 +73,21 @@ describe('ModelsRepo demote/disable (spec §7.5.2)', () => {
 
   afterAll(() => fs.rmSync(dbPath, { force: true }));
 
-  it('content_filter / unknown do NOT count as strikes', () => {
+  it('content_filter does NOT count as strike (per-prompt policy issue)', () => {
     models.recordFailure(model.id, 'content_filter');
-    models.recordFailure(model.id, 'unknown');
     const m = models.get(model.id)!;
     expect(m.failure_count_24h).toBe(0);
     expect(m.demoted).toBe(false);
   });
 
-  it('quota strikes 3× → demoted=true; 5× → disabled_until set', () => {
+  it('quota / rate_limit / auth / unknown / network all count as strikes; 3× → demoted, 5× → disabled', () => {
     models.recordFailure(model.id, 'quota');
-    models.recordFailure(model.id, 'quota');
+    models.recordFailure(model.id, 'unknown');
     let m = models.get(model.id)!;
     expect(m.failure_count_24h).toBe(2);
     expect(m.demoted).toBe(false);
 
-    models.recordFailure(model.id, 'rate_limit');
+    models.recordFailure(model.id, 'auth');
     m = models.get(model.id)!;
     expect(m.failure_count_24h).toBe(3);
     expect(m.demoted).toBe(true);

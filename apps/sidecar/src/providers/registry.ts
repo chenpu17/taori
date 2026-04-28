@@ -73,7 +73,7 @@ export function classifyProviderError(args: {
   const status = args.status;
   if (status === 401 || status === 403) {
     return {
-      classification: 'unknown',
+      classification: 'auth',
       message: 'Authentication failed (check API key)',
     };
   }

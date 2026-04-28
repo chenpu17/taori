@@ -19,6 +19,7 @@ export const ERROR_CLASSIFICATIONS = [
   'rate_limit',
   'network',
   'content_filter',
+  'auth',
   'unknown',
 ] as const;
 export type ErrorClassification = (typeof ERROR_CLASSIFICATIONS)[number];

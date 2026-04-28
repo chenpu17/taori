@@ -410,8 +410,9 @@ export function registerRoundtableRoute(
 
         // Spec §6.1: fast 模式 round 1 完成后**自动**触发 summarize（同一 SSE
         // 响应里 round_done 紧跟 summary_*）。仅在未触发 majority-fail 时执行。
-        const half = Math.ceil(rt.participants.length / 2);
-        const majorityFailed = result.failed.length >= half;
+        // Spec §5.3: 多数 = 严格超过半数（n=3→≥2, n=4→≥3, n=5→≥3）。
+        const majorityThreshold = Math.floor(rt.participants.length / 2) + 1;
+        const majorityFailed = result.failed.length >= majorityThreshold;
         const shouldAutoSummarize =
           rt.mode === 'fast' && next === 1 && !majorityFailed;
         if (shouldAutoSummarize) {
@@ -445,6 +446,11 @@ export function registerRoundtableRoute(
             },
           );
           }
+        }
+
+        // Spec §5.2.1 / §5.3: 多数失败 → 终态 failed（不允许继续 retry/next-round）。
+        if (majorityFailed) {
+          rtRepo.setStatus(rt.id, 'failed');
         }
 
         stream.write(

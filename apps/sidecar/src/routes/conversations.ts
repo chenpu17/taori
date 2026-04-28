@@ -100,6 +100,43 @@ export function registerConversationsRoute(
     },
   );
 
+  // POST /v1/conversations/:id/messages — append a non-streaming message
+  // (system/note). Used by renderer to persist auto-fallback notices etc
+  // (spec 09-m2-spec §1.4: 系统提示需在持久化历史中可见). Limited to
+  // role='system' to prevent abuse — assistant content goes through /v1/chat.
+  const PostMsgSchema = z.object({
+    role: z.literal('system'),
+    content: z.string().min(1).max(2000),
+  });
+  app.post<{ Params: { id: string } }>(
+    '/v1/conversations/:id/messages',
+    async (req, reply) => {
+      const conv = convRepo.get(req.params.id);
+      if (!conv) {
+        throw new TaoriError({
+          code: 'not_found',
+          message: `Conversation ${req.params.id} not found`,
+        });
+      }
+      const parsed = PostMsgSchema.safeParse(req.body);
+      if (!parsed.success) {
+        throw new TaoriError({
+          code: 'validation_error',
+          message: parsed.error.errors.map((e) => e.message).join('; '),
+        });
+      }
+      const row = msgRepo.insert({
+        conversation_id: req.params.id,
+        role: parsed.data.role,
+        content: parsed.data.content,
+        model_id: null,
+        status: 'complete',
+      });
+      reply.code(201);
+      return { message: { id: row.id, role: row.role, content: row.content, created_at: row.created_at } };
+    },
+  );
+
   app.delete<{ Params: { id: string } }>(
     '/v1/conversations/:id',
     async (req, reply) => {

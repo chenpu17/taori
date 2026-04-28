@@ -195,6 +195,16 @@ export const api = {
     authedFetch(`/v1/conversations/${id}`, { method: 'DELETE' }).then((r) =>
       json<void>(r),
     ),
+  // M2 §1.4 — persist a system note (e.g. auto-fallback notice) so it
+  // survives reload and is visible to other clients of the same conversation.
+  appendSystemMessage: (id: string, content: string) =>
+    authedFetch(`/v1/conversations/${id}/messages`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ role: 'system', content }),
+    }).then((r) =>
+      json<{ message: { id: string; role: 'system'; content: string; created_at: number } }>(r),
+    ),
   testModel: (id: string) =>
     authedFetch(`/v1/models/${id}/test`, { method: 'POST' }).then((r) =>
       json<{
