@@ -249,6 +249,10 @@ async function adapterVolcengineArk(args: {
 }): Promise<AdapterResult> {
   if (!args.apiKey) throw vErr('Ark image adapter requires api_key');
   const url = `${args.baseUrl.replace(/\/+$/, '')}/images/generations`;
+  // Ark Seedream 4.x requires ≥3,686,400 pixels (min 1920×1920).
+  // Use 1920×1920 as the default square size which all Seedream models support.
+  const imgSize = '1920x1920';
+  const imgDim = 1920;
   const res = await fetch(url, {
     method: 'POST',
     headers: {
@@ -259,7 +263,7 @@ async function adapterVolcengineArk(args: {
       model: args.modelName,
       prompt: args.prompt,
       n: 1,
-      size: '1024x1024',
+      size: imgSize,
       response_format: 'b64_json',
     }),
   });
@@ -274,7 +278,7 @@ async function adapterVolcengineArk(args: {
   };
   const item = json.data?.[0];
   if (item?.b64_json) {
-    return { b64: item.b64_json, mime: 'image/png', width: 1024, height: 1024 };
+    return { b64: item.b64_json, mime: 'image/png', width: imgDim, height: imgDim };
   }
   if (item?.url) {
     const imgRes = await fetch(item.url);
@@ -283,8 +287,8 @@ async function adapterVolcengineArk(args: {
     return {
       b64: buf.toString('base64'),
       mime: imgRes.headers.get('content-type') ?? 'image/png',
-      width: 1024,
-      height: 1024,
+      width: imgDim,
+      height: imgDim,
     };
   }
   throw new Error('Ark images: empty response');
