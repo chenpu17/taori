@@ -3,6 +3,7 @@ import {
   PROVIDER_TYPES,
   MODEL_CAPABILITIES,
   MESSAGE_STATUSES,
+  MODALITIES,
 } from './constants.js';
 import { ERROR_CODES, ERROR_CLASSIFICATIONS } from './errors.js';
 
@@ -16,6 +17,7 @@ import { ERROR_CODES, ERROR_CLASSIFICATIONS } from './errors.js';
 
 export const ProviderTypeSchema = z.enum(PROVIDER_TYPES);
 export const ModelCapabilitySchema = z.enum(MODEL_CAPABILITIES);
+export const ModalitySchema = z.enum(MODALITIES);
 export const MessageStatusSchema = z.enum(MESSAGE_STATUSES);
 export const ErrorCodeSchema = z.enum(ERROR_CODES);
 export const ErrorClassificationSchema = z.enum(ERROR_CLASSIFICATIONS);
@@ -86,7 +88,15 @@ export const ModelSchema = z.object({
   price_input_per_1m: z.number().nullable(),
   price_output_per_1m: z.number().nullable(),
   price_per_call: z.number().nullable(),
+  // M2.5 — finer pricing for image/video models.
+  price_per_image: z.number().nullable(),
+  price_per_video_second: z.number().nullable(),
   price_currency: z.string(),
+  // M2.5 — declared output modalities, e.g. ['text','image'] for a multimodal
+  // model. Independent of `capability` bucket; defaults to ['text'] for chat.
+  modalities: z.array(ModalitySchema),
+  // ms-since-epoch of last automated price catalog refresh, or null if never.
+  price_synced_at: z.number().int().nullable(),
   context_length: z.number().int().nullable(),
   supports_vision: z.boolean(),
   supports_tools: z.boolean(),
@@ -109,7 +119,10 @@ export const ModelCreateSchema = z.object({
   price_input_per_1m: z.number().nonnegative().nullable().optional(),
   price_output_per_1m: z.number().nonnegative().nullable().optional(),
   price_per_call: z.number().nonnegative().nullable().optional(),
+  price_per_image: z.number().nonnegative().nullable().optional(),
+  price_per_video_second: z.number().nonnegative().nullable().optional(),
   price_currency: z.string().length(3).optional(),
+  modalities: z.array(ModalitySchema).optional(),
   context_length: z.number().int().positive().nullable().optional(),
   supports_vision: z.boolean().optional(),
   supports_tools: z.boolean().optional(),
@@ -121,9 +134,22 @@ export type ModelCreate = z.infer<typeof ModelCreateSchema>;
 export const ModelUpdateSchema = z.object({
   alias: z.string().min(1).max(80).nullable().optional(),
   display_name: z.string().min(1).max(200).optional(),
+  capability: ModelCapabilitySchema.optional(),
   is_default_for: ModelCapabilitySchema.nullable().optional(),
   enabled: z.boolean().optional(),
   fallback_order: z.number().int().nonnegative().optional(),
+  // Manual pricing edits (e.g. when catalog sync doesn't cover the model).
+  price_input_per_1m: z.number().nonnegative().nullable().optional(),
+  price_output_per_1m: z.number().nonnegative().nullable().optional(),
+  price_per_call: z.number().nonnegative().nullable().optional(),
+  price_per_image: z.number().nonnegative().nullable().optional(),
+  price_per_video_second: z.number().nonnegative().nullable().optional(),
+  price_currency: z.string().length(3).optional(),
+  modalities: z.array(ModalitySchema).optional(),
+  context_length: z.number().int().positive().nullable().optional(),
+  supports_vision: z.boolean().optional(),
+  supports_tools: z.boolean().optional(),
+  supports_json: z.boolean().optional(),
 });
 export type ModelUpdate = z.infer<typeof ModelUpdateSchema>;
 
@@ -141,8 +167,12 @@ export const DiscoveredModelSchema = z.object({
   capability: ModelCapabilitySchema,
   price_input_per_1m: z.number().nullable(),
   price_output_per_1m: z.number().nullable(),
+  price_per_image: z.number().nullable().optional(),
+  price_per_video_second: z.number().nullable().optional(),
+  modalities: z.array(ModalitySchema).optional(),
   context_length: z.number().int().nullable(),
   supports_vision: z.boolean(),
+  supports_tools: z.boolean().optional(),
 });
 export type DiscoveredModel = z.infer<typeof DiscoveredModelSchema>;
 
@@ -155,6 +185,52 @@ export const ModelDiscoveryResponseSchema = z.object({
   }),
 });
 export type ModelDiscoveryResponse = z.infer<typeof ModelDiscoveryResponseSchema>;
+
+/**
+ * M2.5 — Catalog sync (F-PR). Re-fetches provider price lists, upserts into
+ * the `models` table, and reports a diff for the UI banner.
+ */
+export const CatalogSyncRequestSchema = z.object({
+  provider_id: z.string().optional(),
+});
+export type CatalogSyncRequest = z.infer<typeof CatalogSyncRequestSchema>;
+
+export const CatalogModelDiffSchema = z.object({
+  provider_id: z.string(),
+  model_name: z.string(),
+  display_name: z.string(),
+  change: z.enum(['new', 'price_changed', 'unchanged', 'removed']),
+  before: z
+    .object({
+      price_input_per_1m: z.number().nullable(),
+      price_output_per_1m: z.number().nullable(),
+      price_per_image: z.number().nullable().optional(),
+    })
+    .optional(),
+  after: z
+    .object({
+      price_input_per_1m: z.number().nullable(),
+      price_output_per_1m: z.number().nullable(),
+      price_per_image: z.number().nullable().optional(),
+    })
+    .optional(),
+});
+export type CatalogModelDiff = z.infer<typeof CatalogModelDiffSchema>;
+
+export const CatalogSyncResponseSchema = z.object({
+  ok: z.boolean(),
+  synced_at: z.number().int(),
+  total_providers: z.number().int().nonnegative(),
+  total_models: z.number().int().nonnegative(),
+  diffs: z.array(CatalogModelDiffSchema),
+  errors: z.array(
+    z.object({
+      provider_id: z.string(),
+      message: z.string(),
+    }),
+  ),
+});
+export type CatalogSyncResponse = z.infer<typeof CatalogSyncResponseSchema>;
 
 export const ChatMessageSchema = z.object({
   role: z.enum(['user', 'assistant', 'system']),

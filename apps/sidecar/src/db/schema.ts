@@ -44,7 +44,12 @@ export const models = sqliteTable(
     price_input_per_1m: real('price_input_per_1m'),
     price_output_per_1m: real('price_output_per_1m'),
     price_per_call: real('price_per_call'),
+    price_per_image: real('price_per_image'),
+    price_per_video_second: real('price_per_video_second'),
     price_currency: text('price_currency').notNull().default('USD'),
+    price_synced_at: integer('price_synced_at'),
+    /** JSON array of Modality strings ('text'|'image'|'audio'|'video'). */
+    modalities: text('modalities'),
     context_length: integer('context_length'),
     supports_vision: integer('supports_vision', { mode: 'boolean' })
       .notNull()

@@ -44,6 +44,20 @@ async function main(): Promise<void> {
   // The handshake line — Tauri reads exactly this format.
   process.stdout.write(`READY ${port} ${config.bearer}\n`);
 
+  // Boot the catalog price sync. Best-effort; ignores failures so we never
+  // hold up the READY handshake or crash the sidecar on transient network.
+  const { ProvidersRepo, ModelsRepo } = await import('./db/repos/index.js');
+  const { scheduleCatalogSync } = await import('./catalog/index.js');
+  const catalogTask = scheduleCatalogSync({
+    providers: new ProvidersRepo(db),
+    models: new ModelsRepo(db),
+    keystore,
+    log: {
+      info: (...a) => process.stderr.write('[catalog] ' + a.join(' ') + '\n'),
+      warn: (...a) => process.stderr.write('[catalog] WARN ' + a.join(' ') + '\n'),
+    },
+  });
+
   if (config.isDev) {
     process.stderr.write(
       `[sidecar] dev mode listening on http://127.0.0.1:${port} (control=${config.controlUrl ? 'configured' : 'none'})\n`,
@@ -53,6 +67,7 @@ async function main(): Promise<void> {
   const shutdown = async (signal: string) => {
     process.stderr.write(`[sidecar] received ${signal}, shutting down\n`);
     try {
+      catalogTask.stop();
       await app.close();
     } finally {
       process.exit(0);

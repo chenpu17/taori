@@ -56,6 +56,25 @@ function toProvider(row: ProviderRow): Provider {
 }
 
 function toModel(row: ModelRow): Model {
+  let modalities: Model['modalities'] = ['text'];
+  if (row.modalities) {
+    try {
+      const parsed = JSON.parse(row.modalities);
+      if (Array.isArray(parsed) && parsed.every((x) => typeof x === 'string')) {
+        modalities = parsed as Model['modalities'];
+      }
+    } catch {
+      // keep default
+    }
+  } else {
+    // Backfill defaults based on capability for legacy rows.
+    const cap = row.capability as ModelCapability;
+    if (cap === 'image') modalities = ['image'];
+    else if (cap === 'video') modalities = ['video'];
+    else if (cap === 'multimodal') modalities = ['text', 'image'];
+    else if (cap === 'asr') modalities = ['audio'];
+    else if (cap === 'tts') modalities = ['audio'];
+  }
   return {
     id: row.id,
     alias: row.alias,
@@ -66,7 +85,11 @@ function toModel(row: ModelRow): Model {
     price_input_per_1m: row.price_input_per_1m,
     price_output_per_1m: row.price_output_per_1m,
     price_per_call: row.price_per_call,
+    price_per_image: row.price_per_image ?? null,
+    price_per_video_second: row.price_per_video_second ?? null,
     price_currency: row.price_currency,
+    modalities,
+    price_synced_at: row.price_synced_at ?? null,
     context_length: row.context_length,
     supports_vision: row.supports_vision,
     supports_tools: row.supports_tools,
@@ -281,7 +304,13 @@ export class ModelsRepo {
         price_input_per_1m: input.price_input_per_1m ?? null,
         price_output_per_1m: input.price_output_per_1m ?? null,
         price_per_call: input.price_per_call ?? null,
+        price_per_image: input.price_per_image ?? null,
+        price_per_video_second: input.price_per_video_second ?? null,
         price_currency: input.price_currency ?? 'USD',
+        price_synced_at: null,
+        modalities: input.modalities
+          ? JSON.stringify(input.modalities)
+          : null,
         context_length: input.context_length ?? null,
         supports_vision: input.supports_vision ?? false,
         supports_tools: input.supports_tools ?? false,
@@ -301,6 +330,70 @@ export class ModelsRepo {
     return toModel(row);
   }
 
+  /**
+   * M2.5 catalog-sync helper. Updates pricing/modalities for a model identified
+   * by (provider_id, model_name) — does not touch user-set fields like alias,
+   * display_name, fallback_order, enabled. Sets `price_synced_at` to now.
+   */
+  patchPricing(
+    providerId: string,
+    modelName: string,
+    patch: {
+      price_input_per_1m?: number | null;
+      price_output_per_1m?: number | null;
+      price_per_call?: number | null;
+      price_per_image?: number | null;
+      price_per_video_second?: number | null;
+      modalities?: string[];
+      capability?: ModelCapability;
+      context_length?: number | null;
+      supports_vision?: boolean;
+      supports_tools?: boolean;
+    },
+  ): Model | null {
+    const now = Date.now();
+    const row = this.db
+      .update(models)
+      .set({
+        ...(patch.price_input_per_1m !== undefined && {
+          price_input_per_1m: patch.price_input_per_1m,
+        }),
+        ...(patch.price_output_per_1m !== undefined && {
+          price_output_per_1m: patch.price_output_per_1m,
+        }),
+        ...(patch.price_per_call !== undefined && {
+          price_per_call: patch.price_per_call,
+        }),
+        ...(patch.price_per_image !== undefined && {
+          price_per_image: patch.price_per_image,
+        }),
+        ...(patch.price_per_video_second !== undefined && {
+          price_per_video_second: patch.price_per_video_second,
+        }),
+        ...(patch.modalities !== undefined && {
+          modalities: JSON.stringify(patch.modalities),
+        }),
+        ...(patch.capability !== undefined && { capability: patch.capability }),
+        ...(patch.context_length !== undefined && {
+          context_length: patch.context_length,
+        }),
+        ...(patch.supports_vision !== undefined && {
+          supports_vision: patch.supports_vision,
+        }),
+        ...(patch.supports_tools !== undefined && {
+          supports_tools: patch.supports_tools,
+        }),
+        price_synced_at: now,
+        updated_at: now,
+      })
+      .where(
+        and(eq(models.provider_id, providerId), eq(models.model_name, modelName)),
+      )
+      .returning()
+      .get();
+    return row ? toModel(row) : null;
+  }
+
   update(id: string, patch: ModelUpdate): Model | null {
     const existing = this.get(id);
     if (!existing) return null;
@@ -311,12 +404,46 @@ export class ModelsRepo {
         ...(patch.display_name !== undefined && {
           display_name: patch.display_name,
         }),
+        ...(patch.capability !== undefined && { capability: patch.capability }),
         ...(patch.is_default_for !== undefined && {
           is_default_for: patch.is_default_for,
         }),
         ...(patch.enabled !== undefined && { enabled: patch.enabled }),
         ...(patch.fallback_order !== undefined && {
           fallback_order: patch.fallback_order,
+        }),
+        ...(patch.price_input_per_1m !== undefined && {
+          price_input_per_1m: patch.price_input_per_1m,
+        }),
+        ...(patch.price_output_per_1m !== undefined && {
+          price_output_per_1m: patch.price_output_per_1m,
+        }),
+        ...(patch.price_per_call !== undefined && {
+          price_per_call: patch.price_per_call,
+        }),
+        ...(patch.price_per_image !== undefined && {
+          price_per_image: patch.price_per_image,
+        }),
+        ...(patch.price_per_video_second !== undefined && {
+          price_per_video_second: patch.price_per_video_second,
+        }),
+        ...(patch.price_currency !== undefined && {
+          price_currency: patch.price_currency,
+        }),
+        ...(patch.modalities !== undefined && {
+          modalities: JSON.stringify(patch.modalities),
+        }),
+        ...(patch.context_length !== undefined && {
+          context_length: patch.context_length,
+        }),
+        ...(patch.supports_vision !== undefined && {
+          supports_vision: patch.supports_vision,
+        }),
+        ...(patch.supports_tools !== undefined && {
+          supports_tools: patch.supports_tools,
+        }),
+        ...(patch.supports_json !== undefined && {
+          supports_json: patch.supports_json,
         }),
         updated_at: Date.now(),
       })

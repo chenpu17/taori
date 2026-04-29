@@ -29,8 +29,9 @@
 import type { FastifyInstance } from 'fastify';
 import { PassThrough } from 'node:stream';
 import { createOpenAI } from '@ai-sdk/openai';
-import { streamText } from 'ai';
-import { ChatRequestSchema, TaoriError, calculateCostUsd } from '@taori/shared';
+import { streamText, tool } from 'ai';
+import { z } from 'zod';
+import { ChatRequestSchema, TaoriError, calculateCostUsd, isChatCapable } from '@taori/shared';
 import type { BuildServerArgs } from '../server.js';
 import {
   ConversationsRepo,
@@ -39,10 +40,12 @@ import {
   ProvidersRepo,
   CostsRepo,
   MemoriesRepo,
+  FilesRepo,
   type MessageRow,
 } from '../db/repos/index.js';
 import { classifyProviderError } from '../providers/registry.js';
 import { detectImageIntent, isIntentDisabledUntilNow } from '../intent.js';
+import type { CapabilityBus } from '../bus/index.js';
 
 const TEST_HOOKS_ENABLED = process.env.NODE_ENV !== 'production'
   && process.env.TAORI_DISABLE_TEST_HOOKS !== '1';
@@ -61,6 +64,7 @@ export function registerChatRoute(
   const providersRepo = new ProvidersRepo(deps.db);
   const costsRepo = new CostsRepo(deps.db);
   const memoriesRepo = new MemoriesRepo(deps.db);
+  const filesRepo = new FilesRepo(deps.db);
 
   app.post('/v1/chat', async (req, reply) => {
     const parsed = ChatRequestSchema.safeParse(req.body);
@@ -317,6 +321,16 @@ export function registerChatRoute(
         ? readForcedClassification(req.headers[FORCE_CLASSIFICATION_HEADER])
         : null,
       capability: model?.capability ?? 'chat',
+      bus: deps.bus ?? null,
+      // Pick an image candidate at request time (default → cheapest enabled).
+      // If the chat model itself isn't chat-capable (e.g. an image-only model),
+      // skip — there's no LLM to dispatch tool calls.
+      imageModelId:
+        deps.bus && model && isChatCapable(model.capability)
+          ? (modelsRepo.defaultFor('image') ??
+              modelsRepo.pickCheapestActive('image', ''))?.id ?? null
+          : null,
+      filesRepo,
     };
 
     if (model && provider && provider.api_key_ref) {
@@ -367,6 +381,14 @@ interface ProduceCtx {
   forcedClassification: string | null;
   /** capability of the model — used to pick fallback within same family */
   capability: string;
+  /**
+   * M2.5 §F-CR — capability-bus reference and the image model the LLM should
+   * route image_generate calls to. Both null = no image tool offered. The
+   * fast-path image-intent route runs BEFORE this and is mutually exclusive.
+   */
+  bus: CapabilityBus | null;
+  imageModelId: string | null;
+  filesRepo: FilesRepo | null;
 }
 
 /**
@@ -689,10 +711,96 @@ async function produceUpstreamStream(
       baseURL: cfg.baseURL.replace(/\/$/, ''),
       apiKey: cfg.apiKey,
     });
+
+    // M2.5 §F-CR — Inject `image_generate` as an LLM tool when:
+    //  • the user has at least one enabled image-capability model;
+    //  • the chat model itself supports text I/O (chat or multimodal).
+    // The fast-path image-intent route already took precedence above, so
+    // when we reach here either (a) the user's text didn't match the regex
+    // or (b) they had no image model. Case (a) is precisely where the LLM
+    // should be allowed to pick the tool itself.
+    const tools = ctx.bus && ctx.imageModelId
+      ? {
+          image_generate: tool({
+            description:
+              'Generate an image from a text prompt. Use this when the user asks for a picture, drawing, illustration, poster, or any visual artifact. The result is automatically attached to the conversation; do NOT include the image bytes in your reply — instead briefly tell the user the image is ready.',
+            parameters: z.object({
+              prompt: z
+                .string()
+                .min(1)
+                .max(4000)
+                .describe('Detailed English prompt describing the image to generate'),
+            }),
+            execute: async ({ prompt }) => {
+              const result = await ctx.bus!.invoke(
+                'image_generate',
+                { prompt, model_id: ctx.imageModelId! },
+                {
+                  conversationId: ctx.conversationId,
+                  sourceMessageId: ctx.messageId,
+                },
+              );
+              if (!result.ok) {
+                return {
+                  ok: false,
+                  error: result.error?.message ?? 'image_generate failed',
+                };
+              }
+              const out = result.output as {
+                file_id: string;
+                content_type: string;
+                width: number;
+                height: number;
+                assistant_message_id: string;
+              };
+              // Read the file bytes back from disk and inline them as base64
+              // in the annotation. This avoids needing a separate authed
+              // /v1/files endpoint just for inline rendering, at the cost of
+              // a one-time stream blow-up of ~1MB per generated image.
+              let dataB64: string | null = null;
+              try {
+                const row = ctx.filesRepo?.get(out.file_id);
+                if (row?.original_path) {
+                  const fs = await import('node:fs/promises');
+                  const buf = await fs.readFile(row.original_path);
+                  dataB64 = buf.toString('base64');
+                }
+              } catch (e) {
+                ctx.log.warn({ err: e }, 'chat.image_inline_read_failed');
+              }
+              // Stream a tool_image_result annotation back to the renderer
+              // so it can render the image inline immediately, even before
+              // the LLM writes its closing prose.
+              write(
+                `8:${JSON.stringify([
+                  {
+                    type: 'tool_image_result',
+                    tool: 'image_generate',
+                    file_id: out.file_id,
+                    content_type: out.content_type,
+                    width: out.width,
+                    height: out.height,
+                    prompt,
+                    ...(dataB64 ? { data_b64: dataB64 } : {}),
+                  },
+                ])}\n`,
+              );
+              return {
+                ok: true,
+                file_id: out.file_id,
+                width: out.width,
+                height: out.height,
+              };
+            },
+          }),
+        }
+      : undefined;
+
     const result = await streamText({
       model: provider.chat(cfg.modelName),
       messages: buildUpstreamMessages(ctx),
       abortSignal: signal,
+      ...(tools && { tools, maxSteps: 3 }),
     });
 
     let chunks = 0;
@@ -705,6 +813,23 @@ async function produceUpstreamStream(
     const usage = await result.usage.catch(() => undefined);
     const promptTokens = usage?.promptTokens ?? 0;
     const completionTokens = usage?.completionTokens ?? 0;
+    // M2.5 §F-CB — compute the per-call cost server-side using the price
+    // snapshot we already captured on ctx, so the renderer can render a
+    // CostBadge without doing the math twice. Falls back to null when no
+    // price is configured (e.g. local Ollama or BYO model with empty pricing).
+    let actualUsd: number | null = null;
+    try {
+      const c = calculateCostUsd({
+        priceInputPer1m: ctx.priceInputPer1m,
+        priceOutputPer1m: ctx.priceOutputPer1m,
+        pricePerCall: ctx.pricePerCall,
+        inputTokens: promptTokens,
+        outputTokens: completionTokens,
+      });
+      actualUsd = c ?? null;
+    } catch {
+      actualUsd = null;
+    }
     // AI SDK reports `finishReason: 'content-filter'` when the upstream
     // refused to deliver / cut off the response for safety reasons. Map it
     // to the same `provider_error/content_filter` wire frame as exception
@@ -737,7 +862,7 @@ async function produceUpstreamStream(
           message_id: ctx.messageId,
           input_tokens: promptTokens,
           output_tokens: completionTokens,
-          actual_usd: null,
+          actual_usd: actualUsd,
           duration_ms: Date.now() - startedAt,
         },
       ])}\n`,

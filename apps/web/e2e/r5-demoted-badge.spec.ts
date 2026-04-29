@@ -76,7 +76,7 @@ test('R5 demoted model carries ⚠️ in selector and settings list', async ({ p
   const primaryOption = select.locator(`option[value="${primaryId}"]`);
   await expect(primaryOption).toContainText('⚠️');
 
-  // Settings list also shows the demoted badge.
-  await page.getByTestId('open-settings').click();
-  await expect(page.getByTestId('settings-demoted-badge').first()).toBeVisible({ timeout: 5_000 });
+  // Model Center also shows the demoted badge.
+  await page.getByTestId('open-model-center').click();
+  await expect(page.locator('[data-testid^="model-row-demoted-"]').first()).toBeVisible({ timeout: 5_000 });
 });

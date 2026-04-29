@@ -45,6 +45,11 @@ const PROVIDER_PRESETS: Partial<
     default_base_url: 'http://127.0.0.1:11434/v1',
     help: '本地模型，无需 Key。',
   },
+  volcengine_ark: {
+    label: '火山方舟（豆包 / SeeDream / SeeDance / Wan）',
+    default_base_url: 'https://ark.cn-beijing.volces.com/api/v3',
+    help: '一个 Key 解锁文本、多模态、文生图、文生视频。',
+  },
   custom: {
     label: '自定义（OpenAI 兼容）',
     default_base_url: '',
@@ -67,8 +72,12 @@ export function Onboarding({ onDone, onSkip }: OnboardingProps): JSX.Element {
     candidates: {
       model_name: string;
       display_name: string;
+      capability: import('@taori/shared').ModelCapability;
       supports_vision: boolean;
       price_input_per_1m: number | null;
+      price_output_per_1m: number | null;
+      price_per_image: number | null;
+      price_per_video_second: number | null;
     }[];
   } | null>(null);
   const [chosen, setChosen] = useState<string>('');
@@ -116,11 +125,18 @@ export function Onboarding({ onDone, onSkip }: OnboardingProps): JSX.Element {
           .map((m) => ({
             model_name: m.model_name,
             display_name: m.display_name,
+            capability: m.capability,
             supports_vision: m.supports_vision,
             price_input_per_1m: m.price_input_per_1m,
+            price_output_per_1m: m.price_output_per_1m,
+            price_per_image: m.price_per_image ?? null,
+            price_per_video_second: m.price_per_video_second ?? null,
           })),
       });
-      const primary = disc.recommended.chat ?? disc.models[0]?.model_name ?? '';
+      const chatEligible = disc.models.find(
+        (m) => m.capability === 'chat' || m.capability === 'multimodal',
+      );
+      const primary = disc.recommended.chat ?? chatEligible?.model_name ?? '';
       setChosen(primary);
       // Pre-check up to 3 candidates. Always include the recommended one.
       // Then add up to 2 additional non-vision low-tier picks.
@@ -157,17 +173,24 @@ export function Onboarding({ onDone, onSkip }: OnboardingProps): JSX.Element {
         const candidate = discovery.candidates.find(
           (m) => m.model_name === modelName,
         );
-        const display = candidate?.display_name ?? modelName;
-        const supportsVision = candidate?.supports_vision ?? false;
+        if (!candidate) continue;
+        const capability = candidate.capability;
         const isPrimary = modelName === primary;
+        // Only chat / multimodal can serve as the chat default. Image/video
+        // models live on their own capability tabs and are never auto-routed
+        // by the chat composer.
+        const canBeChatDefault = capability === 'chat' || capability === 'multimodal';
         await api.createModel({
           provider_id: discovery.provider_id,
           model_name: modelName,
-          capability: 'chat',
-          display_name: display,
-          supports_vision: supportsVision,
-          price_input_per_1m: candidate?.price_input_per_1m ?? null,
-          is_default_for: isPrimary ? 'chat' : null,
+          capability,
+          display_name: candidate.display_name,
+          supports_vision: candidate.supports_vision,
+          price_input_per_1m: candidate.price_input_per_1m,
+          price_output_per_1m: candidate.price_output_per_1m,
+          price_per_image: candidate.price_per_image,
+          price_per_video_second: candidate.price_per_video_second,
+          is_default_for: isPrimary && canBeChatDefault ? 'chat' : null,
         });
       }
       onDone();
@@ -263,13 +286,30 @@ export function Onboarding({ onDone, onSkip }: OnboardingProps): JSX.Element {
       {step === 'pick-model' && discovery && (
         <div className="onboarding-pick" data-testid="onb-pick">
           <p>
-            选择要导入的模型（可多选），并指定一个作为默认聊天模型：
+            选择要导入的模型（可多选）。文本/多模态模型可设为默认聊天模型；图像/视频模型仅可在画图/视频流程中使用。
           </p>
           <ul className="onboarding-candidates" data-testid="onb-candidates">
             {discovery.candidates.map((m) => {
               const tier = priceTier(m.price_input_per_1m);
               const checked = chosenSet.has(m.model_name);
               const isPrimary = chosen === m.model_name;
+              const canBeChatDefault =
+                m.capability === 'chat' || m.capability === 'multimodal';
+              const capLabel: Record<string, string> = {
+                chat: '💬 文本',
+                multimodal: '🖼️ 多模态',
+                image: '🎨 图像',
+                video: '🎬 视频',
+                asr: '🎙️ ASR',
+                tts: '🔊 TTS',
+                embedding: '🧬 嵌入',
+              };
+              const priceHint =
+                m.capability === 'image' && m.price_per_image != null
+                  ? `每张 $${m.price_per_image.toFixed(3)}`
+                  : m.capability === 'video' && m.price_per_video_second != null
+                    ? `每秒 $${m.price_per_video_second.toFixed(3)}`
+                    : null;
               return (
                 <li key={m.model_name}>
                   <label>
@@ -284,13 +324,18 @@ export function Onboarding({ onDone, onSkip }: OnboardingProps): JSX.Element {
                       type="radio"
                       name="onb-primary"
                       checked={isPrimary}
-                      disabled={!checked}
+                      disabled={!checked || !canBeChatDefault}
                       onChange={() => {
-                        if (checked) setChosen(m.model_name);
+                        if (checked && canBeChatDefault) setChosen(m.model_name);
                       }}
                       data-testid="onb-candidate-primary"
-                      title="设为默认聊天模型"
+                      title={
+                        canBeChatDefault
+                          ? '设为默认聊天模型'
+                          : '仅文本/多模态可设为默认聊天'
+                      }
                     />
+                    <span className="cand-cap">{capLabel[m.capability] ?? m.capability}</span>
                     <span className="cand-name">{m.display_name}</span>
                     {m.supports_vision && <span title="支持视觉"> 👁</span>}
                     {tier && (
@@ -298,6 +343,7 @@ export function Onboarding({ onDone, onSkip }: OnboardingProps): JSX.Element {
                         {PRICE_TIER_LABEL[tier]}
                       </span>
                     )}
+                    {priceHint && <span className="price-hint">{priceHint}</span>}
                   </label>
                 </li>
               );

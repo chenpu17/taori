@@ -149,19 +149,21 @@ test('M1 DoD §7: complete 8-step user journey', async ({ page }) => {
   await expect(page.getByTestId('cost-today')).toBeVisible();
   await expect(page.getByTestId('cost-month')).toBeVisible();
 
-  // --- 8. Settings: list models, set non-default model as default, then
+  // --- 8. Model Center: list models, set non-default model as default, then
   //        delete the original default.
-  await page.getByTestId('open-settings').click();
-  await expect(page.getByTestId('settings-overlay')).toBeVisible();
-  const modelItems = page.getByTestId('settings-model-item');
+  await page.getByTestId('open-model-center').click();
+  await expect(page.getByTestId('model-center')).toBeVisible();
+  // Filter to actionable rows (exclude the "set default" sub-buttons).
+  const modelItems = page.locator('[data-testid^="model-row-"]:not([data-testid^="model-row-default-"]):not([data-testid^="model-row-up-"]):not([data-testid^="model-row-down-"]):not([data-testid^="model-row-delete-"]):not([data-testid^="model-row-enabled-"])');
   await expect(modelItems).toHaveCount(3);
-  // Promote a non-default model to default (button only renders for non-defaults).
-  const setDefault = page.getByTestId('settings-set-default').first();
+  // Promote a non-default model to default (the default model's button is disabled).
+  const setDefault = page.locator('[data-testid^="model-row-default-"]:not([disabled])').first();
   await setDefault.click();
-  await expect(page.getByTestId('settings-set-default')).toHaveCount(2);
+  // After promotion, exactly one model is default → exactly one disabled button.
+  await expect(page.locator('[data-testid^="model-row-default-"]:not([disabled])')).toHaveCount(2);
   // Delete one model; native confirm auto-accept.
   page.once('dialog', (d) => void d.accept());
-  await page.getByTestId('settings-delete').first().click();
+  await page.locator('[data-testid^="model-row-delete-"]').first().click();
   await expect(modelItems).toHaveCount(2, { timeout: 5_000 });
 
   // Cross-check via API: two models remain, one owns chat default.

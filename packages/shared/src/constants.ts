@@ -8,11 +8,17 @@ export const PROVIDER_TYPES = [
   // ProviderTypeSchema accepts them; actual adapters land in M2.4.
   'replicate',
   'sd_webui',
+  // M2.5 — Volcengine Ark MaaS (one API key, many model families:
+  // doubao chat/vision, doubao-seed image, wan/seedance video).
+  'volcengine_ark',
 ] as const;
 export type ProviderType = (typeof PROVIDER_TYPES)[number];
 
 export const MODEL_CAPABILITIES = [
   'chat',
+  // M2.5 — multimodal models can also serve `chat` requests; UI groups them
+  // separately, but the chat candidate pool treats `multimodal` as `chat-able`.
+  'multimodal',
   'image',
   'video',
   'embedding',
@@ -20,6 +26,16 @@ export const MODEL_CAPABILITIES = [
   'tts',
 ] as const;
 export type ModelCapability = (typeof MODEL_CAPABILITIES)[number];
+
+/** Capabilities that can serve a chat request (text-in/text-out). */
+export const CHAT_CAPABLE_CAPABILITIES = ['chat', 'multimodal'] as const;
+export function isChatCapable(c: string): boolean {
+  return (CHAT_CAPABLE_CAPABILITIES as readonly string[]).includes(c);
+}
+
+/** Modality flags for a model — independent of capability bucket. */
+export const MODALITIES = ['text', 'image', 'audio', 'video'] as const;
+export type Modality = (typeof MODALITIES)[number];
 
 export const MESSAGE_STATUSES = [
   'pending',

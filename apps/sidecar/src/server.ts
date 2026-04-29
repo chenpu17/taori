@@ -27,6 +27,8 @@ import { registerConversationsRoute } from './routes/conversations.js';
 import { registerAdminRoute } from './routes/admin.js';
 import { registerToolsRoute } from './routes/tools.js';
 import { registerRoundtableRoute } from './routes/roundtable.js';
+import { registerCatalogRoute } from './routes/catalog.js';
+import { scheduleCatalogSync } from './catalog/index.js';
 import { CapabilityBus } from './bus/index.js';
 import { createFileReadTool } from './bus/builtins/file_read.js';
 import { createImageGenerateTool } from './bus/builtins/image_generate.js';
@@ -39,6 +41,12 @@ export interface BuildServerArgs {
   control: ControlClient;
   keystore: KeyStore;
   startedAt: number;
+  /**
+   * Optional: when provided, the chat route gets access to the capability
+   * bus and can offer LLM-side `image_generate` tool calls (M2.5 §F-CR).
+   * Defaults to undefined for legacy callers + existing tests.
+   */
+  bus?: CapabilityBus;
 }
 
 export function buildServer(args: BuildServerArgs): FastifyInstance {
@@ -118,36 +126,40 @@ export function buildServer(args: BuildServerArgs): FastifyInstance {
   });
 
   registerHealthRoute(app, args);
-  registerChatRoute(app, args);
-  registerProvidersRoute(app, { ...args, keystore: args.keystore });
-  registerModelsRoute(app, args);
-  registerCostsRoute(app, args);
-  registerMemoriesRoute(app, args);
-  registerConversationsRoute(app, args);
-  registerAdminRoute(app, args);
 
-  // M2.3 — Capability Bus + builtin tools
+  // M2.3 — Capability Bus + builtin tools (created BEFORE chat so the chat
+  // route can attach `image_generate` as an LLM tool — M2.5 §F-CR / batch A2).
   const costs = new CostsRepo(args.db);
   const files = new FilesRepo(args.db);
-  const bus = new CapabilityBus(costs);
-  bus.register(createFileReadTool(files));
+  const bus = args.bus ?? new CapabilityBus(costs);
+  if (!args.bus) {
+    bus.register(createFileReadTool(files));
+    const filesDir = path.join(path.dirname(args.config.dbPath), 'files');
+    bus.register(
+      createImageGenerateTool({
+        models: new ModelsRepo(args.db),
+        providers: new ProvidersRepo(args.db),
+        files,
+        messages: new MessagesRepo(args.db),
+        conversations: new ConversationsRepo(args.db),
+        keystore: args.keystore,
+        filesDir,
+      }),
+    );
+  }
 
-  // M2.4 — image generation tool
-  const filesDir = path.join(path.dirname(args.config.dbPath), 'files');
-  bus.register(
-    createImageGenerateTool({
-      models: new ModelsRepo(args.db),
-      providers: new ProvidersRepo(args.db),
-      files,
-      messages: new MessagesRepo(args.db),
-      conversations: new ConversationsRepo(args.db),
-      keystore: args.keystore,
-      filesDir,
-    }),
-  );
+  const argsWithBus = { ...args, bus };
+  registerChatRoute(app, argsWithBus);
+  registerProvidersRoute(app, { ...argsWithBus, keystore: args.keystore });
+  registerModelsRoute(app, argsWithBus);
+  registerCostsRoute(app, argsWithBus);
+  registerMemoriesRoute(app, argsWithBus);
+  registerConversationsRoute(app, argsWithBus);
+  registerAdminRoute(app, argsWithBus);
 
   registerToolsRoute(app, { bus });
-  registerRoundtableRoute(app, args);
+  registerRoundtableRoute(app, argsWithBus);
+  registerCatalogRoute(app, { ...argsWithBus, keystore: args.keystore });
 
   return app;
 }

@@ -50,41 +50,46 @@ async function seedThreeChatModels(env: ReturnType<typeof readSidecarEnv>): Prom
   return seeded;
 }
 
-test('R3.1 MC-3 reorder: move-down + reload persists order', async ({ page }) => {
+test('R3.1 MC-3 reorder: move-down + reload persists order (Model Center)', async ({ page }) => {
   const env = readSidecarEnv();
   await resetSidecar(env);
   const seeded = await seedThreeChatModels(env);
+  const [alpha, bravo, charlie] = seeded;
 
   await page.goto('/');
   await expect(page.getByTestId('chat-panel')).toBeVisible();
-  await page.getByTestId('open-settings').click();
-  await expect(page.getByTestId('settings-overlay')).toBeVisible();
+  await page.getByTestId('open-model-center').click();
+  await expect(page.getByTestId('model-center')).toBeVisible();
 
   // Initial order is the seed insertion order: Alpha, Bravo, Charlie.
-  const items = page.getByTestId('settings-model-item');
-  await expect(items).toHaveCount(3);
-  await expect(items.nth(0)).toContainText('Alpha');
-  await expect(items.nth(1)).toContainText('Bravo');
-  await expect(items.nth(2)).toContainText('Charlie');
+  const rows = page.locator(
+    '[data-testid^="model-row-"]:not([data-testid^="model-row-default-"]):not([data-testid^="model-row-up-"]):not([data-testid^="model-row-down-"]):not([data-testid^="model-row-delete-"]):not([data-testid^="model-row-enabled-"])',
+  );
+  await expect(rows).toHaveCount(3);
+  await expect(rows.nth(0)).toContainText('Alpha');
+  await expect(rows.nth(1)).toContainText('Bravo');
+  await expect(rows.nth(2)).toContainText('Charlie');
 
-  // Top item's ▲ is disabled; bottom item's ▼ is disabled.
-  await expect(items.nth(0).getByTestId('settings-move-up')).toBeDisabled();
-  await expect(items.nth(2).getByTestId('settings-move-down')).toBeDisabled();
+  // Top ▲ disabled; bottom ▼ disabled.
+  await expect(page.getByTestId(`model-row-up-${alpha.id}`)).toBeDisabled();
+  await expect(page.getByTestId(`model-row-down-${charlie.id}`)).toBeDisabled();
 
   // Move Alpha down twice → final order: Bravo, Charlie, Alpha.
-  await items.nth(0).getByTestId('settings-move-down').click();
-  await expect(items.nth(0)).toContainText('Bravo');
-  await expect(items.nth(1)).toContainText('Alpha');
-  await items.nth(1).getByTestId('settings-move-down').click();
-  await expect(items.nth(2)).toContainText('Alpha');
+  await page.getByTestId(`model-row-down-${alpha.id}`).click();
+  await expect(rows.nth(0)).toContainText('Bravo');
+  await expect(rows.nth(1)).toContainText('Alpha');
+  await page.getByTestId(`model-row-down-${alpha.id}`).click();
+  await expect(rows.nth(2)).toContainText('Alpha');
 
   // Reload and confirm ordering survives.
   await page.reload();
-  await page.getByTestId('open-settings').click();
-  const items2 = page.getByTestId('settings-model-item');
-  await expect(items2.nth(0)).toContainText('Bravo');
-  await expect(items2.nth(1)).toContainText('Charlie');
-  await expect(items2.nth(2)).toContainText('Alpha');
+  await page.getByTestId('open-model-center').click();
+  const rows2 = page.locator(
+    '[data-testid^="model-row-"]:not([data-testid^="model-row-default-"]):not([data-testid^="model-row-up-"]):not([data-testid^="model-row-down-"]):not([data-testid^="model-row-delete-"]):not([data-testid^="model-row-enabled-"])',
+  );
+  await expect(rows2.nth(0)).toContainText('Bravo');
+  await expect(rows2.nth(1)).toContainText('Charlie');
+  await expect(rows2.nth(2)).toContainText('Alpha');
 
   // Verify backend reflects same order.
   const r = await authedFetch(env, '/v1/models');
@@ -95,6 +100,6 @@ test('R3.1 MC-3 reorder: move-down + reload persists order', async ({ page }) =>
     .map((m) => m.display_name);
   expect(chatOrder).toEqual(['Bravo', 'Charlie', 'Alpha']);
 
-  // Reference seeded ids so the var is used for parity with seedDefault helpers.
-  expect(seeded).toHaveLength(3);
+  // bravo reference for parity.
+  expect(bravo.id).toBeTruthy();
 });

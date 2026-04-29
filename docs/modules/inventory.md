@@ -107,7 +107,36 @@ M2（失败兜底 / 成本透明 / 多模型协作 / 工具体系基础）已实
 - `packages/shared`：`ToolInvokeRequestSchema` 加入 id 格式约束；`FailureDecisionAnnotation`、`CapabilityRouteAnnotation` 类型定型
 - 数据：复用 M1 schema，无 migration（`cost_records.source_type='tool_call'` 已在 M1 预留）
 
-## 7. 灰盒原则提醒
+## 9. M2.5 完工记录（v0.7）
+
+M2.5（Model Center / Price Catalog / Volcengine Ark）已实现：
+
+- 新增 sidecar 子模块 `apps/sidecar/src/catalog`：`syncCatalog()` 调度 + diff，挂在路由 `POST /v1/catalog/sync`；启动时 async 同步一次，每 24h 周期；详见 [架构 10](../architecture/10-catalog-and-ark.md)
+- 新增 sidecar Provider 适配器 `apps/sidecar/src/providers/volcengine_ark.ts`（doubao chat/vision、wan 图像、seedance 视频；内置 ARK_FAMILIES 价格表，CNY→USD）
+- 新增 renderer 顶级页面 `apps/web/src/ModelCenter.tsx`：Provider chips + 能力 tab + 矩阵表 + ImportDrawer + sync diff 折叠面板（取代旧 Settings 中的模型管理 UI）
+- `apps/web/src/Settings.tsx` 精简：仅保留 AutoFallback / "重新打开 Onboarding" / DangerZone
+- `packages/shared`：`PROVIDER_TYPES` += `volcengine_ark`；`MODEL_CAPABILITIES` += `multimodal`；Model schema 增加 `modalities[] / price_per_call / price_per_image / price_per_video_second / price_synced_at`
+- 价格同步不变量：`patchPricing` 始终刷新 `price_synced_at`（即便 patch 为空），用户字段（alias 等）始终保留，per-provider 错误隔离
+- 测试：`apps/sidecar/test/m2-5-catalog-sync.test.ts`（2 用例：价格 diff 持久化 + 错误隔离），sidecar 105/105 passing
+- E2E 覆盖：新增 `apps/web/e2e/m2.5-modelcenter.spec.ts` / `m2.5-volcengine-ark.spec.ts` / `m2.5-catalog-sync-ui.spec.ts`；既有 `m1.6-settings` / `m1.8-dod-final` / `r3.1-mc3-reorder` / `r5-user-journey` / `r5-demoted-badge` 全量迁移到 ModelCenter testid（model-row-* / provider-chip-test-* / model-center-tab-* 等）；Playwright 72/72 passing。详见 [架构 11 · QA 策略](../architecture/11-qa-strategy.md)
+- ModelCenter 新增的可测能力：`provider-chip-test-{id}`（沿用 `/v1/models/:id/test` 探活）、`model-row-up/down-{id}`（fallback_order ▲/▼）、`model-row-default-{id}`（设为默认）、`model-row-demoted-{id}`（⚠️ 自动降级徽章）
+
+## 10. M2.5 合同变化
+
+- `apps/sidecar`：新增 `/v1/catalog/sync` 路由；`/v1/providers` 接受 `type=volcengine_ark`；`/v1/providers/:id/discover` 对 ARK Provider 返回 ARK_FAMILIES
+- `apps/web`：信息架构变化 — Settings 不再承载模型管理；🧬 顶部按钮打开 ModelCenter overlay
+- `packages/shared`：常量与 Model schema 扩展（向后兼容；旧字段不变）
+- 数据：M2.5 期间未做新 SQL migration（依赖 M1/M2 已有列；Ark 价格在内存常量中）
+
+## 10.1 v0.7 polish（用户验收第二轮）
+
+- `packages/shared`：`ModelUpdateSchema` 扩展为可手动编辑全部字段（capability / supports_* / 5 类价格字段 / modalities / context_length / price_currency），`Model.alias` 仍可空但编辑器有 fallback；`ModelsRepo.update` 镜像同步落库
+- `apps/web/src/Onboarding.tsx`：`finishWithModel` 不再硬编码 `capability='chat'`，按候选自身能力创建模型；非 chat/multimodal 候选不能被设为默认聊天；候选项 UI 加能力徽章 + 图像/视频价格提示。修复"火山方舟图像/视频模型被错误导入为 chat"
+- `apps/web/src/ModelCenter.tsx`：每行新增"编辑"按钮（testid `model-edit-{id}`）打开 `EditModelDialog`：可改 alias / display_name / capability / supports_vision/tools / 5 类价格 / 币种；切换 capability 时自动清理 stale `is_default_for`，并显示警告
+- 计费形态覆盖：chat/multimodal/embedding → 输入+输出/1M token；image → 每张；video → 每秒；asr/tts/其他 → 每次。复杂分级（按分辨率 / 时长档位）记入 v0.8 `pricing_meta` JSON
+- E2E：新增 `apps/web/e2e/m2.5-model-editor.spec.ts`（chat→image 改能力 + 设 per-image 价 + 验证 is_default_for 清空），Playwright 73/73 passing
+
+## 11. 灰盒原则提醒
 
 按 [my-spec 模块灰盒规范](file:///Users/chenpu/workspace/claude-code/my-spec/模块灰盒规范.md)：
 - 维护**对外接口、依赖方向、状态归属、部署语义、协作关系**

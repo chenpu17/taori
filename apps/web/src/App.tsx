@@ -5,6 +5,8 @@ import { getSidecarEndpoint, authedFetch } from './sidecar.js';
 import { api } from './api.js';
 import { Onboarding } from './Onboarding.js';
 import { Settings } from './Settings.js';
+import { ModelCenter } from './ModelCenter.js';
+import { TaoriIcon } from './TaoriIcon.js';
 import { RoundtableLaunchDialog } from './Roundtable.js';
 import { RoundtablePanel } from './RoundtablePanel.js';
 import { priceTier, PRICE_TIER_LABEL, formatUsd, estimateInputTokens, estimateCostUsd } from '@taori/shared';
@@ -74,6 +76,7 @@ export function App(): JSX.Element {
     }
   });
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [modelCenterOpen, setModelCenterOpen] = useState(false);
   const [forceOnboarding, setForceOnboarding] = useState(false);
 
   useEffect(() => {
@@ -173,9 +176,24 @@ export function App(): JSX.Element {
   return (
     <div className="app">
       <header>
-        <h1>Taori</h1>
+        <h1 className="brand">
+          <TaoriIcon size={28} className="brand__icon" />
+          <span className="brand__name">Taori</span>
+        </h1>
         <span className="header-actions">
           <StatusBadge endpoint={endpoint} health={health} error={endpointError} />
+          {endpoint && health?.ok && (
+            <button
+              type="button"
+              className="settings-btn"
+              onClick={() => setModelCenterOpen(true)}
+              data-testid="open-model-center"
+              aria-label="模型中心"
+              title="模型中心"
+            >
+              🧬
+            </button>
+          )}
           {endpoint && health?.ok && (
             <button
               type="button"
@@ -200,7 +218,10 @@ export function App(): JSX.Element {
         <div className="placeholder"><pre className="err">{boot.error}</pre></div>
       ) : showOnboarding ? (
         <Onboarding
-          onDone={() => void reload()}
+          onDone={() => {
+            setForceOnboarding(false);
+            void reload();
+          }}
           onSkip={onSkipOnboarding}
         />
       ) : showBrowseOnly ? (
@@ -219,6 +240,25 @@ export function App(): JSX.Element {
           onChanged={onSettingsChanged}
           onReopenOnboarding={onReopenOnboarding}
         />
+      )}
+      {modelCenterOpen && (
+        <div
+          className="model-center-overlay"
+          role="dialog"
+          aria-modal="true"
+          data-testid="model-center-overlay"
+          onClick={(e) => {
+            if (e.target === e.currentTarget) setModelCenterOpen(false);
+          }}
+        >
+          <ModelCenter
+            onClose={() => setModelCenterOpen(false)}
+            onReopenOnboarding={() => {
+              setModelCenterOpen(false);
+              onReopenOnboarding();
+            }}
+          />
+        </div>
       )}
     </div>
   );
@@ -513,6 +553,22 @@ function ChatPanel({
   const [costByMsg, setCostByMsg] = useState<
     Record<string, { input_tokens: number; output_tokens: number; actual_usd: number | null }>
   >({});
+  // M2.5 §F-CR — when the LLM calls the `image_generate` tool inside a chat
+  // turn, the sidecar streams a `tool_image_result` annotation we use to
+  // render the produced image inline beneath the assistant bubble.
+  const [imagesByMsg, setImagesByMsg] = useState<
+    Record<
+      string,
+      Array<{
+        file_id: string;
+        content_type: string;
+        width: number;
+        height: number;
+        prompt?: string;
+        data_b64?: string;
+      }>
+    >
+  >({});
   const [realtime, setRealtime] = useState<{
     current_conversation_usd: number;
     current_conversation_calls: number;
@@ -758,6 +814,27 @@ function ChatPanel({
                 typeof a.actual_usd === 'number' ? (a.actual_usd as number) : null,
             },
           }));
+        }
+        // M2.5 §F-CR — LLM-tool image result; render inline under this msg.
+        if (
+          a?.type === 'tool_image_result' &&
+          typeof a.file_id === 'string' &&
+          typeof a.content_type === 'string'
+        ) {
+          const entry = {
+            file_id: a.file_id as string,
+            content_type: a.content_type as string,
+            width: Number(a.width ?? 0),
+            height: Number(a.height ?? 0),
+            prompt: typeof a.prompt === 'string' ? (a.prompt as string) : undefined,
+            data_b64:
+              typeof a.data_b64 === 'string' ? (a.data_b64 as string) : undefined,
+          };
+          setImagesByMsg((prev) => {
+            const list = prev[msg.id] ?? [];
+            if (list.some((it) => it.file_id === entry.file_id)) return prev;
+            return { ...prev, [msg.id]: [...list, entry] };
+          });
         }
         // M2.4 — image-intent fast path. Sidecar emitted only meta+capability_route.
         // We open the picker; user-message row is already persisted server-side.
@@ -1151,6 +1228,37 @@ function ChatPanel({
                 },
           );
         }
+        // M2.5 §F-CR — capture tool_image_result during streaming so the
+        // image lights up before the LLM finishes its closing prose.
+        if (
+          a?.type === 'tool_image_result' &&
+          typeof a.file_id === 'string' &&
+          typeof a.content_type === 'string'
+        ) {
+          const fid = a.file_id as string;
+          setImagesByMsg((prev) => {
+            const list = prev[m.id] ?? [];
+            if (list.some((it) => it.file_id === fid)) return prev;
+            return {
+              ...prev,
+              [m.id]: [
+                ...list,
+                {
+                  file_id: fid,
+                  content_type: a.content_type as string,
+                  width: Number(a.width ?? 0),
+                  height: Number(a.height ?? 0),
+                  prompt:
+                    typeof a.prompt === 'string' ? (a.prompt as string) : undefined,
+                  data_b64:
+                    typeof a.data_b64 === 'string'
+                      ? (a.data_b64 as string)
+                      : undefined,
+                },
+              ],
+            };
+          });
+        }
         // M2.1 — failure_decision annotation arrives just before the `3:`
         // error frame. We bind it to the assistant message id so the card
         // sticks with the message even after subsequent retries land below.
@@ -1389,6 +1497,26 @@ function ChatPanel({
                 />
               ) : (
                 <div className="msg-content">{m.content}</div>
+              )}
+              {m.role === 'assistant' && imagesByMsg[m.id] && imagesByMsg[m.id]!.length > 0 && (
+                <div className="msg-tool-images" data-testid="msg-tool-images">
+                  {imagesByMsg[m.id]!.map((img) => (
+                    <figure key={img.file_id} className="tool-image">
+                      <img
+                        src={
+                          img.data_b64
+                            ? `data:${img.content_type};base64,${img.data_b64}`
+                            : ''
+                        }
+                        alt={img.prompt ?? 'generated image'}
+                        loading="lazy"
+                      />
+                      {img.prompt && (
+                        <figcaption>{img.prompt}</figcaption>
+                      )}
+                    </figure>
+                  ))}
+                </div>
               )}
               {m.role === 'assistant' && cost && (
                 <div className="msg-cost" data-testid="msg-cost">

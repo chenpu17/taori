@@ -33,6 +33,16 @@ describe('M2.4 — intent detection', () => {
     expect(detectImageIntent('生成图片：日落').hit).toBe(true);
     expect(detectImageIntent('draw a robot please').hit).toBe(true);
     expect(detectImageIntent('generate image of a forest').hit).toBe(true);
+    // M2.5 — relaxed prefixes (the user's "帮我画一张机器人" complaint).
+    expect(detectImageIntent('帮我画一张机器人').hit).toBe(true);
+    expect(detectImageIntent('帮我画个机器人').hit).toBe(true);
+    expect(detectImageIntent('给我画一张星空').hit).toBe(true);
+    expect(detectImageIntent('请你画一张猫').hit).toBe(true);
+    expect(detectImageIntent('帮我生成一张海报').hit).toBe(true);
+    expect(detectImageIntent('做一张海报').hit).toBe(true);
+    expect(detectImageIntent('sketch a cyberpunk skyline').hit).toBe(true);
+    expect(detectImageIntent('render a 3D logo').hit).toBe(true);
+    expect(detectImageIntent('create an illustration of a fox').hit).toBe(true);
   });
 
   it('rejects negative whitelist (references / past)', () => {
@@ -46,6 +56,8 @@ describe('M2.4 — intent detection', () => {
   it('rejects pure conversational text', () => {
     expect(detectImageIntent('hello there').hit).toBe(false);
     expect(detectImageIntent('帮我看下这个代码').hit).toBe(false);
+    expect(detectImageIntent('帮我生成一段代码').hit).toBe(false);
+    expect(detectImageIntent('生成一段总结').hit).toBe(false);
   });
 
   it('isIntentDisabledUntilNow: handles null + future + past', () => {

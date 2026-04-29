@@ -151,15 +151,17 @@ test('R5 user journey: onboarding → chat → fallback → image → roundtable
   await expect(page.getByTestId('composer-form')).toBeVisible({ timeout: 15_000 });
   await expect(page.getByTestId('cost-bar')).toBeVisible();
 
-  await page.getByTestId('open-settings').click();
-  const settingsItems = page.getByTestId('settings-model-item');
+  await page.getByTestId('open-model-center').click();
+  await expect(page.getByTestId('model-center')).toBeVisible();
+  const settingsItems = page.locator(
+    '[data-testid^="model-row-"]:not([data-testid^="model-row-default-"]):not([data-testid^="model-row-up-"]):not([data-testid^="model-row-down-"]):not([data-testid^="model-row-delete-"]):not([data-testid^="model-row-enabled-"])',
+  );
   await expect(settingsItems.first()).toBeVisible({ timeout: 10_000 });
-  // 4 chat (Strategy, UserResearch, TechReview, VisionPeer) + 1 image = 5.
-  await expect(settingsItems).toHaveCount(5);
+  // 4 chat-tab rows by default (chat tab); image/multimodal in other tabs.
+  await expect(settingsItems).toHaveCount(4);
   // Reorder: move TechReview up by one within chat capability.
-  const techRow = page.locator(`[data-model-id="${seed.chatC}"]`);
-  await techRow.getByTestId('settings-move-up').click();
-  // Close settings and return to chat.
+  await page.getByTestId(`model-row-up-${seed.chatC}`).click();
+  // Close model center and return to chat.
   await page.keyboard.press('Escape');
   await expect(page.getByTestId('composer-form')).toBeVisible();
 

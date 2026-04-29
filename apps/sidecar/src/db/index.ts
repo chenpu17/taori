@@ -31,7 +31,11 @@ CREATE TABLE IF NOT EXISTS models (
   price_input_per_1m REAL,
   price_output_per_1m REAL,
   price_per_call REAL,
+  price_per_image REAL,
+  price_per_video_second REAL,
   price_currency TEXT NOT NULL DEFAULT 'USD',
+  price_synced_at INTEGER,
+  modalities TEXT,
   context_length INTEGER,
   supports_vision INTEGER NOT NULL DEFAULT 0,
   supports_tools INTEGER NOT NULL DEFAULT 0,
@@ -174,6 +178,19 @@ export function openDb(dbPath: string): Db {
     .all() as Array<{ name: string }>;
   if (!cols.some((c) => c.name === 'last_failure_at')) {
     sqlite.exec(`ALTER TABLE models ADD COLUMN last_failure_at INTEGER`);
+  }
+  // M2.5 — additive columns for catalog sync, multi-modal pricing, and
+  // declared output modalities. ALTER guarded against existing dev DBs.
+  const additive: Array<[string, string]> = [
+    ['price_per_image', 'REAL'],
+    ['price_per_video_second', 'REAL'],
+    ['price_synced_at', 'INTEGER'],
+    ['modalities', 'TEXT'],
+  ];
+  for (const [name, type] of additive) {
+    if (!cols.some((c) => c.name === name)) {
+      sqlite.exec(`ALTER TABLE models ADD COLUMN ${name} ${type}`);
+    }
   }
   return drizzle(sqlite, { schema });
 }

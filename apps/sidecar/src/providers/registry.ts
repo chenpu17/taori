@@ -16,6 +16,10 @@ import {
   type DiscoveredModel,
   type ErrorClassification,
 } from '@taori/shared';
+import {
+  testVolcengineArk,
+  listVolcengineArkModels,
+} from './volcengine_ark.js';
 
 export interface ProviderTestResult {
   ok: boolean;
@@ -117,14 +121,27 @@ function openRouterToDiscovered(item: OpenRouterListItem): DiscoveredModel {
   const supportsVision = inputModalities.some((m) =>
     m.toLowerCase().includes('image'),
   );
+  // Most OpenRouter models are chat. We surface multimodal when input
+  // accepts image, so the UI groups them under the multimodal capability
+  // pool but the chat-candidate selector still considers them.
+  const capability: DiscoveredModel['capability'] = supportsVision
+    ? 'multimodal'
+    : 'chat';
+  const modalities: DiscoveredModel['modalities'] = supportsVision
+    ? ['text', 'image']
+    : ['text'];
   return {
     model_name: item.id,
     display_name: item.name ?? item.id,
-    capability: 'chat',
+    capability,
     price_input_per_1m: openRouterPriceToPer1m(item.pricing?.prompt),
     price_output_per_1m: openRouterPriceToPer1m(item.pricing?.completion),
+    price_per_image: null,
+    price_per_video_second: null,
+    modalities,
     context_length: item.context_length ?? null,
     supports_vision: supportsVision,
+    supports_tools: false,
   };
 }
 
@@ -213,7 +230,12 @@ export function pickRecommendations(models: DiscoveredModel[]): {
   chat: string | null;
   vision: string | null;
 } {
-  const candidates = models.filter((m) => m.capability === 'chat');
+  // Multimodal models still answer text — include them in the chat pool so
+  // a single vision-capable model imported alone gives the user a working
+  // chat default out of the box.
+  const candidates = models.filter(
+    (m) => m.capability === 'chat' || m.capability === 'multimodal',
+  );
   const preferChat = [
     'openai/gpt-4o-mini',
     'gpt-4o-mini',
@@ -251,6 +273,8 @@ export async function testProvider(args: {
       return testOpenRouter(args.base_url, args.api_key);
     case 'openai':
       return testOpenAI(args.base_url, args.api_key);
+    case 'volcengine_ark':
+      return testVolcengineArk(args.base_url, args.api_key);
     default:
       return testOpenAI(args.base_url, args.api_key);
   }
@@ -266,6 +290,8 @@ export async function listProviderModels(args: {
       return listOpenRouterModels(args.base_url, args.api_key);
     case 'openai':
       return listOpenAIModels();
+    case 'volcengine_ark':
+      return listVolcengineArkModels();
     default:
       return [];
   }

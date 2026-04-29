@@ -30,16 +30,32 @@ const COMMAND_PATTERNS = [
 ];
 
 const ZH_IMPERATIVE_PATTERNS = [
-  /^\s*画(一张|个|张)/,
-  /^\s*画[\s\u4e00-\u9fff]/, // "画 + Chinese char or space" at start
-  /生成图片/,
-  /生成图像/,
+  // Direct imperatives anchored at start.
+  /^\s*画(一张|一幅|个|张|幅)/,
+  /^\s*画[\s\u4e00-\u9fff]/,
   /^\s*绘制/,
+  /^\s*生成(?:一)?(?:张|幅|个|副)?(?:图|画|图片|图像|海报|插画|插图|封面)/,
+  // Polite-form prefixes — "帮我/给我/请你/请帮我/麻烦…画/绘/生成".
+  // M2.5 fix: previously "帮我画一张机器人" was rejected because the regex
+  // required "画" at start. We now allow up to ~10 chars of polite prefix.
+  /(?:帮|替|给|请)(?:我|你|帮)?[\s\u4e00-\u9fff]{0,8}?(画|绘制|生成图)/,
+  // Intent verbs anywhere ("生成一张图片"/"做一张海报"/"出一张图").
+  /生成[一]?(?:张|幅|个)?(图片|图像|海报|插画|插图|封面|表情|图)/,
+  /做(?:一张|个|张)?(?:图|海报|封面|插画)/,
+  /出一张(?:图|海报|封面)/,
+  /(?:画|绘制)一(?:张|幅)/,
 ];
 
 const EN_IMPERATIVE_PATTERNS = [
   /^\s*draw\s+/i,
-  /\bgenerate\s+(an?\s+)?image\b/i,
+  /^\s*sketch\s+/i,
+  /^\s*paint\s+/i,
+  /^\s*render\s+/i,
+  /^\s*plot\s+/i,
+  /\bgenerate\s+(an?\s+)?(image|picture|photo|illustration|poster)\b/i,
+  /\bcreate\s+(an?\s+)?(image|picture|illustration|poster|artwork)\b/i,
+  /\bmake\s+(an?\s+)?(image|picture|illustration|poster)\b/i,
+  /\bdraw\s+(me|us)?\s*(an?|the)?\s*\w+/i,
 ];
 
 export interface ImageIntent {

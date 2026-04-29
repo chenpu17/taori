@@ -229,9 +229,65 @@ async function callAdapter(
       return adapterReplicate(args);
     case 'sd_webui':
       return adapterSdWebui(args);
+    case 'volcengine_ark':
+      return adapterVolcengineArk(args);
     default:
       throw vErr(`unsupported provider type for image_generate: ${type}`);
   }
+}
+
+/**
+ * Volcengine Ark text-to-image (doubao-seedream / seedance-image families).
+ * Ark mirrors the OpenAI Images API at /api/v3/images/generations and accepts
+ * the same `prompt`/`model`/`size` shape, returning either b64_json or URL.
+ */
+async function adapterVolcengineArk(args: {
+  baseUrl: string;
+  apiKey: string | null;
+  modelName: string;
+  prompt: string;
+}): Promise<AdapterResult> {
+  if (!args.apiKey) throw vErr('Ark image adapter requires api_key');
+  const url = `${args.baseUrl.replace(/\/+$/, '')}/images/generations`;
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: {
+      authorization: `Bearer ${args.apiKey}`,
+      'content-type': 'application/json',
+    },
+    body: JSON.stringify({
+      model: args.modelName,
+      prompt: args.prompt,
+      n: 1,
+      size: '1024x1024',
+      response_format: 'b64_json',
+    }),
+  });
+  if (!res.ok) {
+    const text = await res.text().catch(() => '');
+    const err = new Error(`Ark images upstream ${res.status}: ${text.slice(0, 200)}`);
+    Object.assign(err, { upstreamStatus: res.status });
+    throw err;
+  }
+  const json = (await res.json()) as {
+    data?: Array<{ b64_json?: string; url?: string }>;
+  };
+  const item = json.data?.[0];
+  if (item?.b64_json) {
+    return { b64: item.b64_json, mime: 'image/png', width: 1024, height: 1024 };
+  }
+  if (item?.url) {
+    const imgRes = await fetch(item.url);
+    if (!imgRes.ok) throw new Error(`Ark image fetch failed ${imgRes.status}`);
+    const buf = Buffer.from(await imgRes.arrayBuffer());
+    return {
+      b64: buf.toString('base64'),
+      mime: imgRes.headers.get('content-type') ?? 'image/png',
+      width: 1024,
+      height: 1024,
+    };
+  }
+  throw new Error('Ark images: empty response');
 }
 
 async function adapterOpenAI(args: {

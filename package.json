@@ -9,6 +9,7 @@
   },
   "scripts": {
     "build:shared": "pnpm --filter @taori/shared build",
+    "dev": "pnpm build:shared && pnpm dev:browser",
     "dev:sidecar": "pnpm --filter @taori/sidecar dev",
     "dev:web": "pnpm --filter @taori/web dev",
     "dev:desktop": "pnpm --filter @taori/desktop tauri dev",

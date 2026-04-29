@@ -314,4 +314,28 @@ export const api = {
     authedFetch(`/v1/conversations/${id}/roundtable`).then((r) =>
       json<{ roundtable_id: string | null }>(r),
     ),
+
+  // M2.5 §F-PR — manual catalog sync (price + capability refresh).
+  catalogSync: (providerId?: string | null) =>
+    authedFetch('/v1/catalog/sync', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(providerId ? { provider_id: providerId } : {}),
+    }).then((r) =>
+      json<{
+        ok: boolean;
+        synced_at: number;
+        total_providers: number;
+        total_models: number;
+        diffs: Array<{
+          provider_id: string;
+          model_name: string;
+          display_name?: string | null;
+          change: 'new' | 'price_changed' | 'unchanged' | 'removed';
+          before?: { price_input_per_1m: number | null; price_output_per_1m: number | null; price_per_image: number | null };
+          after?: { price_input_per_1m: number | null; price_output_per_1m: number | null; price_per_image: number | null };
+        }>;
+        errors: Array<{ provider_id: string; message: string }>;
+      }>(r),
+    ),
 };
