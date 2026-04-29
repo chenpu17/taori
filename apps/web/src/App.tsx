@@ -801,6 +801,7 @@ function ChatPanel({
     stop,
     setMessages,
     reload: regenerate,
+    append,
   } = useChat({
     api: `${endpoint.url}/v1/chat`,
     streamProtocol: 'data',
@@ -1505,6 +1506,35 @@ function ChatPanel({
   const [branchBusy, setBranchBusy] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
 
+  // C2 — stop streaming + continue. wasStoppedRecently is set when the user
+  // hits the composer "停止" button so the next assistant render can offer a
+  // "续写" button. We reset it on conversation switch and when a new turn
+  // starts (so a re-send hides the dangling continue affordance).
+  const [wasStoppedRecently, setWasStoppedRecently] = useState(false);
+  const [continueBusy, setContinueBusy] = useState(false);
+  useEffect(() => {
+    setWasStoppedRecently(false);
+  }, [conversationId]);
+  const onStopClick = useCallback((): void => {
+    stop();
+    setWasStoppedRecently(true);
+  }, [stop]);
+  const onContinueClick = useCallback(async (): Promise<void> => {
+    if (continueBusy || isLoading) return;
+    setContinueBusy(true);
+    setWasStoppedRecently(false);
+    try {
+      await append({
+        role: 'user',
+        content: '请继续上文，不必重复已写过的内容。',
+      });
+    } catch (e) {
+      setActionError(e instanceof Error ? e.message : '续写失败');
+    } finally {
+      setContinueBusy(false);
+    }
+  }, [append, continueBusy, isLoading]);
+
   const submitEdit = useCallback(
     async (messageId: string) => {
       if (!conversationId) return;
@@ -1739,6 +1769,17 @@ function ChatPanel({
                       ↻ 重新生成
                     </button>
                   )}
+                  {m.role === 'assistant' && isLastAssistant && wasStoppedRecently && (
+                    <button
+                      type="button"
+                      onClick={() => void onContinueClick()}
+                      data-testid="msg-continue"
+                      title="继续上文"
+                      disabled={continueBusy}
+                    >
+                      {continueBusy ? '续写中…' : '✏️ 续写'}
+                    </button>
+                  )}
                   {conversationId && (m.role === 'user' || m.role === 'assistant') && (
                     <button
                       type="button"
@@ -1968,7 +2009,7 @@ function ChatPanel({
         {isLoading ? (
           <button
             type="button"
-            onClick={() => stop()}
+            onClick={onStopClick}
             className="abort-btn"
             data-testid="composer-stop"
           >
