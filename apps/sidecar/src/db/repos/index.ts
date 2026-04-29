@@ -1284,6 +1284,34 @@ export class RoundtablesRepo {
       .where(eq(roundtables.id, id))
       .run();
   }
+
+  /**
+   * Update one participant's `model_id` in the JSON `participants` blob.
+   * Used by the retry-with-fallback flow (A1) so subsequent rounds use the
+   * newly chosen model. Returns the updated row, or null if the row or
+   * participant index is not found.
+   */
+  setParticipantModel(
+    id: string,
+    index: number,
+    modelId: string,
+  ): RoundtableRow | null {
+    const row = this.get(id);
+    if (!row) return null;
+    if (index < 0 || index >= row.participants.length) return null;
+    const next = row.participants.map((p, i) =>
+      i === index ? { ...p, model_id: modelId } : p,
+    );
+    this.db
+      .update(roundtables)
+      .set({
+        participants: JSON.stringify(next),
+        updated_at: Date.now(),
+      })
+      .where(eq(roundtables.id, id))
+      .run();
+    return this.get(id);
+  }
 }
 
 export interface RoundtableMessageInsert {

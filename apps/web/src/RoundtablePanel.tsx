@@ -286,7 +286,11 @@ export function RoundtablePanel(props: RoundtablePanelProps): ReactElement {
     }
   }
 
-  async function retryParticipant(round: number, index: number): Promise<void> {
+  async function retryParticipant(
+    round: number,
+    index: number,
+    modelOverrideId?: string,
+  ): Promise<void> {
     if (!rt || actionBusy) return;
     setActionBusy(true);
     setError(null);
@@ -314,6 +318,7 @@ export function RoundtablePanel(props: RoundtablePanelProps): ReactElement {
       await streamRoundtableAnnotations({
         path: `/v1/roundtable/${rt.id}/round/${round}/participant/${index}/retry`,
         method: 'PUT',
+        body: modelOverrideId ? { model_id: modelOverrideId } : undefined,
         signal: ctrl.signal,
         onAnnotation: handleAnnotation,
       });
@@ -405,7 +410,10 @@ export function RoundtablePanel(props: RoundtablePanelProps): ReactElement {
             roundsToShow={[1, ...(rt.mode === 'deep' ? [2] : [])]}
             participantIndex={i}
             disableRetry={actionBusy}
-            onRetry={(round) => void retryParticipant(round, i)}
+            roundtableId={rt.id}
+            onRetry={(round, modelId) =>
+              void retryParticipant(round, i, modelId)
+            }
           />
         ))}
       </div>
@@ -548,6 +556,7 @@ function ParticipantColumn({
   roundsToShow,
   participantIndex,
   disableRetry,
+  roundtableId,
   onRetry,
 }: {
   participant: { display_name: string; role_label: string };
@@ -555,8 +564,34 @@ function ParticipantColumn({
   roundsToShow: number[];
   participantIndex: number;
   disableRetry: boolean;
-  onRetry: (round: number) => void;
+  roundtableId: string;
+  onRetry: (round: number, modelId?: string) => void;
 }): ReactElement {
+  const [optionsOpen, setOptionsOpen] = useState<number | null>(null);
+  const [candidates, setCandidates] = useState<{
+    state: 'idle' | 'loading' | 'done' | 'error';
+    data?: Awaited<ReturnType<typeof api.getRoundtableRetryCandidates>>;
+    error?: string;
+  }>({ state: 'idle' });
+
+  async function openOptions(round: number): Promise<void> {
+    setOptionsOpen(round);
+    if (candidates.state === 'done' || candidates.state === 'loading') return;
+    setCandidates({ state: 'loading' });
+    try {
+      const data = await api.getRoundtableRetryCandidates(
+        roundtableId,
+        participantIndex,
+      );
+      setCandidates({ state: 'done', data });
+    } catch (e) {
+      setCandidates({
+        state: 'error',
+        error: e instanceof Error ? e.message : String(e),
+      });
+    }
+  }
+
   return (
     <div
       className="roundtable-column"
@@ -571,6 +606,7 @@ function ParticipantColumn({
         const content = column.content.get(round) ?? '';
         const err = column.errors.get(round);
         const retries = column.retries.get(round) ?? 0;
+        const showOptions = optionsOpen === round;
         return (
           <div
             key={round}
@@ -588,14 +624,111 @@ function ParticipantColumn({
               >
                 <span className="badge">{err.classification}</span>
                 <span>{err.message}</span>
-                <button
-                  type="button"
-                  disabled={disableRetry || retries >= 3}
-                  onClick={() => onRetry(round)}
-                  data-testid={`roundtable-retry-${participantIndex}-${round}`}
-                >
-                  {retries >= 3 ? '建议重新启动圆桌' : '重试'}
-                </button>
+                <div className="roundtable-retry-actions">
+                  <button
+                    type="button"
+                    disabled={disableRetry || retries >= 3}
+                    onClick={() => onRetry(round)}
+                    data-testid={`roundtable-retry-${participantIndex}-${round}`}
+                  >
+                    {retries >= 3 ? '建议重新启动圆桌' : '重试'}
+                  </button>
+                  <button
+                    type="button"
+                    className="roundtable-retry-options-btn"
+                    disabled={disableRetry || retries >= 3}
+                    onClick={() => {
+                      if (showOptions) setOptionsOpen(null);
+                      else void openOptions(round);
+                    }}
+                    aria-expanded={showOptions}
+                    data-testid={`roundtable-retry-options-toggle-${participantIndex}-${round}`}
+                    title="切换为其他模型重试"
+                  >
+                    {showOptions ? '收起' : '换模型 ▾'}
+                  </button>
+                </div>
+                {showOptions ? (
+                  <div
+                    className="roundtable-retry-options"
+                    data-testid={`roundtable-retry-options-${participantIndex}-${round}`}
+                  >
+                    {candidates.state === 'loading' ? (
+                      <p className="hint">加载候选模型…</p>
+                    ) : null}
+                    {candidates.state === 'error' ? (
+                      <p className="err">加载失败：{candidates.error}</p>
+                    ) : null}
+                    {candidates.state === 'done' && candidates.data ? (
+                      <ul className="roundtable-retry-candidates">
+                        {candidates.data.candidates.map((c) => {
+                          const tag = c.is_current
+                            ? '当前'
+                            : c.recommended
+                              ? '推荐'
+                              : c.demoted
+                                ? '降权'
+                                : c.disabled
+                                  ? '禁用'
+                                  : '';
+                          return (
+                            <li
+                              key={c.model_id}
+                              data-testid={`roundtable-retry-candidate-${participantIndex}-${round}-${c.model_id}`}
+                              data-recommended={c.recommended}
+                              data-demoted={c.demoted}
+                            >
+                              <button
+                                type="button"
+                                disabled={
+                                  disableRetry ||
+                                  retries >= 3 ||
+                                  c.disabled
+                                }
+                                onClick={() => {
+                                  setOptionsOpen(null);
+                                  onRetry(
+                                    round,
+                                    c.is_current ? undefined : c.model_id,
+                                  );
+                                }}
+                                title={
+                                  c.already_used_by_other_participant
+                                    ? '其他参与者已使用此模型'
+                                    : undefined
+                                }
+                              >
+                                <span className="cand-name">
+                                  {c.display_name}
+                                </span>
+                                {tag ? (
+                                  <span
+                                    className={`cand-tag cand-tag-${
+                                      c.is_current
+                                        ? 'current'
+                                        : c.recommended
+                                          ? 'recommended'
+                                          : c.demoted
+                                            ? 'demoted'
+                                            : 'disabled'
+                                    }`}
+                                  >
+                                    {tag}
+                                  </span>
+                                ) : null}
+                                {c.already_used_by_other_participant ? (
+                                  <span className="cand-tag cand-tag-dup">
+                                    已用
+                                  </span>
+                                ) : null}
+                              </button>
+                            </li>
+                          );
+                        })}
+                      </ul>
+                    ) : null}
+                  </div>
+                ) : null}
               </div>
             ) : (
               <pre className="roundtable-cell-body">{content}</pre>

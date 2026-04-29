@@ -362,6 +362,32 @@ export const api = {
       json<{ roundtable_id: string | null }>(r),
     ),
 
+  // A1 — list candidate models a user can switch to when retrying a failed
+  // participant. Includes the current model (first), the recommended fallback
+  // (next non-demoted in fallback_order), and all other chat-capable models.
+  getRoundtableRetryCandidates: (id: string, index: number) =>
+    authedFetch(`/v1/roundtable/${id}/participant/${index}/retry-candidates`)
+      .then((r) =>
+        json<{
+          roundtable_id: string;
+          participant_index: number;
+          current_model_id: string;
+          recommended_model_id: string | null;
+          candidates: Array<{
+            model_id: string;
+            display_name: string;
+            model_name: string;
+            provider_id: string | null;
+            fallback_order: number;
+            demoted: boolean;
+            disabled: boolean;
+            is_current: boolean;
+            recommended: boolean;
+            already_used_by_other_participant: boolean;
+          }>;
+        }>(r),
+      ),
+
   // M2.5 §F-PR — manual catalog sync (price + capability refresh).
   catalogSync: (providerId?: string | null) =>
     authedFetch('/v1/catalog/sync', {

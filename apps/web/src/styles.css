@@ -2409,3 +2409,57 @@ header h1::before {
 .help-selfcheck-detail {
   font-size: 12px;
 }
+
+/* A1 — Roundtable retry-with-fallback dropdown */
+.roundtable-retry-actions {
+  display: flex;
+  gap: 6px;
+  margin-top: 6px;
+}
+.roundtable-retry-options {
+  margin-top: 8px;
+  padding: 6px;
+  border: 1px solid var(--border, #e3e3e3);
+  border-radius: 6px;
+  background: var(--bg-elev, #fafafa);
+}
+.roundtable-retry-candidates {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.roundtable-retry-candidates li button {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  text-align: left;
+  padding: 4px 8px;
+  border-radius: 4px;
+  background: transparent;
+  border: 1px solid transparent;
+  cursor: pointer;
+  font-size: 12px;
+}
+.roundtable-retry-candidates li button:hover:not(:disabled) {
+  background: rgba(0, 0, 0, 0.04);
+  border-color: var(--border, #e3e3e3);
+}
+.roundtable-retry-candidates li button:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+.cand-tag {
+  font-size: 10px;
+  padding: 1px 6px;
+  border-radius: 9999px;
+  font-weight: 600;
+}
+.cand-tag-current { background: #eef3ff; color: #2557cc; }
+.cand-tag-recommended { background: #e6f6ea; color: #1f7a3a; }
+.cand-tag-demoted { background: #fff7e0; color: #946d00; }
+.cand-tag-disabled { background: #fde7e7; color: #a8211f; }
+.cand-tag-dup { background: #f0e8fb; color: #6b3fb3; }

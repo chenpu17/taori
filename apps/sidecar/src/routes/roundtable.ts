@@ -528,6 +528,81 @@ export function registerRoundtableRoute(
   );
 
   /**
+   * GET /v1/roundtable/:id/participant/:index/retry-candidates — A1.
+   *
+   * Returns the list of chat-capable models eligible to replace this
+   * participant on retry, plus the recommended fallback (M2 demote-aware).
+   * The current model is always returned as the first item with
+   * `is_current: true` so the UI can render it as the "stay on current" choice.
+   *
+   * Items include both healthy and demoted models so the user can still
+   * force a demoted model if they want; demoted/disabled flags are surfaced
+   * for UI grading.
+   */
+  app.get<{
+    Params: { id: string; index: string };
+  }>(
+    '/v1/roundtable/:id/participant/:index/retry-candidates',
+    async (req) => {
+      const rt = rtRepo.get(req.params.id);
+      if (!rt) {
+        throw new TaoriError({
+          code: 'not_found',
+          message: `Roundtable ${req.params.id} not found`,
+        });
+      }
+      const index = Number(req.params.index);
+      if (
+        !Number.isInteger(index) ||
+        index < 0 ||
+        index >= rt.participants.length
+      ) {
+        throw new TaoriError({
+          code: 'validation_error',
+          message: 'participant index out of range',
+        });
+      }
+      const current = rt.participants[index]!;
+      const recommended = modelsRepo.nextFallback(current.model_id, 'chat');
+      const all = modelsRepo
+        .list()
+        .filter((m) => m.capability === 'chat' && m.enabled);
+      const now = Date.now();
+      const sameModelIds = new Set(
+        rt.participants.map((p, i) => (i === index ? null : p.model_id)),
+      );
+      const candidates = all
+        .map((m) => ({
+          model_id: m.id,
+          display_name: m.display_name ?? m.model_name,
+          model_name: m.model_name,
+          provider_id: m.provider_id,
+          fallback_order: m.fallback_order ?? 0,
+          demoted: !!m.demoted,
+          disabled:
+            !!m.disabled_until && (m.disabled_until ?? 0) > now,
+          is_current: m.id === current.model_id,
+          recommended: !!recommended && m.id === recommended.id,
+          already_used_by_other_participant: sameModelIds.has(m.id),
+        }))
+        .sort((a, b) => {
+          if (a.is_current !== b.is_current) return a.is_current ? -1 : 1;
+          if (a.recommended !== b.recommended) return a.recommended ? -1 : 1;
+          if (a.demoted !== b.demoted) return a.demoted ? 1 : -1;
+          if (a.disabled !== b.disabled) return a.disabled ? 1 : -1;
+          return a.fallback_order - b.fallback_order;
+        });
+      return {
+        roundtable_id: rt.id,
+        participant_index: index,
+        current_model_id: current.model_id,
+        recommended_model_id: recommended?.id ?? null,
+        candidates,
+      };
+    },
+  );
+
+  /**
    * PUT /v1/roundtable/:id/round/:round/participant/:index/retry — retry a
    * single participant's row in place. Streams the same annotation set as a
    * full round but only for the given index.
@@ -538,11 +613,12 @@ export function registerRoundtableRoute(
    */
   app.put<{
     Params: { id: string; round: string; index: string };
+    Body: { model_id?: string } | undefined;
   }>(
     '/v1/roundtable/:id/round/:round/participant/:index/retry',
     async (req, reply) => {
-      const rt = rtRepo.get(req.params.id);
-      if (!rt) {
+      const rt0 = rtRepo.get(req.params.id);
+      if (!rt0) {
         throw new TaoriError({
           code: 'not_found',
           message: `Roundtable ${req.params.id} not found`,
@@ -559,26 +635,52 @@ export function registerRoundtableRoute(
       if (
         !Number.isInteger(index) ||
         index < 0 ||
-        index >= rt.participants.length
+        index >= rt0.participants.length
       ) {
         throw new TaoriError({
           code: 'validation_error',
           message: 'participant index out of range',
         });
       }
-      const existing = rtMsgRepo.findOne(rt.id, round, index);
+      const existing = rtMsgRepo.findOne(rt0.id, round, index);
       if (!existing) {
         throw new TaoriError({
           code: 'not_found',
           message: 'roundtable message row not found — run the round first',
         });
       }
-      if (inFlightStreams.has(rt.id)) {
+      if (inFlightStreams.has(rt0.id)) {
         throw new TaoriError({
           code: 'conflict',
           message: 'roundtable_busy',
           details: { hint: '圆桌正在运行中' },
         });
+      }
+
+      // A1 — optional override: switch to a different chat model for this
+      // retry (and subsequent rounds). Validate the candidate is a real,
+      // chat-capable model with a usable provider.
+      const overrideId = req.body?.model_id;
+      let rt = rt0;
+      let overrideApplied = false;
+      if (overrideId && overrideId !== rt0.participants[index]!.model_id) {
+        const m = modelsRepo.get(overrideId);
+        if (!m || m.capability !== 'chat' || !m.enabled) {
+          throw new TaoriError({
+            code: 'validation_error',
+            message: 'override model is not a usable chat model',
+          });
+        }
+        if (!m.provider_id) {
+          throw new TaoriError({
+            code: 'validation_error',
+            message: 'override model has no provider',
+          });
+        }
+        const updated = rtRepo.setParticipantModel(rt0.id, index, overrideId);
+        if (updated) rt = updated;
+        rtMsgRepo.update(existing.id, { model_id: overrideId });
+        overrideApplied = true;
       }
 
       // Reset row to streaming/empty so listeners see a clean retry.
@@ -621,6 +723,9 @@ export function registerRoundtableRoute(
             conversation_id: rt.conversation_id,
             round,
             retry_index: index,
+            ...(overrideApplied
+              ? { override_model_id: rt.participants[index]!.model_id }
+              : {}),
           },
         ])}\n`,
       );
