@@ -99,7 +99,8 @@ export function classifyProviderError(args: {
     return {
       classification: 'config_error',
       message:
-        'Provider returned 404 — 接入点不存在；请检查 base_url 与模型名称是否正确',
+        'Provider returned 404 — 接入点不存在；' +
+        '火山方舟用户请到控制台「模型广场」开通该模型的使用权限，或改用 endpoint ID（ep-xxx）作为模型名称',
     };
   }
   if (status && status >= 500) {

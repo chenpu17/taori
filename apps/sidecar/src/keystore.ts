@@ -5,10 +5,11 @@
  * (KeychainStore). Sidecar never writes keys to disk. See
  * docs/architecture/05-security.md.
  *
- * Standalone dev (no Tauri running, e.g. `pnpm dev:browser`): keys live in
- * process memory only (MemoryStore). They survive the sidecar process but
- * not a restart, and the user must re-enter on each dev session. We log a
- * conspicuous warning so this never silently happens in production.
+ * Standalone dev (no Tauri running, e.g. `pnpm dev:browser`): keys are
+ * persisted to a local JSON file (`dev.keys.json`) alongside `dev.db` so
+ * they survive sidecar restarts. The file is plain-text and should never be
+ * committed; it is gitignored by default. We log a conspicuous warning so
+ * this never silently happens in production.
  *
  * The store is keyed by an opaque `account` string the caller picks
  * (typically `provider:<id>`). The sidecar never sees plaintext keys when
@@ -16,11 +17,13 @@
  * read back lazily right before a provider HTTP call.
  */
 
+import fs from 'node:fs';
+import path from 'node:path';
 import { TaoriError } from '@taori/shared';
 import { type ControlClient } from './control/client.js';
 
 export interface KeyStore {
-  readonly kind: 'keychain' | 'memory';
+  readonly kind: 'keychain' | 'memory' | 'dev_file';
   write(account: string, secret: string): Promise<void>;
   read(account: string): Promise<string | null>;
   delete(account: string): Promise<void>;
@@ -58,6 +61,7 @@ export class MemoryStore implements KeyStore {
 export function buildKeyStore(args: {
   control: ControlClient;
   isDev: boolean;
+  dbPath: string;
   log: (msg: string) => void;
 }): KeyStore {
   if (args.control.isAvailable) {
@@ -73,8 +77,50 @@ export function buildKeyStore(args: {
         'No control channel configured in production: refusing to start without OS Keychain access',
     });
   }
+  const keysPath = path.join(path.dirname(args.dbPath), 'dev.keys.json');
   args.log(
-    '[sidecar] WARNING: control channel unavailable — using in-memory key store (DEV ONLY).',
+    `[sidecar] WARNING: control channel unavailable — using dev file key store (${keysPath}). DEV ONLY.`,
   );
-  return new MemoryStore();
+  return new DevFileKeyStore(keysPath);
+}
+
+/**
+ * Dev-only persistent key store backed by a plain JSON file on disk.
+ * Keys survive sidecar restarts during development.
+ *
+ * NEVER use in production — the file is plain-text. It is gitignored.
+ */
+export class DevFileKeyStore implements KeyStore {
+  readonly kind = 'dev_file' as const;
+
+  constructor(private readonly filePath: string) {}
+
+  private load(): Record<string, string> {
+    try {
+      const raw = fs.readFileSync(this.filePath, 'utf8');
+      return JSON.parse(raw) as Record<string, string>;
+    } catch {
+      return {};
+    }
+  }
+
+  private save(map: Record<string, string>): void {
+    fs.writeFileSync(this.filePath, JSON.stringify(map, null, 2), 'utf8');
+  }
+
+  async write(account: string, secret: string): Promise<void> {
+    const map = this.load();
+    map[account] = secret;
+    this.save(map);
+  }
+
+  async read(account: string): Promise<string | null> {
+    return this.load()[account] ?? null;
+  }
+
+  async delete(account: string): Promise<void> {
+    const map = this.load();
+    delete map[account];
+    this.save(map);
+  }
 }

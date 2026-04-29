@@ -31,6 +31,7 @@ async function main(): Promise<void> {
   const keystore = buildKeyStore({
     control,
     isDev: config.isDev,
+    dbPath: config.dbPath,
     log: (msg) => process.stderr.write(msg + '\n'),
   });
   const startedAt = Date.now();
