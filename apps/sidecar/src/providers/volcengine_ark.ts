@@ -7,7 +7,7 @@
  *
  * Model discovery is **dynamic**: `listVolcengineArkModels()` calls the real
  * `/api/v3/models` endpoint and returns whatever the user's account can access,
- * filtered to non-Shutdown models. `ARK_METADATA` serves as a price / context
+ * filtered to active-only models (Retiring + Shutdown both return 404). `ARK_METADATA` serves as a price / context
  * enrichment table keyed by model family `name` (the field returned alongside
  * each model's `id`). Unknown models are inferred from ID patterns.
  *
@@ -288,8 +288,8 @@ export async function listVolcengineArkModels(
     }));
   }
 
-  // Filter: keep active + "Retiring" (still usable), drop Shutdown
-  const visible = apiModels.filter((m) => m.status !== 'Shutdown');
+  // Filter: keep only fully active models; both Retiring and Shutdown return 404
+  const visible = apiModels.filter((m) => m.status == null || (m.status !== 'Shutdown' && m.status !== 'Retiring'));
 
   return visible.map((m): DiscoveredModel => {
     // Lookup: exact id → family name → inference
