@@ -305,7 +305,7 @@ export const api = {
     ),
 
   // M3.A — roundtable APIs (M3.A.4 wires create + GET; M3.A.5 wires round/summarize/export).
-  createRoundtable: (input: { topic: string; mode?: RoundtableMode; conversation_id?: string }) =>
+  createRoundtable: (input: { topic: string; mode?: RoundtableMode; conversation_id?: string; origin_conversation_id?: string }) =>
     authedFetch('/v1/roundtable', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
@@ -403,6 +403,14 @@ export const api = {
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ participants }),
     }).then((r) => json<{ ok: true }>(r)),
+
+  // A4 — write the final summary back into the original chat conversation as
+  // an assistant message. Returns the conversation id that received the message
+  // (might be a freshly minted one when the original origin was null/deleted).
+  postRoundtableLoopback: (id: string) =>
+    authedFetch(`/v1/roundtable/${id}/loopback`, { method: 'POST' }).then((r) =>
+      json<{ conversation_id: string; message_id: string }>(r),
+    ),
 
   // M2.5 §F-PR — manual catalog sync (price + capability refresh).
   catalogSync: (providerId?: string | null) =>

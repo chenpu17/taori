@@ -193,7 +193,7 @@ export function RoundtableLaunchDialog(
       const created = await api.createRoundtable({
         topic: trimmedTopic,
         mode,
-        ...(conversationId ? { conversation_id: conversationId } : {}),
+        ...(conversationId ? { conversation_id: conversationId, origin_conversation_id: conversationId } : {}),
       });
       if (!mountedRef.current) return;
       const low = created.estimated_cost_usd_low ?? 0;

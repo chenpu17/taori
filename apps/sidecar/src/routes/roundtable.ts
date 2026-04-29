@@ -21,6 +21,7 @@ import {
   ConversationsRepo,
   CostsRepo,
   MemoriesRepo,
+  MessagesRepo,
   ModelsRepo,
   ProvidersRepo,
   RoundtableMessagesRepo,
@@ -39,7 +40,7 @@ import {
 } from '../roundtable/cost-estimate.js';
 import { runRound } from '../roundtable/round-runner.js';
 import { runSummary } from '../roundtable/summarizer.js';
-import { renderRoundtableMarkdown } from '../roundtable/export.js';
+import { renderRoundtableMarkdown, renderRoundtableSummaryMarkdown } from '../roundtable/export.js';
 
 export function registerRoundtableRoute(
   app: FastifyInstance,
@@ -52,6 +53,7 @@ export function registerRoundtableRoute(
   const costsRepo = new CostsRepo(deps.db);
   const rtRepo = new RoundtablesRepo(deps.db);
   const rtMsgRepo = new RoundtableMessagesRepo(deps.db);
+  const messagesRepo = new MessagesRepo(deps.db);
   // M3.A.6 — In-memory in-flight tracker. The DB `status` column is a coarse
   // FSM that lingers in 'round1' / 'round2' / 'summarizing' even after the
   // stream finishes (spec has no idle-between-rounds state). To safely allow
@@ -234,6 +236,7 @@ export function registerRoundtableRoute(
       mode: analyzerOutput.suggested_mode,
       participants: analyzerOutput.participants,
       summarizer_model_id: analyzerOutput.summarizer_model_id,
+      origin_conversation_id: body.origin_conversation_id ?? null,
       analyzer_fallback: analyzerFailed,
       status: 'analyzing',
       current_round: 0,
@@ -414,6 +417,77 @@ export function registerRoundtableRoute(
     const updated = rtRepo.setParticipants(rt.id, parsed.data);
     return reply.code(200).send({ ok: true, roundtable: updated });
   });
+
+  /**
+   * A4 — POST /v1/roundtable/:id/loopback
+   *
+   * Writes the roundtable's final summary back into the original chat
+   * conversation as an assistant message, so the user can keep chatting
+   * about the conclusion without copy/paste.
+   *
+   * Behavior:
+   *   - Requires status === 'completed' AND a non-null summary.
+   *   - Target conversation: prefer roundtable.origin_conversation_id; if
+   *     null (or the original conv was deleted), mint a fresh chat conv
+   *     and write into that one.
+   *   - Idempotent in spirit: nothing prevents the user from clicking
+   *     twice — each click appends another assistant message. The renderer
+   *     is responsible for one-shot UX (disable button after click).
+   *   - Returns { conversation_id, message_id } so the renderer can switch
+   *     active conversation and refresh.
+   */
+  app.post<{ Params: { id: string } }>(
+    '/v1/roundtable/:id/loopback',
+    async (req, reply) => {
+      const rt = rtRepo.get(req.params.id);
+      if (!rt) {
+        throw new TaoriError({
+          code: 'not_found',
+          message: `Roundtable ${req.params.id} not found`,
+        });
+      }
+      if (rt.status !== 'completed') {
+        throw new TaoriError({
+          code: 'conflict',
+          message: `roundtable status=${rt.status}，仅完成后才能回填到原对话`,
+        });
+      }
+      if (!rt.summary) {
+        throw new TaoriError({
+          code: 'conflict',
+          message: '当前圆桌尚无总结，无法回填',
+        });
+      }
+
+      let targetConvId: string | null = null;
+      if (rt.origin_conversation_id) {
+        const exists = convRepo.get(rt.origin_conversation_id);
+        if (exists && exists.type === 'chat') targetConvId = exists.id;
+      }
+      if (!targetConvId) {
+        const fresh = convRepo.create({
+          type: 'chat',
+          title: `圆桌结论：${rt.topic.slice(0, 40)}`,
+        });
+        targetConvId = fresh.id;
+      }
+
+      const summaryMd = renderRoundtableSummaryMarkdown(rt.summary);
+      const header = `> 🔍 来自圆桌讨论 · ${rt.topic}\n\n`;
+      const inserted = messagesRepo.insert({
+        conversation_id: targetConvId,
+        role: 'assistant',
+        content: header + summaryMd,
+        status: 'complete',
+      });
+      convRepo.touch(targetConvId);
+
+      return reply.code(200).send({
+        conversation_id: targetConvId,
+        message_id: inserted.id,
+      });
+    },
+  );
 
   /**
    * GET /v1/conversations/:id/roundtable — returns the most recent roundtable

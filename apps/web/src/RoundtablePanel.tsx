@@ -79,10 +79,13 @@ export interface RoundtablePanelProps {
    *  should close this panel and open a fresh launch dialog with the
    *  divergence as the new topic. */
   onFollowUp?: (topic: string) => void;
+  /** A4: user clicked "带回原对话继续聊天"; parent should switch active
+   *  conversation to `conversationId` and refresh the sidebar. */
+  onLoopback?: (conversationId: string) => void;
 }
 
 export function RoundtablePanel(props: RoundtablePanelProps): ReactElement {
-  const { roundtableId, onExit, onFollowUp } = props;
+  const { roundtableId, onExit, onFollowUp, onLoopback } = props;
   const [rt, setRt] = useState<Roundtable | null>(null);
   const [, setMessages] = useState<RoundtableMessage[]>([]);
   const [cols, setCols] = useState<ColumnState[]>([]);
@@ -495,7 +498,13 @@ export function RoundtablePanel(props: RoundtablePanelProps): ReactElement {
       ) : null}
 
       {summary ? (
-        <SummaryCard summary={summary} totalCost={totalCost} onFollowUp={onFollowUp} />
+        <SummaryCard
+          summary={summary}
+          totalCost={totalCost}
+          onFollowUp={onFollowUp}
+          roundtableId={roundtableId}
+          onLoopback={onLoopback}
+        />
       ) : null}
 
       {summaryError ? (
@@ -748,11 +757,32 @@ function SummaryCard({
   summary,
   totalCost,
   onFollowUp,
+  roundtableId,
+  onLoopback,
 }: {
   summary: RoundtableSummary;
   totalCost: number;
   onFollowUp?: (topic: string) => void;
+  roundtableId: string;
+  onLoopback?: (conversationId: string) => void;
 }): ReactElement {
+  const [loopbackBusy, setLoopbackBusy] = useState(false);
+  const [loopbackError, setLoopbackError] = useState<string | null>(null);
+  const [loopbackDone, setLoopbackDone] = useState(false);
+  async function handleLoopback(): Promise<void> {
+    if (!onLoopback) return;
+    setLoopbackBusy(true);
+    setLoopbackError(null);
+    try {
+      const res = await api.postRoundtableLoopback(roundtableId);
+      setLoopbackDone(true);
+      onLoopback(res.conversation_id);
+    } catch (err) {
+      setLoopbackError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setLoopbackBusy(false);
+    }
+  }
   return (
     <div className="roundtable-summary" data-testid="roundtable-summary">
       <h4>结论</h4>
@@ -837,6 +867,28 @@ function SummaryCard({
         </section>
       ) : null}
       <div className="roundtable-summary-cost">总成本：${totalCost.toFixed(4)}</div>
+      {onLoopback ? (
+        <div className="roundtable-summary-loopback">
+          <button
+            type="button"
+            className="roundtable-loopback-btn"
+            data-testid="roundtable-loopback"
+            disabled={loopbackBusy || loopbackDone}
+            onClick={() => void handleLoopback()}
+            title="把这次圆桌的结论作为一条 assistant 消息写入原对话，继续聊"
+          >
+            {loopbackDone ? '✓ 已带回' : loopbackBusy ? '回填中…' : '↪ 带回原对话继续聊天'}
+          </button>
+          {loopbackError ? (
+            <span
+              className="roundtable-loopback-error"
+              data-testid="roundtable-loopback-error"
+            >
+              {loopbackError}
+            </span>
+          ) : null}
+        </div>
+      ) : null}
     </div>
   );
 }

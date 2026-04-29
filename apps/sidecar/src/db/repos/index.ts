@@ -1158,6 +1158,7 @@ export interface RoundtableInsert {
   mode: RoundtableStoredMode;
   participants: Participant[];
   summarizer_model_id: string | null;
+  origin_conversation_id?: string | null;
   analyzer_fallback: boolean;
   status: RoundtableStatus;
   current_round?: number;
@@ -1172,6 +1173,7 @@ export interface RoundtableRow {
   mode: RoundtableStoredMode;
   participants: Participant[];
   summarizer_model_id: string | null;
+  origin_conversation_id: string | null;
   analyzer_fallback: boolean;
   status: RoundtableStatus;
   current_round: number;
@@ -1191,6 +1193,7 @@ function decodeRoundtable(row: any): RoundtableRow {
     mode: row.mode as RoundtableStoredMode,
     participants: JSON.parse(row.participants) as Participant[],
     summarizer_model_id: row.summarizer_model_id,
+    origin_conversation_id: row.origin_conversation_id ?? null,
     analyzer_fallback: !!row.analyzer_fallback,
     status: row.status as RoundtableStatus,
     current_round: row.current_round,
@@ -1218,6 +1221,7 @@ export class RoundtablesRepo {
         mode: input.mode,
         participants: JSON.stringify(input.participants),
         summarizer_model_id: input.summarizer_model_id,
+        origin_conversation_id: input.origin_conversation_id ?? null,
         analyzer_fallback: input.analyzer_fallback,
         status: input.status,
         current_round: input.current_round ?? 0,

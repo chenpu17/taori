@@ -221,6 +221,14 @@ export const roundtables = sqliteTable(
     summarizer_model_id: text('summarizer_model_id').references(() => models.id, {
       onDelete: 'set null',
     }),
+    /** A4 — original chat conversation the user was in when launching the
+     *  roundtable. Lets the user 'send the conclusion back' as an assistant
+     *  message. Nullable: roundtables created from a fresh state have no
+     *  origin and the loopback handler will mint one on demand. */
+    origin_conversation_id: text('origin_conversation_id').references(
+      () => conversations.id,
+      { onDelete: 'set null' },
+    ),
     analyzer_fallback: integer('analyzer_fallback', { mode: 'boolean' })
       .notNull()
       .default(false),

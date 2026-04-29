@@ -420,6 +420,10 @@ function Workspace({
           }}
           onConversationUpdated={() => void refreshConversations()}
           onOpenSettings={onOpenSettings}
+          onLoopbackToConversation={(id) => {
+            setActiveConvId(id);
+            void refreshConversations();
+          }}
         />
       </main>
     </div>
@@ -546,6 +550,7 @@ function ChatPanel({
   onConversationCreated,
   onConversationUpdated,
   onOpenSettings,
+  onLoopbackToConversation,
 }: {
   endpoint: { url: string; bearer: string };
   chatModels: Model[];
@@ -555,6 +560,8 @@ function ChatPanel({
   onConversationCreated: (id: string) => void;
   onConversationUpdated: () => void;
   onOpenSettings: () => void;
+  /** A4 — RoundtablePanel SummaryCard "↪ 带回原对话" callback. */
+  onLoopbackToConversation: (id: string) => void;
 }): JSX.Element {
   const conversationIdRef = useRef<string | null>(null);
   // Tracks which conversation_id we've already lifted into React state via
@@ -1513,6 +1520,10 @@ function ChatPanel({
           onFollowUp={(topic) => {
             setActiveRoundtableId(null);
             setRoundtableDialog({ initialTopic: topic });
+          }}
+          onLoopback={(loopConvId) => {
+            setActiveRoundtableId(null);
+            onLoopbackToConversation(loopConvId);
           }}
         />
       ) : (

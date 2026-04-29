@@ -133,6 +133,7 @@ CREATE TABLE IF NOT EXISTS roundtables (
   mode TEXT NOT NULL,
   participants TEXT NOT NULL,
   summarizer_model_id TEXT REFERENCES models(id) ON DELETE SET NULL,
+  origin_conversation_id TEXT REFERENCES conversations(id) ON DELETE SET NULL,
   analyzer_fallback INTEGER NOT NULL DEFAULT 0,
   status TEXT NOT NULL,
   current_round INTEGER NOT NULL DEFAULT 0,
@@ -191,6 +192,15 @@ export function openDb(dbPath: string): Db {
     if (!cols.some((c) => c.name === name)) {
       sqlite.exec(`ALTER TABLE models ADD COLUMN ${name} ${type}`);
     }
+  }
+  // A4 — `origin_conversation_id` on roundtables (additive).
+  const rtCols = sqlite
+    .prepare(`PRAGMA table_info(roundtables)`)
+    .all() as Array<{ name: string }>;
+  if (!rtCols.some((c) => c.name === 'origin_conversation_id')) {
+    sqlite.exec(
+      `ALTER TABLE roundtables ADD COLUMN origin_conversation_id TEXT REFERENCES conversations(id) ON DELETE SET NULL`,
+    );
   }
   return drizzle(sqlite, { schema });
 }

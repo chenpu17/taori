@@ -47,6 +47,17 @@ function isStructuredSummary(
   return !!s && !('fallback' in s && s.fallback === true);
 }
 
+/**
+ * A4 — render the structured summary as markdown for embedding into a chat
+ * conversation. Same body the export function uses, minus the leading H2
+ * heading so callers can wrap in their own header.
+ */
+export function renderRoundtableSummaryMarkdown(
+  summary: SummaryStorage | null,
+): string {
+  return renderSummary(summary).join('\n').trim();
+}
+
 function renderSummary(summary: SummaryStorage | null): string[] {
   const out: string[] = [];
   if (!summary) {

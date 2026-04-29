@@ -2534,3 +2534,33 @@ header h1::before {
   padding: 2px 6px;
 }
 .link-btn:hover { text-decoration: underline; }
+
+/* A4 — loopback summary back to chat */
+.roundtable-summary-loopback {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px dashed #d8dde3;
+}
+.roundtable-loopback-btn {
+  background: #2557cc;
+  color: #fff;
+  border: none;
+  border-radius: 6px;
+  padding: 6px 12px;
+  font-size: 13px;
+  cursor: pointer;
+}
+.roundtable-loopback-btn:disabled {
+  background: #9aa6b4;
+  cursor: not-allowed;
+}
+.roundtable-loopback-btn:hover:not(:disabled) {
+  background: #1d47a8;
+}
+.roundtable-loopback-error {
+  color: #c0392b;
+  font-size: 12px;
+}

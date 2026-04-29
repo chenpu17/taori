@@ -76,6 +76,13 @@ export type SummaryStorage = z.infer<typeof SummaryStorageSchema>;
 
 export const CreateRoundtableRequestSchema = z.object({
   conversation_id: z.string().regex(/^[A-Za-z0-9_-]+$/).optional(),
+  /** A4 — chat conversation the user came from; the loopback handler writes
+   *  the final summary back into this conversation. Optional: when omitted,
+   *  loopback mints a fresh chat conversation on demand. */
+  origin_conversation_id: z
+    .string()
+    .regex(/^[A-Za-z0-9_-]+$/)
+    .optional(),
   topic: z.string().trim().min(1).max(2000),
   mode: RoundtableModeSchema.optional(),
 });
