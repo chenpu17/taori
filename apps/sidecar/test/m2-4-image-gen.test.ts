@@ -39,6 +39,8 @@ describe('M2.4 — intent detection', () => {
     expect(detectImageIntent('参考上次画的那张').hit).toBe(false);
     expect(detectImageIntent('like the one you drew before').hit).toBe(false);
     expect(detectImageIntent('已经画过了，再说说').hit).toBe(false);
+    // Bare 已 (without 经) — spec 09-m2 §2.2 negation whitelist line 136.
+    expect(detectImageIntent('已画过的那张能再发我看看吗').hit).toBe(false);
   });
 
   it('rejects pure conversational text', () => {

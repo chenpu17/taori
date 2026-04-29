@@ -2,11 +2,13 @@
 
 > **R5 实现对齐说明。** 以代码 + 测试为准，本文与实际 schema 已知偏差：
 > - **`files`：** `mime_type`（不是 `mime`）；`original_path`（不是 `storage_path`）；多了 `message_id` 外键；`filename` 字段不存在。
-> - **`roundtables.status`：** 实际枚举包含 `cancelled`。
 > - **`memories.scope`：** 实际枚举包含 `user`（除 `global` / `conversation`）。
 > - **`messages.source_type`：** 实际枚举包含 `tool_call`（除 `chat` / `image_gen`）。
 > - **`failure_kind`：** 实际枚举包含 `auth`（凭据/鉴权失败独立分类）。
 > - **`conversations.archived`：** 默认 `false`；通过 `PATCH /v1/conversations/:id` 切换。
+> - **`roundtables` / `roundtable_messages`（M3.A 实现新增字段）：** 见下方表定义；
+>   `summarizer_model_id` / `analyzer_fallback` / `estimated_cost_usd_*` / `updated_at` 等
+>   M3.A 阶段补齐的列已内联在本文 schema，与代码同步。
 
 ## SQLite Schema（Drizzle ORM，核心 9 张表）
 
@@ -107,27 +109,39 @@ files {
 roundtables {
   id: text PK
   conversation_id: text FK
-  topic: text                   // 用户输入的话题
-  mode: text                    // 'fast' | 'deep'
-  participants: text            // JSON: [{model_id, persona, role_label}]
-  status: text                  // 'round1' | 'round2' | 'summarizing' | 'completed'
+  topic: text                          // 用户输入的话题
+  mode: text                           // 'fast' | 'deep'
+  participants: text                   // JSON: [{model_id, persona, role_label}]
+  summarizer_model_id: text FK NULL    // 总结模型；模型删除 → SET NULL
+  analyzer_fallback: integer           // boolean — 主题分析降级开关
+  status: text                         // 'round1' | 'round2' | 'summarizing' | 'completed' | 'cancelled'
   current_round: integer
-  summary: text                 // 最终总结 JSON: {consensus, divergence, risks, decision, next_steps}
+  summary: text NULL                   // 最终总结 JSON
+  estimated_cost_usd_low: real NULL    // 启动前估价区间下界
+  estimated_cost_usd_high: real NULL   // 启动前估价区间上界
   created_at: integer
-  completed_at: integer
+  updated_at: integer
+  completed_at: integer NULL
 }
+  // index: roundtables_conv_idx (conversation_id, created_at)
 
 // 7. roundtable_messages — 圆桌每轮发言
 roundtable_messages {
   id: text PK
   roundtable_id: text FK
-  round: integer                // 1, 2, ...
-  participant_index: integer    // 第几列
-  model_id: text FK
-  content: text
-  visible_to_others: boolean    // 是否在下一轮对其他模型可见
+  round: integer                       // 1, 2, ...
+  participant_index: integer           // 第几列
+  model_id: text FK NULL               // 模型删除 → SET NULL
+  content: text NOT NULL DEFAULT ''
+  status: text NOT NULL DEFAULT 'pending'  // 'pending' | 'streaming' | 'completed' | 'failed'
+  classification: text NULL            // 失败分类（与 chat 共用枚举）
+  error_message: text NULL
+  visible_to_others: boolean
   created_at: integer
+  updated_at: integer
 }
+  // index: roundtable_messages_rt_idx (roundtable_id, round, participant_index)
+  // unique: roundtable_messages_uniq (roundtable_id, round, participant_index)
 
 // 8. cost_records — 成本记录（每次 LLM 调用都写一条）
 cost_records {

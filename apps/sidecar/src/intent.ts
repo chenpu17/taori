@@ -16,6 +16,7 @@
 
 const NEGATIVE_PATTERNS = [
   /已经/,
+  /已/,
   /上次/,
   /那张/,
   /那个/,
