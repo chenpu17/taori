@@ -155,7 +155,7 @@ function sseFinal(model: string, prompt: number, completion: number): string {
   );
 }
 
-export function startMockOpenAI(port = 17891): http.Server {
+export function startMockOpenAI(port = 17891, opts: { streamDelayMs?: number } = {}): http.Server {
   const server = http.createServer((req, res) => {
     if (req.method === 'GET' && req.url === '/v1/models') {
       res.writeHead(200, { 'content-type': 'application/json' });
@@ -223,6 +223,9 @@ export function startMockOpenAI(port = 17891): http.Server {
         'cache-control': 'no-cache',
         connection: 'keep-alive',
       });
+      // Allow specs to slow the stream down for abort/race tests via the
+      // factory option. Defaults to 5ms to preserve existing fast-path tests.
+      const delayMs = opts.streamDelayMs ?? 5;
       const step = Math.max(8, Math.ceil(text.length / 6));
       let i = 0;
       function tick(): void {
@@ -235,7 +238,7 @@ export function startMockOpenAI(port = 17891): http.Server {
         const slice = text.slice(i, i + step);
         i += step;
         res.write(sseChunk(slice, body.model));
-        setTimeout(tick, 5);
+        setTimeout(tick, delayMs);
       }
       tick();
     });
