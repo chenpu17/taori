@@ -1,6 +1,6 @@
 import { useChat } from '@ai-sdk/react';
 import type { Message as AiMessage } from '@ai-sdk/react';
-import { useEffect, useState, useCallback, useRef, useMemo } from 'react';
+import { useEffect, useLayoutEffect, useState, useCallback, useRef, useMemo } from 'react';
 import { getSidecarEndpoint, authedFetch } from './sidecar.js';
 import { api } from './api.js';
 import { Onboarding } from './Onboarding.js';
@@ -9,6 +9,34 @@ import { RoundtableLaunchDialog } from './Roundtable.js';
 import { RoundtablePanel } from './RoundtablePanel.js';
 import { priceTier, PRICE_TIER_LABEL, formatUsd, estimateInputTokens, estimateCostUsd } from '@taori/shared';
 import type { Model } from '@taori/shared';
+import { renderMarkdown } from './markdown.js';
+
+const STARTER_PROMPTS: Array<{ icon: string; title: string; desc: string; text: string }> = [
+  {
+    icon: '⚖️',
+    title: '比较模型',
+    desc: '让多个模型同时回答',
+    text: '请用一段话比较 GPT-4o 和 Claude 3.5 Sonnet 在长文本写作上的差异。',
+  },
+  {
+    icon: '✍️',
+    title: '写作助手',
+    desc: '草拟一份内容初稿',
+    text: '帮我写一段产品发布的中文公告，强调多模型协作、成本透明与本地优先。',
+  },
+  {
+    icon: '🐞',
+    title: '调试代码',
+    desc: '解释一段错误堆栈',
+    text: '我贴一段 TypeScript 错误堆栈，请你逐行解释原因并给出修复建议：\n\n',
+  },
+  {
+    icon: '💡',
+    title: '头脑风暴',
+    desc: '快速展开一个想法',
+    text: '我想给一个桌面 AI 助手加“工作流模板”，请提出 10 个可行的模板方向，每条一句话。',
+  },
+];
 
 interface HealthState {
   ok: boolean;
@@ -221,12 +249,13 @@ function StatusBadge({
   health: HealthState | null;
   error: string | null;
 }): JSX.Element {
-  if (error) return <span className="badge bad">sidecar: error</span>;
-  if (!endpoint) return <span className="badge unknown">sidecar: connecting…</span>;
-  if (!health) return <span className="badge unknown">sidecar: probing…</span>;
+  if (error) return <span className="badge bad" title="sidecar: error">●<span className="badge-label"> 故障</span></span>;
+  if (!endpoint) return <span className="badge unknown" title="sidecar: connecting…">●<span className="badge-label"> 连接中</span></span>;
+  if (!health) return <span className="badge unknown" title="sidecar: probing…">●<span className="badge-label"> 探测中</span></span>;
+  const tip = `sidecar v${health.version ?? '?'} · control: ${health.control}`;
   return (
-    <span className={`badge ${health.ok ? 'ok' : 'bad'}`}>
-      sidecar v{health.version} · control: {health.control}
+    <span className={`badge ${health.ok ? 'ok' : 'bad'}`} title={tip}>
+      ●<span className="badge-label"> {health.ok ? '在线' : '离线'} v{health.version ?? '?'}</span>
     </span>
   );
 }
@@ -342,6 +371,86 @@ function Workspace({
   );
 }
 
+function bucketLabel(updated: number, now: number): string {
+  const day = 24 * 60 * 60 * 1000;
+  const startOfToday = new Date(now);
+  startOfToday.setHours(0, 0, 0, 0);
+  const startMs = startOfToday.getTime();
+  if (updated >= startMs) return '今天';
+  if (updated >= startMs - day) return '昨天';
+  if (updated >= startMs - 7 * day) return '本周';
+  if (updated >= startMs - 30 * day) return '本月';
+  return '更早';
+}
+
+function renderGroupedConversations(
+  conversations: ConversationSummary[],
+  activeId: string | null,
+  onSelect: (id: string) => void,
+  onDelete: (id: string) => void,
+  onRename: (id: string, current: string | null) => void,
+): JSX.Element[] {
+  const now = Date.now();
+  const groups: Array<{ label: string; items: ConversationSummary[] }> = [];
+  let cur: { label: string; items: ConversationSummary[] } | null = null;
+  for (const c of conversations) {
+    const label = bucketLabel(c.updated_at, now);
+    if (!cur || cur.label !== label) {
+      cur = { label, items: [] };
+      groups.push(cur);
+    }
+    cur.items.push(c);
+  }
+  const out: JSX.Element[] = [];
+  for (const g of groups) {
+    out.push(
+      <li key={`g:${g.label}`} className="conv-group-head" aria-hidden="true">
+        {g.label}
+      </li>,
+    );
+    for (const c of g.items) {
+      const active = c.id === activeId;
+      out.push(
+        <li
+          key={c.id}
+          className={`conv-item${active ? ' active' : ''}`}
+          data-testid="conv-item"
+          data-conv-id={c.id}
+          aria-current={active ? 'true' : undefined}
+        >
+          <button
+            type="button"
+            className="conv-title"
+            onClick={() => onSelect(c.id)}
+            title={c.title ?? '未命名对话'}
+          >
+            {c.title ?? '未命名对话'}
+          </button>
+          <span className="conv-actions">
+            <button
+              type="button"
+              onClick={() => onRename(c.id, c.title)}
+              aria-label="rename"
+              data-testid="conv-rename"
+            >
+              ✎
+            </button>
+            <button
+              type="button"
+              onClick={() => onDelete(c.id)}
+              aria-label="delete"
+              data-testid="conv-delete"
+            >
+              🗑
+            </button>
+          </span>
+        </li>,
+      );
+    }
+  }
+  return out;
+}
+
 function Sidebar({
   conversations,
   activeId,
@@ -366,45 +475,7 @@ function Sidebar({
         {conversations.length === 0 ? (
           <li className="conv-empty">暂无对话</li>
         ) : (
-          conversations.map((c) => {
-            const active = c.id === activeId;
-            return (
-              <li
-                key={c.id}
-                className={`conv-item${active ? ' active' : ''}`}
-                data-testid="conv-item"
-                data-conv-id={c.id}
-                aria-current={active ? 'true' : undefined}
-              >
-                <button
-                  type="button"
-                  className="conv-title"
-                  onClick={() => onSelect(c.id)}
-                  title={c.title ?? '未命名对话'}
-                >
-                  {c.title ?? '未命名对话'}
-                </button>
-                <span className="conv-actions">
-                  <button
-                    type="button"
-                    onClick={() => onRename(c.id, c.title)}
-                    aria-label="rename"
-                    data-testid="conv-rename"
-                  >
-                    ✎
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => onDelete(c.id)}
-                    aria-label="delete"
-                    data-testid="conv-delete"
-                  >
-                    🗑
-                  </button>
-                </span>
-              </li>
-            );
-          })
+          renderGroupedConversations(conversations, activeId, onSelect, onDelete, onRename)
         )}
       </ul>
     </aside>
@@ -639,9 +710,12 @@ function ChatPanel({
     });
   }, []);
 
+  const composerRef = useRef<HTMLTextAreaElement | null>(null);
+
   const {
     messages,
     input,
+    setInput,
     handleInputChange,
     handleSubmit,
     isLoading,
@@ -706,6 +780,13 @@ function ChatPanel({
       onConversationUpdated();
     },
   });
+
+  useLayoutEffect(() => {
+    const ta = composerRef.current;
+    if (!ta) return;
+    ta.style.height = 'auto';
+    ta.style.height = Math.min(ta.scrollHeight, 200) + 'px';
+  }, [input]);
 
   // M2.4 — image picker & memory-tier resolution.
   // Lookup order: session > global > prompt user.
@@ -1268,6 +1349,27 @@ function ChatPanel({
         {historyLoading && (
           <div className="msg system" data-testid="history-loading">加载历史…</div>
         )}
+        {!historyLoading && messages.length === 0 && (
+          <div className="starter" data-testid="starter">
+            <h2 className="starter-title">准备开始一段新对话</h2>
+            <p className="starter-sub">挑一个起步提示，或直接在下方输入你的想法</p>
+            <div className="starter-grid">
+              {STARTER_PROMPTS.map((p, i) => (
+                <button
+                  key={p.title}
+                  type="button"
+                  className="starter-card"
+                  data-testid={`starter-prompt-${i}`}
+                  onClick={() => setInput(p.text)}
+                >
+                  <span className="starter-icon" aria-hidden="true">{p.icon}</span>
+                  <span className="starter-card-title">{p.title}</span>
+                  <span className="starter-card-desc">{p.desc}</span>
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
         {messages.map((m) => {
           const anns =
             ((m as { annotations?: Array<Record<string, unknown>> }).annotations ?? []);
@@ -1280,7 +1382,14 @@ function ChatPanel({
           return (
             <div key={m.id} className={`msg ${m.role}`} data-role={m.role}>
               <div className="msg-role">{m.role}</div>
-              <div className="msg-content">{m.content}</div>
+              {m.role === 'assistant' ? (
+                <div
+                  className="msg-content msg-md"
+                  dangerouslySetInnerHTML={{ __html: renderMarkdown(m.content) }}
+                />
+              ) : (
+                <div className="msg-content">{m.content}</div>
+              )}
               {m.role === 'assistant' && cost && (
                 <div className="msg-cost" data-testid="msg-cost">
                   {cost.input_tokens} in · {cost.output_tokens} out ·{' '}
@@ -1494,7 +1603,7 @@ function ChatPanel({
         data-testid="composer-form"
         data-dropping={dropping ? '1' : '0'}
       >
-        <input
+        <textarea
           name="prompt"
           value={input}
           onChange={handleInputChange}
@@ -1502,6 +1611,20 @@ function ChatPanel({
           autoFocus
           data-testid="composer-input"
           disabled={isLoading}
+          rows={1}
+          ref={composerRef}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) {
+              e.preventDefault();
+              const form = (e.currentTarget as HTMLTextAreaElement).form;
+              if (form) form.requestSubmit();
+            }
+          }}
+          onInput={(e) => {
+            const ta = e.currentTarget as HTMLTextAreaElement;
+            ta.style.height = 'auto';
+            ta.style.height = Math.min(ta.scrollHeight, 200) + 'px';
+          }}
         />
         {isLoading ? (
           <button

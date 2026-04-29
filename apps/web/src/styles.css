@@ -168,6 +168,11 @@ header h1::before {
 .badge.ok { background: rgba(16, 185, 129, 0.12); color: var(--ok); border-color: rgba(16, 185, 129, 0.30); }
 .badge.bad { background: rgba(239, 68, 68, 0.12); color: var(--bad); border-color: rgba(239, 68, 68, 0.30); }
 .badge.unknown { background: rgba(245, 158, 11, 0.12); color: var(--warn); border-color: rgba(245, 158, 11, 0.30); }
+.badge-label {
+  font-variant-numeric: tabular-nums;
+  font-size: 11px;
+  letter-spacing: 0.01em;
+}
 
 /* ============================================================
  * Placeholders
@@ -237,6 +242,18 @@ header h1::before {
   color: var(--muted-2);
   font-size: 12px; text-align: center;
 }
+.conv-group-head {
+  list-style: none;
+  padding: 12px 10px 4px;
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--muted-2);
+  user-select: none;
+  pointer-events: none;
+}
+.conv-group-head:first-child { padding-top: 4px; }
 
 .conv-item {
   display: flex; align-items: center; padding: 0 4px;
@@ -395,6 +412,81 @@ header h1::before {
   white-space: pre-wrap; word-break: break-word;
   font-size: 14px;
 }
+/* Markdown rendered assistant content — disable pre-wrap on the wrapper
+   (block elements handle their own whitespace), but keep within <pre>. */
+.msg-md { white-space: normal; }
+.msg-md > *:first-child { margin-top: 0; }
+.msg-md > *:last-child { margin-bottom: 0; }
+.msg-md p { margin: 6px 0; line-height: 1.65; }
+.msg-md h1, .msg-md h2, .msg-md h3, .msg-md h4, .msg-md h5, .msg-md h6 {
+  margin: 14px 0 6px; font-weight: 600; letter-spacing: -0.01em; line-height: 1.35;
+}
+.msg-md h1 { font-size: 19px; }
+.msg-md h2 { font-size: 17px; }
+.msg-md h3 { font-size: 15px; }
+.msg-md h4, .msg-md h5, .msg-md h6 { font-size: 14px; }
+.msg-md ul, .msg-md ol { margin: 6px 0; padding-left: 22px; }
+.msg-md li { margin: 2px 0; line-height: 1.6; }
+.msg-md li > p { margin: 2px 0; }
+.msg-md a {
+  color: var(--brand);
+  text-decoration: none;
+  border-bottom: 1px dashed rgba(99, 102, 241, 0.45);
+  transition: border-color var(--dur-1), color var(--dur-1);
+}
+.msg-md a:hover { color: var(--brand-2); border-bottom-color: var(--brand-2); }
+.msg-md code {
+  font-family: ui-monospace, 'SF Mono', Menlo, monospace;
+  font-size: 12.5px;
+  background: rgba(100, 116, 139, 0.12);
+  padding: 1px 6px;
+  border-radius: 5px;
+}
+.msg-md pre {
+  margin: 10px 0;
+  padding: 12px 14px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  overflow-x: auto;
+  font-size: 12.5px;
+  line-height: 1.55;
+  box-shadow: var(--shadow-1);
+}
+.msg-md pre code {
+  background: transparent; padding: 0; border-radius: 0;
+  font-size: inherit;
+}
+.msg-md blockquote {
+  margin: 8px 0;
+  padding: 4px 12px;
+  border-left: 3px solid rgba(139, 92, 246, 0.55);
+  background: rgba(139, 92, 246, 0.05);
+  color: var(--fg-soft);
+  border-radius: 0 var(--r-sm) var(--r-sm) 0;
+}
+.msg-md table {
+  border-collapse: collapse;
+  margin: 8px 0;
+  font-size: 13px;
+  width: 100%;
+}
+.msg-md th, .msg-md td {
+  border: 1px solid var(--border);
+  padding: 6px 10px;
+  text-align: left;
+}
+.msg-md th { background: var(--surface-2); font-weight: 600; }
+.msg-md hr {
+  border: none;
+  border-top: 1px solid var(--border);
+  margin: 14px 0;
+}
+.msg-md strong { font-weight: 600; color: var(--fg); }
+.msg-md em { font-style: italic; }
+
+/* User bubble — link colors that pop against gradient bg */
+.msg.user .msg-md a, .msg.user a { color: #fff; border-bottom-color: rgba(255,255,255,0.5); }
 .msg-cost {
   font-size: 11px;
   color: var(--muted-2);
@@ -461,9 +553,16 @@ header h1::before {
   background: var(--surface);
   color: var(--fg);
   font-size: 14px;
+  font-family: inherit;
+  line-height: 1.45;
   resize: none;
   box-shadow: var(--shadow-1);
   transition: border-color var(--dur-1), box-shadow var(--dur-1), transform var(--dur-1);
+}
+.composer textarea {
+  min-height: 44px;
+  max-height: 200px;
+  overflow-y: auto;
 }
 .composer input:focus,
 .composer textarea:focus {
@@ -1471,20 +1570,73 @@ header h1::before {
 /* ============================================================
  * Empty / hero state for fresh chat
  * ============================================================ */
-.messages:empty::before {
-  content: '准备开始一段新对话';
-  display: block;
+/* Starter prompts (empty state) */
+.starter {
   margin: auto;
-  padding: 80px 24px 40px;
+  padding: 56px 24px 40px;
+  width: 100%;
+  max-width: 720px;
   text-align: center;
-  font-size: 22px;
-  font-weight: 600;
-  letter-spacing: -0.02em;
+  animation: msg-in 0.45s var(--ease-out) both;
+}
+.starter-title {
+  margin: 0 0 8px;
+  font-size: 28px;
+  font-weight: 700;
+  letter-spacing: -0.025em;
   background: var(--brand-grad);
   -webkit-background-clip: text;
   background-clip: text;
   color: transparent;
-  opacity: 0.55;
+}
+.starter-sub {
+  margin: 0 0 28px;
+  color: var(--muted);
+  font-size: 13.5px;
+}
+.starter-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+.starter-card {
+  display: flex; flex-direction: column;
+  align-items: flex-start;
+  gap: 6px;
+  padding: 16px 16px 14px;
+  text-align: left;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--r-lg);
+  cursor: pointer;
+  transition: transform var(--dur-1) var(--ease-out),
+              border-color var(--dur-1),
+              box-shadow var(--dur-1),
+              background var(--dur-1);
+  box-shadow: var(--shadow-1);
+}
+.starter-card:hover {
+  transform: translateY(-2px);
+  border-color: rgba(99, 102, 241, 0.5);
+  box-shadow: var(--shadow-2), 0 0 0 4px rgba(99, 102, 241, 0.08);
+}
+.starter-icon {
+  font-size: 22px;
+  line-height: 1;
+  filter: drop-shadow(0 2px 4px rgba(99, 102, 241, 0.2));
+}
+.starter-card-title {
+  font-size: 14px; font-weight: 600;
+  color: var(--fg);
+  letter-spacing: -0.005em;
+}
+.starter-card-desc {
+  font-size: 12.5px;
+  color: var(--muted);
+  line-height: 1.5;
+}
+@media (max-width: 640px) {
+  .starter-grid { grid-template-columns: 1fr; }
 }
 
 /* ============================================================

@@ -155,7 +155,10 @@ function sseFinal(model: string, prompt: number, completion: number): string {
   );
 }
 
-export function startMockOpenAI(port = 17891, opts: { streamDelayMs?: number } = {}): http.Server {
+export function startMockOpenAI(
+  port = 17891,
+  opts: { streamDelayMs?: number; fixedReply?: string } = {},
+): http.Server {
   const server = http.createServer((req, res) => {
     if (req.method === 'GET' && req.url === '/v1/models') {
       res.writeHead(200, { 'content-type': 'application/json' });
@@ -188,11 +191,12 @@ export function startMockOpenAI(port = 17891, opts: { streamDelayMs?: number } =
       }
       const { kind, role } = classifyAndRoleFromMessages(body.messages);
       const text =
-        kind === 'analyzer'
+        opts.fixedReply ??
+        (kind === 'analyzer'
           ? analyzerResponse(body.messages)
           : kind === 'summarizer'
           ? summaryResponse()
-          : roundSpeech(role);
+          : roundSpeech(role));
 
       if (!body.stream) {
         res.writeHead(200, { 'content-type': 'application/json' });

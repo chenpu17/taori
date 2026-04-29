@@ -1,1 +1,1 @@
-{"root":["./src/app.tsx","./src/onboarding.tsx","./src/roundtable.tsx","./src/roundtablepanel.tsx","./src/settings.tsx","./src/api.ts","./src/main.tsx","./src/roundtablestream.ts","./src/sidecar.ts"],"version":"5.6.3"}
+{"root":["./src/app.tsx","./src/onboarding.tsx","./src/roundtable.tsx","./src/roundtablepanel.tsx","./src/settings.tsx","./src/api.ts","./src/main.tsx","./src/markdown.ts","./src/roundtablestream.ts","./src/sidecar.ts"],"version":"5.6.3"}
