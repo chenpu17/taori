@@ -184,8 +184,13 @@ export const api = {
           error: string | null;
           created_at: number;
           attachments_count: number;
+          image_attachments: Array<{ file_id?: string; mime?: string; width?: number; height?: number }>;
         }>;
       }>(r),
+    ),
+  getFileData: (fileId: string) =>
+    authedFetch(`/v1/files/${fileId}/data`).then((r) =>
+      json<{ ok: boolean; file_id: string; content_type: string; data_b64: string; size_bytes: number }>(r),
     ),
   renameConversation: (id: string, title: string | null) =>
     authedFetch(`/v1/conversations/${id}`, {

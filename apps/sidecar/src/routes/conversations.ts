@@ -14,8 +14,9 @@
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { TaoriError } from '@taori/shared';
-import { ConversationsRepo, MessagesRepo } from '../db/repos/index.js';
+import { ConversationsRepo, MessagesRepo, FilesRepo } from '../db/repos/index.js';
 import type { BuildServerArgs } from '../server.js';
+import fs from 'node:fs/promises';
 
 const PatchSchema = z
   .object({
@@ -32,6 +33,7 @@ export function registerConversationsRoute(
 ): void {
   const convRepo = new ConversationsRepo(deps.db);
   const msgRepo = new MessagesRepo(deps.db);
+  const filesRepo = new FilesRepo(deps.db);
 
   app.get('/v1/conversations', async () => {
     return { conversations: convRepo.list() };
@@ -48,27 +50,30 @@ export function registerConversationsRoute(
         });
       }
       const rows = msgRepo.listByConversation(req.params.id);
-      // Strip attachment payloads from the wire — they can be many MBs of
-      // base64 each. Renderer only needs presence/count today.
-      const messages = rows.map((r) => ({
-        id: r.id,
-        conversation_id: r.conversation_id,
-        role: r.role,
-        content: r.content,
-        model_id: r.model_id,
-        status: r.status,
-        error: r.error,
-        created_at: r.created_at,
-        attachments_count: r.attachments
-          ? (() => {
-              try {
-                return (JSON.parse(r.attachments) as unknown[]).length;
-              } catch {
-                return 0;
-              }
-            })()
-          : 0,
-      }));
+      // Strip raw base64 payloads but expose image attachment metadata
+      // (file_id, mime, width, height) so the renderer can lazy-fetch images.
+      const messages = rows.map((r) => {
+        type AttachmentItem = { kind?: string; file_id?: string; mime?: string; width?: number; height?: number; data_b64?: string };
+        let parsedAttachments: AttachmentItem[] = [];
+        if (r.attachments) {
+          try { parsedAttachments = JSON.parse(r.attachments) as AttachmentItem[]; } catch { /* ignore */ }
+        }
+        const imageAttachments = parsedAttachments
+          .filter((a) => a.kind === 'image' && a.file_id)
+          .map(({ file_id, mime, width, height }) => ({ file_id, mime, width, height }));
+        return {
+          id: r.id,
+          conversation_id: r.conversation_id,
+          role: r.role,
+          content: r.content,
+          model_id: r.model_id,
+          status: r.status,
+          error: r.error,
+          created_at: r.created_at,
+          attachments_count: parsedAttachments.length,
+          image_attachments: imageAttachments,
+        };
+      });
       return { conversation: conv, messages };
     },
   );
@@ -148,6 +153,29 @@ export function registerConversationsRoute(
         });
       }
       reply.code(204).send();
+    },
+  );
+
+  // GET /v1/files/:id/data — return file bytes as base64 for inline rendering.
+  // Used by the renderer to lazy-load generated images stored on disk.
+  app.get<{ Params: { id: string } }>(
+    '/v1/files/:id/data',
+    async (req) => {
+      const row = filesRepo.get(req.params.id);
+      if (!row) {
+        throw new TaoriError({ code: 'not_found', message: `File ${req.params.id} not found` });
+      }
+      if (!row.original_path) {
+        throw new TaoriError({ code: 'not_found', message: `File ${req.params.id} has no path` });
+      }
+      const buf = await fs.readFile(row.original_path);
+      return {
+        ok: true,
+        file_id: row.id,
+        content_type: row.mime_type,
+        data_b64: buf.toString('base64'),
+        size_bytes: row.size_bytes,
+      };
     },
   );
 }

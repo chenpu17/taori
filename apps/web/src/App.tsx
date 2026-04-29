@@ -960,6 +960,47 @@ function ChatPanel({
     capabilityRouteRef.current = openImagePicker;
   }, [openImagePicker]);
 
+  // Fetch image data for messages that have image_attachments and populate imagesByMsg.
+  // Used after history load and after direct tool invocations (image picker flow).
+  const loadImagesForMessages = useCallback(async (
+    messages: Array<{ id: string; role: string; image_attachments?: Array<{ file_id?: string; mime?: string; width?: number; height?: number }> }>,
+  ) => {
+    const assistantMsgsWithImages = messages.filter(
+      (m) => m.role === 'assistant' && m.image_attachments && m.image_attachments.length > 0,
+    );
+    await Promise.all(
+      assistantMsgsWithImages.map(async (m) => {
+        const imgs = (m.image_attachments ?? []).filter((a) => a.file_id);
+        await Promise.all(
+          imgs.map(async (a) => {
+            try {
+              const fileData = await api.getFileData(a.file_id!);
+              setImagesByMsg((prev) => {
+                const list = prev[m.id] ?? [];
+                if (list.some((it) => it.file_id === a.file_id)) return prev;
+                return {
+                  ...prev,
+                  [m.id]: [
+                    ...list,
+                    {
+                      file_id: a.file_id!,
+                      content_type: fileData.content_type ?? a.mime ?? 'image/png',
+                      width: a.width ?? 0,
+                      height: a.height ?? 0,
+                      data_b64: fileData.data_b64,
+                    },
+                  ],
+                };
+              });
+            } catch (e) {
+              console.warn('[images] failed to load file', a.file_id, e);
+            }
+          }),
+        );
+      }),
+    );
+  }, []);
+
   const runImageGenerate = useCallback(async (
     prompt: string,
     modelId: string,
@@ -996,6 +1037,8 @@ function ChatPanel({
             content: m.content ?? '',
           }));
         setMessages(mapped);
+        // Populate imagesByMsg for any assistant messages that have image attachments.
+        await loadImagesForMessages(r.messages);
       }
       void refreshRealtime();
       setImagePicker(null);
@@ -1107,6 +1150,8 @@ function ChatPanel({
             content: m.content ?? '',
           }));
         setMessages(mapped);
+        // Also load image data for messages with image attachments.
+        void loadImagesForMessages(res.messages);
       })
       .catch((e) => console.warn('[history] load failed:', e))
       .finally(() => {
@@ -1115,7 +1160,7 @@ function ChatPanel({
     return () => {
       cancelled = true;
     };
-  }, [conversationId, setMessages]);
+  }, [conversationId, setMessages, loadImagesForMessages]);
 
   // M3.A.5 — when conversation switches, also detect whether this
   // conversation has an associated roundtable and restore the panel.
