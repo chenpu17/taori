@@ -7,6 +7,7 @@ import { Onboarding } from './Onboarding.js';
 import { Settings } from './Settings.js';
 import { ModelCenter } from './ModelCenter.js';
 import { HelpCenter } from './HelpCenter.js';
+import { CommandPalette } from './CommandPalette.js';
 import { TaoriIcon } from './TaoriIcon.js';
 import { RoundtableLaunchDialog } from './Roundtable.js';
 import { RoundtablePanel } from './RoundtablePanel.js';
@@ -348,6 +349,8 @@ function Workspace({
   const [debouncedQuery, setDebouncedQuery] = useState<string>('');
   const [batchMode, setBatchMode] = useState<boolean>(false);
   const [selectedConvIds, setSelectedConvIds] = useState<Set<string>>(new Set());
+  // B1 — Command palette
+  const [cmdPaletteOpen, setCmdPaletteOpen] = useState<boolean>(false);
 
   useEffect(() => {
     const t = setTimeout(() => setDebouncedQuery(searchQuery), 200);
@@ -368,6 +371,18 @@ function Workspace({
   useEffect(() => {
     void refreshConversations();
   }, [refreshConversations]);
+
+  // B1 — Global Cmd+K / Ctrl+K listener
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if ((e.metaKey || e.ctrlKey) && (e.key === 'k' || e.key === 'K')) {
+        e.preventDefault();
+        setCmdPaletteOpen(true);
+      }
+    };
+    document.addEventListener('keydown', handleKeyDown);
+    return () => document.removeEventListener('keydown', handleKeyDown);
+  }, []);
 
   const onNewChat = (): void => {
     setActiveConvId(null);
@@ -513,6 +528,18 @@ function Workspace({
           }}
         />
       </main>
+      <CommandPalette
+        isOpen={cmdPaletteOpen}
+        onClose={() => setCmdPaletteOpen(false)}
+        onSelectConv={onSelectConv}
+        onSelectModel={setActiveModelId}
+        onNavigate={(path) => {
+          if (path === '/settings') onOpenSettings();
+          // TODO: other navigation paths
+        }}
+        conversations={conversations.map(c => ({ id: c.id, title: c.title, pinned: c.pinned, tags: c.tags }))}
+        models={chatModels}
+      />
     </div>
   );
 }
