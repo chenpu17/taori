@@ -1271,6 +1271,10 @@ function ChatPanel({
       if (!Array.isArray(anns)) continue;
       for (const a of anns as Array<Record<string, unknown>>) {
         if (a?.type === 'meta' && typeof a.conversation_id === 'string') {
+          // Guard: when the parent prop has already moved on to a different
+          // conversation (e.g. user branched / switched), stale streamed
+          // messages must NOT re-lift the prior conv id back onto the parent.
+          if (conversationId && conversationId !== a.conversation_id) continue;
           if (conversationIdRef.current !== a.conversation_id) {
             conversationIdRef.current = a.conversation_id;
           }
@@ -1494,6 +1498,80 @@ function ChatPanel({
 
   const tier = priceTier(model.price_input_per_1m);
 
+  // C1 — message-level actions: edit-and-resend + branch.
+  const [editingMsgId, setEditingMsgId] = useState<string | null>(null);
+  const [editingDraft, setEditingDraft] = useState<string>('');
+  const [editBusy, setEditBusy] = useState(false);
+  const [branchBusy, setBranchBusy] = useState<string | null>(null);
+  const [actionError, setActionError] = useState<string | null>(null);
+
+  const submitEdit = useCallback(
+    async (messageId: string) => {
+      if (!conversationId) return;
+      const trimmed = editingDraft.trim();
+      if (!trimmed) return;
+      setEditBusy(true);
+      setActionError(null);
+      try {
+        const localIdx = messages.findIndex((m) => m.id === messageId);
+        if (localIdx < 0) throw new Error('找不到这条消息');
+        // Resolve the persisted DB id by position — useChat uses internal
+        // uuids for messages it streamed, which do not match the sidecar's
+        // ids. The history endpoint orders by created_at so position is
+        // stable across both views.
+        const history = await api.getConversationMessages(conversationId);
+        const dbMsg = history.messages[localIdx];
+        if (!dbMsg) throw new Error('历史记录已变更，请刷新后重试');
+        await api.editUserMessage(conversationId, dbMsg.id, trimmed);
+        setMessages((prev) => {
+          const next = prev.slice(0, localIdx + 1);
+          next[localIdx] = { ...next[localIdx]!, content: trimmed };
+          return next;
+        });
+        setEditingMsgId(null);
+        setEditingDraft('');
+        // Trigger regeneration so a fresh assistant message follows.
+        // skip_user_persist tells the chat route NOT to insert another
+        // user-message row — we already updated the existing one.
+        window.setTimeout(
+          () => void regenerate({ body: { skip_user_persist: true } }),
+          50,
+        );
+      } catch (e) {
+        setActionError(e instanceof Error ? e.message : '编辑失败');
+      } finally {
+        setEditBusy(false);
+      }
+    },
+    [conversationId, editingDraft, messages, regenerate, setMessages],
+  );
+
+  const branchFromMessage = useCallback(
+    async (messageId: string) => {
+      if (!conversationId) return;
+      setBranchBusy(messageId);
+      setActionError(null);
+      try {
+        const localIdx = messages.findIndex((m) => m.id === messageId);
+        if (localIdx < 0) throw new Error('找不到这条消息');
+        const history = await api.getConversationMessages(conversationId);
+        const dbMsg = history.messages[localIdx];
+        if (!dbMsg) throw new Error('历史记录已变更，请刷新后重试');
+        const { conversation } = await api.branchConversationAtMessage(
+          conversationId,
+          dbMsg.id,
+        );
+        onConversationCreated(conversation.id);
+        onConversationUpdated();
+      } catch (e) {
+        setActionError(e instanceof Error ? e.message : '创建分支失败');
+      } finally {
+        setBranchBusy(null);
+      }
+    },
+    [conversationId, messages, onConversationCreated, onConversationUpdated],
+  );
+
   return (
     <div className="chat" data-testid="chat-panel" data-active-conv={conversationId ?? ''}>
       <div className="chat-header">
@@ -1563,9 +1641,37 @@ function ChatPanel({
           const isLastAssistant =
             m.role === 'assistant' && m === messages[messages.length - 1];
           return (
-            <div key={m.id} className={`msg ${m.role}`} data-role={m.role}>
+            <div key={m.id} className={`msg ${m.role}`} data-role={m.role} data-msg-id={m.id}>
               <div className="msg-role">{m.role}</div>
-              {m.role === 'assistant' ? (
+              {m.role === 'user' && editingMsgId === m.id ? (
+                <div className="msg-content msg-edit-block">
+                  <textarea
+                    className="msg-edit-textarea"
+                    data-testid="msg-edit-textarea"
+                    value={editingDraft}
+                    onChange={(e) => setEditingDraft(e.target.value)}
+                    rows={Math.min(10, Math.max(2, editingDraft.split('\n').length))}
+                  />
+                  <div className="msg-edit-actions">
+                    <button
+                      type="button"
+                      data-testid="msg-edit-save"
+                      disabled={editBusy || !editingDraft.trim()}
+                      onClick={() => void submitEdit(m.id)}
+                    >
+                      {editBusy ? '保存中…' : '保存并重新生成'}
+                    </button>
+                    <button
+                      type="button"
+                      data-testid="msg-edit-cancel"
+                      disabled={editBusy}
+                      onClick={() => { setEditingMsgId(null); setEditingDraft(''); }}
+                    >
+                      取消
+                    </button>
+                  </div>
+                </div>
+              ) : m.role === 'assistant' ? (
                 <div
                   className="msg-content msg-md"
                   dangerouslySetInnerHTML={{ __html: renderMarkdown(m.content) }}
@@ -1599,7 +1705,7 @@ function ChatPanel({
                   {cost.actual_usd != null ? formatUsd(cost.actual_usd) : '—'}
                 </div>
               )}
-              {m.role === 'assistant' && !isLoading && m.content && (
+              {!isLoading && m.content && editingMsgId !== m.id && (
                 <div className="msg-actions" data-testid="msg-actions">
                   <button
                     type="button"
@@ -1609,7 +1715,21 @@ function ChatPanel({
                   >
                     ⧉ 复制
                   </button>
-                  {isLastAssistant && (
+                  {m.role === 'user' && conversationId && (
+                    <button
+                      type="button"
+                      data-testid="msg-edit"
+                      title="编辑并重新生成"
+                      onClick={() => {
+                        setActionError(null);
+                        setEditingMsgId(m.id);
+                        setEditingDraft(m.content ?? '');
+                      }}
+                    >
+                      ✎ 编辑重发
+                    </button>
+                  )}
+                  {m.role === 'assistant' && isLastAssistant && (
                     <button
                       type="button"
                       onClick={() => regenerate()}
@@ -1617,6 +1737,17 @@ function ChatPanel({
                       title="重新生成"
                     >
                       ↻ 重新生成
+                    </button>
+                  )}
+                  {conversationId && (m.role === 'user' || m.role === 'assistant') && (
+                    <button
+                      type="button"
+                      data-testid="msg-branch"
+                      title="基于此消息创建分支会话"
+                      disabled={branchBusy === m.id}
+                      onClick={() => void branchFromMessage(m.id)}
+                    >
+                      {branchBusy === m.id ? '创建分支…' : '⎇ 分支'}
                     </button>
                   )}
                 </div>
@@ -1636,6 +1767,11 @@ function ChatPanel({
             </div>
           );
         })}
+        {actionError && (
+          <div className="msg-action-error" data-testid="msg-action-error" role="alert">
+            {actionError}
+          </div>
+        )}
         {isLoading && (
           <div className="msg assistant streaming" data-testid="streaming-indicator">
             <span className="streaming-dot">…</span>

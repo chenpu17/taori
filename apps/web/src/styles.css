@@ -2564,3 +2564,36 @@ header h1::before {
   color: #c0392b;
   font-size: 12px;
 }
+
+/* C1 — message edit + branch actions */
+.msg-edit-block { display: flex; flex-direction: column; gap: 6px; }
+.msg-edit-textarea {
+  width: 100%;
+  border: 1px solid #c8d0d8;
+  border-radius: 6px;
+  padding: 8px;
+  font: inherit;
+  resize: vertical;
+}
+.msg-edit-actions { display: flex; gap: 8px; }
+.msg-edit-actions button {
+  padding: 4px 10px;
+  border: 1px solid #c8d0d8;
+  border-radius: 6px;
+  background: #fff;
+  cursor: pointer;
+}
+.msg-edit-actions button:first-child {
+  background: #2557cc;
+  color: #fff;
+  border-color: #2557cc;
+}
+.msg-edit-actions button:disabled { opacity: 0.6; cursor: not-allowed; }
+.msg-action-error {
+  color: #c0392b;
+  font-size: 12px;
+  padding: 6px 10px;
+  background: #fdecea;
+  border-radius: 6px;
+  margin: 6px 0;
+}

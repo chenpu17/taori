@@ -258,6 +258,12 @@ export const ChatRequestSchema = z.object({
   model_id: z.string(),
   messages: z.array(ChatMessageSchema).min(1),
   attachments: z.array(ChatAttachmentSchema).max(8, '最多同时上传 8 个附件').optional(),
+  /**
+   * C1 — when set, /v1/chat must NOT insert a new user-message row before
+   * streaming the assistant. Used by edit-and-resend so editing an existing
+   * user message does not duplicate it in the conversation history.
+   */
+  skip_user_persist: z.boolean().optional(),
 });
 export type ChatRequest = z.infer<typeof ChatRequestSchema>;
 

@@ -229,6 +229,31 @@ export const api = {
     }).then((r) =>
       json<{ message: { id: string; role: 'system'; content: string; created_at: number } }>(r),
     ),
+  // C1 — patch a user message (deletes everything that came after it).
+  editUserMessage: (convId: string, msgId: string, content: string) =>
+    authedFetch(`/v1/conversations/${convId}/messages/${msgId}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ content }),
+    }).then((r) =>
+      json<{ message: { id: string; role: string; content: string; created_at: number } }>(r),
+    ),
+  // C1 — fork a conversation at a specific message.
+  branchConversationAtMessage: (
+    convId: string,
+    msgId: string,
+    title?: string,
+  ) =>
+    authedFetch(`/v1/conversations/${convId}/messages/${msgId}/branch`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(title ? { title } : {}),
+    }).then((r) =>
+      json<{
+        conversation: { id: string; type: string; title: string | null; created_at: number; updated_at: number };
+        copied_messages: number;
+      }>(r),
+    ),
   testModel: (id: string) =>
     authedFetch(`/v1/models/${id}/test`, { method: 'POST' }).then((r) =>
       json<{

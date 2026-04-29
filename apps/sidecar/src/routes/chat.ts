@@ -221,7 +221,10 @@ export function registerChatRoute(
       ? null
       : deps.db.transaction((tx) => {
           const txMsgRepo = new MessagesRepo(tx);
-          if (lastUserMsg) {
+          // C1 — when the renderer is regenerating after editing an
+          // existing user message, the user row is already in the DB; a
+          // second insert here would duplicate it in the history.
+          if (lastUserMsg && !parsed.data.skip_user_persist) {
             txMsgRepo.insert({
               conversation_id: conversation.id,
               role: 'user',

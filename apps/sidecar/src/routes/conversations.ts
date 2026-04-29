@@ -156,6 +156,66 @@ export function registerConversationsRoute(
     },
   );
 
+  // C1 — edit a user message and discard everything that came after it.
+  // Only role='user' is editable; assistant text comes from the model and
+  // mutating it would silently corrupt history. The renderer is expected to
+  // call this immediately before re-running /v1/chat to regenerate the
+  // response.
+  const PatchMsgSchema = z.object({ content: z.string().min(1).max(20000) });
+  app.patch<{ Params: { id: string; msgId: string } }>(
+    '/v1/conversations/:id/messages/:msgId',
+    async (req) => {
+      const conv = convRepo.get(req.params.id);
+      if (!conv) {
+        throw new TaoriError({ code: 'not_found', message: `Conversation ${req.params.id} not found` });
+      }
+      const target = msgRepo.getById(req.params.msgId);
+      if (!target || target.conversation_id !== req.params.id) {
+        throw new TaoriError({ code: 'not_found', message: `Message ${req.params.msgId} not found` });
+      }
+      if (target.role !== 'user') {
+        throw new TaoriError({ code: 'validation_error', message: 'Only user messages can be edited' });
+      }
+      const parsed = PatchMsgSchema.safeParse(req.body);
+      if (!parsed.success) {
+        throw new TaoriError({ code: 'validation_error', message: parsed.error.errors.map((e) => e.message).join('; ') });
+      }
+      const updated = msgRepo.editAndTruncate(req.params.msgId, parsed.data.content);
+      if (!updated) {
+        throw new TaoriError({ code: 'not_found', message: `Message ${req.params.msgId} not found` });
+      }
+      convRepo.touch(req.params.id);
+      return { message: { id: updated.id, role: updated.role, content: updated.content, created_at: updated.created_at } };
+    },
+  );
+
+  // C1 — branch a conversation from a specific message. The new chat
+  // conversation gets a deep copy of every message up to and including the
+  // pivot, so the user can fork without disturbing the original thread.
+  const BranchSchema = z.object({ title: z.string().min(1).max(120).optional() }).optional();
+  app.post<{ Params: { id: string; msgId: string } }>(
+    '/v1/conversations/:id/messages/:msgId/branch',
+    async (req, reply) => {
+      const conv = convRepo.get(req.params.id);
+      if (!conv) {
+        throw new TaoriError({ code: 'not_found', message: `Conversation ${req.params.id} not found` });
+      }
+      const target = msgRepo.getById(req.params.msgId);
+      if (!target || target.conversation_id !== req.params.id) {
+        throw new TaoriError({ code: 'not_found', message: `Message ${req.params.msgId} not found` });
+      }
+      const parsed = BranchSchema.safeParse(req.body);
+      if (!parsed.success) {
+        throw new TaoriError({ code: 'validation_error', message: parsed.error.errors.map((e) => e.message).join('; ') });
+      }
+      const baseTitle = parsed.data?.title ?? (conv.title ? `${conv.title} · 分支` : '分支对话');
+      const created = convRepo.create({ type: 'chat', title: baseTitle.slice(0, 120) });
+      const copied = msgRepo.cloneUpTo(req.params.msgId, created.id);
+      reply.code(201);
+      return { conversation: created, copied_messages: copied };
+    },
+  );
+
   // GET /v1/files/:id/data — return file bytes as base64 for inline rendering.
   // Used by the renderer to lazy-load generated images stored on disk.
   app.get<{ Params: { id: string } }>(
