@@ -6,6 +6,7 @@ import { api } from './api.js';
 import { Onboarding } from './Onboarding.js';
 import { Settings } from './Settings.js';
 import { ModelCenter } from './ModelCenter.js';
+import { HelpCenter } from './HelpCenter.js';
 import { TaoriIcon } from './TaoriIcon.js';
 import { RoundtableLaunchDialog } from './Roundtable.js';
 import { RoundtablePanel } from './RoundtablePanel.js';
@@ -77,6 +78,7 @@ export function App(): JSX.Element {
   });
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [modelCenterOpen, setModelCenterOpen] = useState(false);
+  const [helpOpen, setHelpOpen] = useState(false);
   const [forceOnboarding, setForceOnboarding] = useState(false);
 
   useEffect(() => {
@@ -198,6 +200,18 @@ export function App(): JSX.Element {
             <button
               type="button"
               className="settings-btn"
+              onClick={() => setHelpOpen(true)}
+              data-testid="open-help"
+              aria-label="使用帮助"
+              title="使用帮助"
+            >
+              ？
+            </button>
+          )}
+          {endpoint && health?.ok && (
+            <button
+              type="button"
+              className="settings-btn"
               onClick={() => setSettingsOpen(true)}
               data-testid="open-settings"
               aria-label="设置"
@@ -260,6 +274,7 @@ export function App(): JSX.Element {
           />
         </div>
       )}
+      {helpOpen && <HelpCenter onClose={() => setHelpOpen(false)} />}
     </div>
   );
 }

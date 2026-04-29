@@ -50,6 +50,21 @@ async function json<T>(res: Response): Promise<T> {
 export const api = {
   health: () => authedFetch('/health').then((r) => json<{ ok: boolean; control_channel: string }>(r)),
 
+  // B3 — selfcheck endpoint used by HelpCenter to verify local plumbing.
+  selfCheck: () =>
+    authedFetch('/v1/selfcheck').then((r) =>
+      json<{
+        ok: boolean;
+        overall: 'ok' | 'warn' | 'error';
+        checks: {
+          id: 'sidecar' | 'keystore' | 'database' | 'default_model';
+          ok: boolean;
+          level: 'ok' | 'warn' | 'error';
+          detail: string;
+        }[];
+      }>(r),
+    ),
+
   listProviders: () =>
     authedFetch('/v1/providers').then((r) =>
       json<{ providers: Provider[] }>(r),

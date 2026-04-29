@@ -2299,3 +2299,113 @@ header h1::before {
 .model-editor__foot button.btn-primary:hover {
   filter: brightness(1.05);
 }
+
+/* B3 — Help Center modal */
+.modal-card.help-center {
+  width: min(720px, 92vw);
+  max-height: 85vh;
+  overflow-y: auto;
+}
+.help-center__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 12px;
+}
+.help-center__head h3 {
+  margin: 0;
+}
+.help-center section {
+  margin-top: 18px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border, #e3e3e3);
+}
+.help-center section:first-of-type {
+  border-top: none;
+  padding-top: 0;
+  margin-top: 0;
+}
+.help-center section h4 {
+  margin: 0 0 8px 0;
+  font-size: 14px;
+}
+.help-center__pillars ul {
+  margin: 0;
+  padding-left: 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  line-height: 1.6;
+}
+.help-faq-item {
+  border: 1px solid var(--border, #e3e3e3);
+  border-radius: 6px;
+  padding: 6px 10px;
+  margin-bottom: 6px;
+}
+.help-faq-item summary {
+  cursor: pointer;
+  font-weight: 500;
+}
+.help-faq-item p {
+  margin: 6px 0 2px;
+  line-height: 1.6;
+  color: var(--text-secondary, #555);
+}
+.help-selfcheck__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 8px;
+}
+.help-selfcheck__head h4 {
+  margin: 0;
+}
+.help-selfcheck-overall {
+  font-weight: 600;
+  padding: 8px 12px;
+  border-radius: 6px;
+  margin-bottom: 8px;
+}
+.help-selfcheck-overall.help-level-ok {
+  background: #e6f6ea;
+  color: #1f7a3a;
+}
+.help-selfcheck-overall.help-level-warn {
+  background: #fff7e0;
+  color: #946d00;
+}
+.help-selfcheck-overall.help-level-error {
+  background: #fde7e7;
+  color: #a8211f;
+}
+.help-selfcheck-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.help-selfcheck-item {
+  display: grid;
+  grid-template-columns: auto auto 1fr;
+  gap: 8px;
+  align-items: center;
+  padding: 6px 10px;
+  border-radius: 6px;
+  border: 1px solid var(--border, #e3e3e3);
+}
+.help-selfcheck-item.help-level-warn {
+  background: #fffbe9;
+}
+.help-selfcheck-item.help-level-error {
+  background: #fdeeee;
+}
+.help-selfcheck-name {
+  font-weight: 500;
+}
+.help-selfcheck-detail {
+  font-size: 12px;
+}

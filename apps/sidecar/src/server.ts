@@ -18,6 +18,7 @@ import { type Db } from './db/index.js';
 import { type ControlClient } from './control/client.js';
 import { type KeyStore } from './keystore.js';
 import { registerHealthRoute } from './routes/health.js';
+import { registerSelfCheckRoute } from './routes/selfcheck.js';
 import { registerChatRoute } from './routes/chat.js';
 import { registerProvidersRoute } from './routes/providers.js';
 import { registerModelsRoute } from './routes/models.js';
@@ -126,6 +127,7 @@ export function buildServer(args: BuildServerArgs): FastifyInstance {
   });
 
   registerHealthRoute(app, args);
+  registerSelfCheckRoute(app, args);
 
   // M2.3 — Capability Bus + builtin tools (created BEFORE chat so the chat
   // route can attach `image_generate` as an LLM tool — M2.5 §F-CR / batch A2).
