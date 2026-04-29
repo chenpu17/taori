@@ -95,6 +95,9 @@ export const conversations = sqliteTable('conversations', {
   created_at: integer('created_at').notNull(),
   updated_at: integer('updated_at').notNull(),
   archived: integer('archived', { mode: 'boolean' }).notNull().default(false),
+  pinned: integer('pinned', { mode: 'boolean' }).notNull().default(false),
+  // JSON-encoded array of strings (max 3 entries enforced at the route layer).
+  tags: text('tags'),
 });
 
 export const messages = sqliteTable(

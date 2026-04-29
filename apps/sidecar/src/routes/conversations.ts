@@ -22,10 +22,19 @@ const PatchSchema = z
   .object({
     title: z.string().min(1).max(120).nullable().optional(),
     archived: z.boolean().optional(),
+    pinned: z.boolean().optional(),
+    tags: z.array(z.string().min(1).max(24)).max(3).optional(),
   })
-  .refine((d) => d.title !== undefined || d.archived !== undefined, {
-    message: 'must provide title or archived',
-  });
+  .refine(
+    (d) =>
+      d.title !== undefined ||
+      d.archived !== undefined ||
+      d.pinned !== undefined ||
+      d.tags !== undefined,
+    {
+      message: 'must provide title, archived, pinned, or tags',
+    },
+  );
 
 export function registerConversationsRoute(
   app: FastifyInstance,
@@ -35,8 +44,8 @@ export function registerConversationsRoute(
   const msgRepo = new MessagesRepo(deps.db);
   const filesRepo = new FilesRepo(deps.db);
 
-  app.get('/v1/conversations', async () => {
-    return { conversations: convRepo.list() };
+  app.get<{ Querystring: { q?: string } }>('/v1/conversations', async (req) => {
+    return { conversations: convRepo.list({ q: req.query.q }) };
   });
 
   app.get<{ Params: { id: string } }>(
@@ -100,6 +109,12 @@ export function registerConversationsRoute(
       }
       if (parsed.data.archived !== undefined) {
         updated = convRepo.setArchived(req.params.id, parsed.data.archived) ?? updated;
+      }
+      if (parsed.data.pinned !== undefined) {
+        updated = convRepo.setPinned(req.params.id, parsed.data.pinned) ?? updated;
+      }
+      if (parsed.data.tags !== undefined) {
+        updated = convRepo.setTags(req.params.id, parsed.data.tags) ?? updated;
       }
       return updated;
     },

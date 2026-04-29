@@ -54,6 +54,8 @@ interface ConversationSummary {
   created_at: number;
   updated_at: number;
   archived: boolean;
+  pinned: boolean;
+  tags: string | null;
 }
 
 type BootState =
@@ -339,15 +341,29 @@ function Workspace({
   // Bumped when the user clicks "New chat" so ChatPanel remounts even if the
   // sidebar entry hasn't been created yet.
   const [chatKey, setChatKey] = useState(0);
+  // C4 — sidebar search + batch select. searchQuery is passed to the sidecar
+  // verbatim (debounced via effect). batchMode lets the user multi-select for
+  // bulk delete.
+  const [searchQuery, setSearchQuery] = useState<string>('');
+  const [debouncedQuery, setDebouncedQuery] = useState<string>('');
+  const [batchMode, setBatchMode] = useState<boolean>(false);
+  const [selectedConvIds, setSelectedConvIds] = useState<Set<string>>(new Set());
+
+  useEffect(() => {
+    const t = setTimeout(() => setDebouncedQuery(searchQuery), 200);
+    return () => clearTimeout(t);
+  }, [searchQuery]);
 
   const refreshConversations = useCallback(async () => {
     try {
-      const { conversations: list } = await api.listConversations();
+      const { conversations: list } = await api.listConversations(
+        debouncedQuery || undefined,
+      );
       setConversations(list);
     } catch {
       /* non-fatal */
     }
-  }, []);
+  }, [debouncedQuery]);
 
   useEffect(() => {
     void refreshConversations();
@@ -391,6 +407,67 @@ function Workspace({
     }
   };
 
+  // C4 — pin / tag / batch handlers.
+  const onTogglePin = async (id: string, next: boolean): Promise<void> => {
+    try {
+      await api.setConversationPinned(id, next);
+      await refreshConversations();
+    } catch (e) {
+      window.alert(`设置置顶失败：${e instanceof Error ? e.message : String(e)}`);
+    }
+  };
+  const onSetTags = async (id: string, tags: string[]): Promise<void> => {
+    try {
+      await api.setConversationTags(id, tags);
+      await refreshConversations();
+    } catch (e) {
+      window.alert(`保存标签失败：${e instanceof Error ? e.message : String(e)}`);
+    }
+  };
+  const onToggleSelected = (id: string): void => {
+    setSelectedConvIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  };
+  const onEnterBatch = (): void => {
+    setBatchMode(true);
+    setSelectedConvIds(new Set());
+  };
+  const onExitBatch = (): void => {
+    setBatchMode(false);
+    setSelectedConvIds(new Set());
+  };
+  const onBatchDelete = async (): Promise<void> => {
+    if (selectedConvIds.size === 0) return;
+    if (
+      !window.confirm(
+        `确认批量删除 ${selectedConvIds.size} 条对话？此操作不可恢复。`,
+      )
+    )
+      return;
+    let activeWasDeleted = false;
+    for (const id of selectedConvIds) {
+      try {
+        await api.deleteConversation(id);
+        if (id === activeConvId) activeWasDeleted = true;
+      } catch (e) {
+        window.alert(
+          `删除失败 (${id})：${e instanceof Error ? e.message : String(e)}`,
+        );
+      }
+    }
+    if (activeWasDeleted) {
+      setActiveConvId(null);
+      setChatKey((n) => n + 1);
+    }
+    setSelectedConvIds(new Set());
+    setBatchMode(false);
+    await refreshConversations();
+  };
+
   const activeModel = useMemo(
     () => chatModels.find((m) => m.id === activeModelId) ?? defaultModel,
     [chatModels, activeModelId, defaultModel],
@@ -405,6 +482,16 @@ function Workspace({
         onSelect={onSelectConv}
         onDelete={(id) => void onDeleteConv(id)}
         onRename={(id, t) => void onRenameConv(id, t)}
+        searchQuery={searchQuery}
+        onSearchQueryChange={setSearchQuery}
+        onTogglePin={(id, v) => void onTogglePin(id, v)}
+        onSetTags={(id, tags) => void onSetTags(id, tags)}
+        batchMode={batchMode}
+        selectedIds={selectedConvIds}
+        onToggleSelected={onToggleSelected}
+        onEnterBatch={onEnterBatch}
+        onExitBatch={onExitBatch}
+        onBatchDelete={() => void onBatchDelete()}
       />
       <main className="workspace-main">
         <ChatPanel
@@ -442,70 +529,202 @@ function bucketLabel(updated: number, now: number): string {
   return '更早';
 }
 
+function parseTags(raw: string | null): string[] {
+  if (!raw) return [];
+  try {
+    const v = JSON.parse(raw);
+    return Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string') : [];
+  } catch {
+    return [];
+  }
+}
+
+interface ConvRowCallbacks {
+  onSelect: (id: string) => void;
+  onDelete: (id: string) => void;
+  onRename: (id: string, current: string | null) => void;
+  onTogglePin: (id: string, next: boolean) => void;
+  onSetTags: (id: string, tags: string[]) => void;
+  batchMode: boolean;
+  selectedIds: Set<string>;
+  onToggleSelected: (id: string) => void;
+  // tag editor state lifted into Sidebar so only one row edits at a time.
+  editingTagsForId: string | null;
+  setEditingTagsForId: (id: string | null) => void;
+  tagDraft: string;
+  setTagDraft: (s: string) => void;
+}
+
+function renderConvRow(
+  c: ConversationSummary,
+  active: boolean,
+  cb: ConvRowCallbacks,
+): JSX.Element {
+  const tags = parseTags(c.tags);
+  const isEditingTags = cb.editingTagsForId === c.id;
+  const checked = cb.selectedIds.has(c.id);
+  return (
+    <li
+      key={c.id}
+      className={`conv-item${active ? ' active' : ''}${c.pinned ? ' pinned' : ''}`}
+      data-testid="conv-item"
+      data-conv-id={c.id}
+      data-conv-pinned={c.pinned ? 'true' : 'false'}
+      aria-current={active ? 'true' : undefined}
+      onClick={(e) => {
+        const target = e.target as HTMLElement;
+        if (target.closest('.conv-actions, input, .conv-tags')) return;
+        if (cb.batchMode) cb.onToggleSelected(c.id);
+        else cb.onSelect(c.id);
+      }}
+    >
+      {cb.batchMode && (
+        <input
+          type="checkbox"
+          className="conv-select"
+          data-testid="conv-select"
+          checked={checked}
+          onChange={() => cb.onToggleSelected(c.id)}
+          aria-label="选择对话"
+        />
+      )}
+      <span
+        className="conv-title"
+        title={c.title ?? '未命名对话'}
+      >
+        {c.pinned ? '📌 ' : ''}
+        {c.title ?? '未命名对话'}
+      </span>
+      <span className="conv-actions" onClick={(e) => e.stopPropagation()}>
+        <button
+          type="button"
+          onClick={() => cb.onTogglePin(c.id, !c.pinned)}
+          aria-label={c.pinned ? 'unpin' : 'pin'}
+          data-testid="conv-pin"
+          title={c.pinned ? '取消置顶' : '置顶'}
+        >
+          {c.pinned ? '★' : '☆'}
+        </button>
+        <button
+          type="button"
+          onClick={() => {
+            cb.setEditingTagsForId(c.id);
+            cb.setTagDraft(tags.join(', '));
+          }}
+          aria-label="tags"
+          data-testid="conv-tag-edit"
+          title="编辑标签"
+        >
+          🏷
+        </button>
+        <button
+          type="button"
+          onClick={() => cb.onRename(c.id, c.title)}
+          aria-label="rename"
+          data-testid="conv-rename"
+        >
+          ✎
+        </button>
+        <button
+          type="button"
+          onClick={() => cb.onDelete(c.id)}
+          aria-label="delete"
+          data-testid="conv-delete"
+        >
+          🗑
+        </button>
+      </span>
+      {(tags.length > 0 || isEditingTags) && (
+        <div className="conv-tags" data-testid="conv-tags">
+          {!isEditingTags &&
+            tags.map((t) => (
+              <span key={t} className="tag-chip" data-testid="conv-tag-chip">
+                {t}
+              </span>
+            ))}
+          {isEditingTags && (
+            <span className="tag-editor">
+              <input
+                type="text"
+                value={cb.tagDraft}
+                onChange={(e) => cb.setTagDraft(e.target.value)}
+                placeholder="逗号分隔，最多 3 个"
+                data-testid="conv-tag-input"
+                autoFocus
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') {
+                    e.preventDefault();
+                    const next = cb.tagDraft
+                      .split(',')
+                      .map((s) => s.trim())
+                      .filter((s) => s.length > 0)
+                      .slice(0, 3);
+                    cb.onSetTags(c.id, next);
+                    cb.setEditingTagsForId(null);
+                  } else if (e.key === 'Escape') {
+                    cb.setEditingTagsForId(null);
+                  }
+                }}
+              />
+              <button
+                type="button"
+                data-testid="conv-tag-save"
+                onClick={() => {
+                  const next = cb.tagDraft
+                    .split(',')
+                    .map((s) => s.trim())
+                    .filter((s) => s.length > 0)
+                    .slice(0, 3);
+                  cb.onSetTags(c.id, next);
+                  cb.setEditingTagsForId(null);
+                }}
+              >
+                保存
+              </button>
+              <button
+                type="button"
+                data-testid="conv-tag-cancel"
+                onClick={() => cb.setEditingTagsForId(null)}
+              >
+                取消
+              </button>
+            </span>
+          )}
+        </div>
+      )}
+    </li>
+  );
+}
+
 function renderGroupedConversations(
   conversations: ConversationSummary[],
   activeId: string | null,
-  onSelect: (id: string) => void,
-  onDelete: (id: string) => void,
-  onRename: (id: string, current: string | null) => void,
+  cb: ConvRowCallbacks,
 ): JSX.Element[] {
-  const now = Date.now();
-  const groups: Array<{ label: string; items: ConversationSummary[] }> = [];
-  let cur: { label: string; items: ConversationSummary[] } | null = null;
-  for (const c of conversations) {
-    const label = bucketLabel(c.updated_at, now);
-    if (!cur || cur.label !== label) {
-      cur = { label, items: [] };
-      groups.push(cur);
-    }
-    cur.items.push(c);
-  }
   const out: JSX.Element[] = [];
-  for (const g of groups) {
+  const pinned = conversations.filter((c) => c.pinned);
+  const rest = conversations.filter((c) => !c.pinned);
+  if (pinned.length > 0) {
     out.push(
-      <li key={`g:${g.label}`} className="conv-group-head" aria-hidden="true">
-        {g.label}
+      <li key="g:pinned" className="conv-group-head" aria-hidden="true">
+        📌 已置顶
       </li>,
     );
-    for (const c of g.items) {
-      const active = c.id === activeId;
+    for (const c of pinned) out.push(renderConvRow(c, c.id === activeId, cb));
+  }
+  const now = Date.now();
+  let curLabel: string | null = null;
+  for (const c of rest) {
+    const label = bucketLabel(c.updated_at, now);
+    if (label !== curLabel) {
+      curLabel = label;
       out.push(
-        <li
-          key={c.id}
-          className={`conv-item${active ? ' active' : ''}`}
-          data-testid="conv-item"
-          data-conv-id={c.id}
-          aria-current={active ? 'true' : undefined}
-        >
-          <button
-            type="button"
-            className="conv-title"
-            onClick={() => onSelect(c.id)}
-            title={c.title ?? '未命名对话'}
-          >
-            {c.title ?? '未命名对话'}
-          </button>
-          <span className="conv-actions">
-            <button
-              type="button"
-              onClick={() => onRename(c.id, c.title)}
-              aria-label="rename"
-              data-testid="conv-rename"
-            >
-              ✎
-            </button>
-            <button
-              type="button"
-              onClick={() => onDelete(c.id)}
-              aria-label="delete"
-              data-testid="conv-delete"
-            >
-              🗑
-            </button>
-          </span>
+        <li key={`g:${label}`} className="conv-group-head" aria-hidden="true">
+          {label}
         </li>,
       );
     }
+    out.push(renderConvRow(c, c.id === activeId, cb));
   }
   return out;
 }
@@ -517,6 +736,16 @@ function Sidebar({
   onSelect,
   onDelete,
   onRename,
+  searchQuery,
+  onSearchQueryChange,
+  onTogglePin,
+  onSetTags,
+  batchMode,
+  selectedIds,
+  onToggleSelected,
+  onEnterBatch,
+  onExitBatch,
+  onBatchDelete,
 }: {
   conversations: ConversationSummary[];
   activeId: string | null;
@@ -524,17 +753,86 @@ function Sidebar({
   onSelect: (id: string) => void;
   onDelete: (id: string) => void;
   onRename: (id: string, current: string | null) => void;
+  searchQuery: string;
+  onSearchQueryChange: (q: string) => void;
+  onTogglePin: (id: string, next: boolean) => void;
+  onSetTags: (id: string, tags: string[]) => void;
+  batchMode: boolean;
+  selectedIds: Set<string>;
+  onToggleSelected: (id: string) => void;
+  onEnterBatch: () => void;
+  onExitBatch: () => void;
+  onBatchDelete: () => void;
 }): JSX.Element {
+  const [editingTagsForId, setEditingTagsForId] = useState<string | null>(null);
+  const [tagDraft, setTagDraft] = useState<string>('');
+  const cb: ConvRowCallbacks = {
+    onSelect,
+    onDelete,
+    onRename,
+    onTogglePin,
+    onSetTags,
+    batchMode,
+    selectedIds,
+    onToggleSelected,
+    editingTagsForId,
+    setEditingTagsForId,
+    tagDraft,
+    setTagDraft,
+  };
   return (
     <aside className="sidebar" data-testid="sidebar">
       <button type="button" className="new-chat" onClick={onNew} data-testid="sidebar-new">
         🆕 新对话
       </button>
+      <div className="sidebar-search">
+        <input
+          type="search"
+          className="conv-search"
+          data-testid="conv-search"
+          placeholder="搜索对话标题或内容…"
+          value={searchQuery}
+          onChange={(e) => onSearchQueryChange(e.target.value)}
+        />
+      </div>
+      <div className="sidebar-batch-bar">
+        {batchMode ? (
+          <>
+            <span className="batch-count" data-testid="batch-count">
+              已选 {selectedIds.size}
+            </span>
+            <button
+              type="button"
+              data-testid="batch-delete"
+              onClick={onBatchDelete}
+              disabled={selectedIds.size === 0}
+            >
+              批量删除
+            </button>
+            <button type="button" data-testid="batch-cancel" onClick={onExitBatch}>
+              取消
+            </button>
+          </>
+        ) : (
+          <button
+            type="button"
+            data-testid="batch-enter"
+            className="batch-enter"
+            onClick={onEnterBatch}
+            disabled={conversations.length === 0}
+            title="批量选择"
+          >
+            ☑ 批量
+          </button>
+        )}
+      </div>
       <ul className="conv-list" data-testid="conv-list">
         {conversations.length === 0 ? (
-          <li className="conv-empty">暂无对话</li>
+          <li className="conv-empty">
+            {searchQuery ? '没有匹配的对话' : '暂无对话'}
+          </li>
         ) : (
-          renderGroupedConversations(conversations, activeId, onSelect, onDelete, onRename)
+          renderGroupedConversations(conversations, activeId, cb)
         )}
       </ul>
     </aside>

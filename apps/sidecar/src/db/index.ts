@@ -61,7 +61,9 @@ CREATE TABLE IF NOT EXISTS conversations (
   title TEXT,
   created_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL,
-  archived INTEGER NOT NULL DEFAULT 0
+  archived INTEGER NOT NULL DEFAULT 0,
+  pinned INTEGER NOT NULL DEFAULT 0,
+  tags TEXT
 );
 
 CREATE TABLE IF NOT EXISTS messages (
@@ -201,6 +203,18 @@ export function openDb(dbPath: string): Db {
     sqlite.exec(
       `ALTER TABLE roundtables ADD COLUMN origin_conversation_id TEXT REFERENCES conversations(id) ON DELETE SET NULL`,
     );
+  }
+  // C4 — pinned + tags on conversations (additive).
+  const convCols = sqlite
+    .prepare(`PRAGMA table_info(conversations)`)
+    .all() as Array<{ name: string }>;
+  if (!convCols.some((c) => c.name === 'pinned')) {
+    sqlite.exec(
+      `ALTER TABLE conversations ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0`,
+    );
+  }
+  if (!convCols.some((c) => c.name === 'tags')) {
+    sqlite.exec(`ALTER TABLE conversations ADD COLUMN tags TEXT`);
   }
   return drizzle(sqlite, { schema });
 }

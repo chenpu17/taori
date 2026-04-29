@@ -605,6 +605,8 @@ export interface ConversationRow {
   created_at: number;
   updated_at: number;
   archived: boolean;
+  pinned: boolean;
+  tags: string | null;
 }
 
 export interface MessageRow {
@@ -632,14 +634,63 @@ export class ConversationsRepo {
     return row ?? null;
   }
 
-  /** List non-archived chats, newest first. */
-  list(): ConversationRow[] {
-    return this.db
-      .select()
-      .from(conversations)
-      .where(eq(conversations.archived, false))
-      .orderBy(sql`updated_at DESC`)
-      .all() as ConversationRow[];
+  /** List non-archived chats. Pinned conversations float to the top, then
+   *  ordered by updated_at desc. Optional `q` filters by title (case-insensitive)
+   *  and message content (LIKE on the messages table — best-effort, indexed
+   *  on conversation_id only).
+   */
+  list(opts: { q?: string } = {}): ConversationRow[] {
+    const q = opts.q?.trim();
+    if (!q) {
+      return this.db
+        .select()
+        .from(conversations)
+        .where(eq(conversations.archived, false))
+        .orderBy(sql`pinned DESC, updated_at DESC`)
+        .all() as ConversationRow[];
+    }
+    // Two-stage: a) title LIKE; b) any message content LIKE → union by id.
+    const like = `%${q.replace(/[%_]/g, (m) => `\\${m}`)}%`;
+    const rows = this.db
+      .all(
+        sql`SELECT c.* FROM conversations c
+            WHERE c.archived = 0
+              AND (
+                COALESCE(c.title,'') LIKE ${like} ESCAPE '\\'
+                OR EXISTS (
+                  SELECT 1 FROM messages m
+                  WHERE m.conversation_id = c.id
+                    AND COALESCE(m.content,'') LIKE ${like} ESCAPE '\\'
+                )
+              )
+            ORDER BY c.pinned DESC, c.updated_at DESC`,
+      ) as ConversationRow[];
+    return rows;
+  }
+
+  setPinned(id: string, pinned: boolean): ConversationRow | null {
+    const row = this.db
+      .update(conversations)
+      .set({ pinned, updated_at: Date.now() })
+      .where(eq(conversations.id, id))
+      .returning()
+      .get();
+    return (row as ConversationRow | undefined) ?? null;
+  }
+
+  setTags(id: string, tags: string[]): ConversationRow | null {
+    const cleaned = tags
+      .map((t) => t.trim())
+      .filter((t) => t.length > 0 && t.length <= 24)
+      .slice(0, 3);
+    const value = cleaned.length === 0 ? null : JSON.stringify(cleaned);
+    const row = this.db
+      .update(conversations)
+      .set({ tags: value, updated_at: Date.now() })
+      .where(eq(conversations.id, id))
+      .returning()
+      .get();
+    return (row as ConversationRow | undefined) ?? null;
   }
 
   /** Update title (used by both auto-title and rename). Returns updated row or null. */

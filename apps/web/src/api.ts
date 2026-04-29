@@ -172,8 +172,9 @@ export const api = {
     );
   },
 
-  listConversations: () =>
-    authedFetch('/v1/conversations').then((r) =>
+  listConversations: (q?: string) => {
+    const qs = q && q.trim().length > 0 ? `?q=${encodeURIComponent(q.trim())}` : '';
+    return authedFetch(`/v1/conversations${qs}`).then((r) =>
       json<{
         conversations: Array<{
           id: string;
@@ -182,9 +183,12 @@ export const api = {
           created_at: number;
           updated_at: number;
           archived: boolean;
+          pinned: boolean;
+          tags: string | null;
         }>;
       }>(r),
-    ),
+    );
+  },
   getConversationMessages: (id: string) =>
     authedFetch(`/v1/conversations/${id}/messages`).then((r) =>
       json<{
@@ -218,6 +222,24 @@ export const api = {
   deleteConversation: (id: string) =>
     authedFetch(`/v1/conversations/${id}`, { method: 'DELETE' }).then((r) =>
       json<void>(r),
+    ),
+  // C4 — pin/unpin a conversation.
+  setConversationPinned: (id: string, pinned: boolean) =>
+    authedFetch(`/v1/conversations/${id}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ pinned }),
+    }).then((r) =>
+      json<{ id: string; pinned: boolean; updated_at: number }>(r),
+    ),
+  // C4 — overwrite the tag list (max 3, trimmed server-side).
+  setConversationTags: (id: string, tags: string[]) =>
+    authedFetch(`/v1/conversations/${id}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ tags }),
+    }).then((r) =>
+      json<{ id: string; tags: string | null; updated_at: number }>(r),
     ),
   // M2 §1.4 — persist a system note (e.g. auto-fallback notice) so it
   // survives reload and is visible to other clients of the same conversation.
