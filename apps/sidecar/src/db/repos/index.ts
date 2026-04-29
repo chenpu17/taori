@@ -1312,6 +1312,24 @@ export class RoundtablesRepo {
       .run();
     return this.get(id);
   }
+
+  /**
+   * A3 — replace the entire participants array. Caller is responsible for
+   * validating count (2..4) and that no rounds have started yet.
+   */
+  setParticipants(id: string, participants: Participant[]): RoundtableRow | null {
+    const row = this.get(id);
+    if (!row) return null;
+    this.db
+      .update(roundtables)
+      .set({
+        participants: JSON.stringify(participants),
+        updated_at: Date.now(),
+      })
+      .where(eq(roundtables.id, id))
+      .run();
+    return this.get(id);
+  }
 }
 
 export interface RoundtableMessageInsert {

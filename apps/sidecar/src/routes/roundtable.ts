@@ -325,6 +325,97 @@ export function registerRoundtableRoute(
   );
 
   /**
+   * A3 — PUT /v1/roundtable/:id/participants — replace participants list.
+   *
+   * Only allowed when no round has started yet (current_round === 0) and
+   * status is not terminal. Validates: 2..4 entries, all model_ids are
+   * existing enabled chat-capable models with their provider available,
+   * role_label and persona_prompt within length bounds.
+   */
+  app.put<{
+    Params: { id: string };
+    Body: { participants: unknown };
+  }>('/v1/roundtable/:id/participants', async (req, reply) => {
+    const rt = rtRepo.get(req.params.id);
+    if (!rt) {
+      throw new TaoriError({
+        code: 'not_found',
+        message: `Roundtable ${req.params.id} not found`,
+      });
+    }
+    if (rt.current_round !== 0) {
+      throw new TaoriError({
+        code: 'conflict',
+        message: '已经开始第 1 轮后不能再修改参与者',
+      });
+    }
+    if (
+      rt.status === 'completed' ||
+      rt.status === 'failed' ||
+      rt.status === 'cancelled'
+    ) {
+      throw new TaoriError({
+        code: 'conflict',
+        message: `roundtable status=${rt.status}，不允许修改参与者`,
+      });
+    }
+    const ParticipantArr = z
+      .array(
+        z.object({
+          model_id: z.string().min(1),
+          display_name: z.string().min(1).max(80),
+          role_label: z.string().min(1).max(40),
+          persona_prompt: z.string().min(8).max(2000),
+        }),
+      )
+      .min(2)
+      .max(4);
+    const parsed = ParticipantArr.safeParse(req.body?.participants);
+    if (!parsed.success) {
+      throw new TaoriError({
+        code: 'validation_error',
+        message: parsed.error.message,
+      });
+    }
+    for (const p of parsed.data) {
+      const m = modelsRepo.get(p.model_id);
+      if (!m) {
+        throw new TaoriError({
+          code: 'validation_error',
+          message: `模型不存在：${p.model_id}`,
+        });
+      }
+      if (m.capability !== 'chat') {
+        throw new TaoriError({
+          code: 'validation_error',
+          message: `模型 ${m.display_name} 非 chat 能力`,
+        });
+      }
+      if (m.disabled_until && m.disabled_until > Date.now()) {
+        throw new TaoriError({
+          code: 'validation_error',
+          message: `模型 ${m.display_name} 已被临时禁用`,
+        });
+      }
+      if (!m.provider_id) {
+        throw new TaoriError({
+          code: 'validation_error',
+          message: `模型 ${m.display_name} 缺少 provider_id`,
+        });
+      }
+      const provider = providersRepo.get(m.provider_id);
+      if (!provider) {
+        throw new TaoriError({
+          code: 'validation_error',
+          message: `模型 ${m.display_name} 的提供商不可用`,
+        });
+      }
+    }
+    const updated = rtRepo.setParticipants(rt.id, parsed.data);
+    return reply.code(200).send({ ok: true, roundtable: updated });
+  });
+
+  /**
    * GET /v1/conversations/:id/roundtable — returns the most recent roundtable
    * associated with the given conversation, or `{roundtable_id: null}` if none.
    * Used by the renderer to restore the roundtable panel on conversation

@@ -100,6 +100,17 @@ export function RoundtableLaunchDialog(
   const [step, setStep] = useState<Step>({ kind: 'edit' });
   const [prefs, setPrefs] = useState<ConfirmPrefs>(DEFAULT_PREFS);
   const [skipConv, setSkipConv] = useState(false);
+  // A3 — editable participants (initialized when entering preview).
+  const [editedParticipants, setEditedParticipants] = useState<Participant[]>(
+    [],
+  );
+  const [originalParticipants, setOriginalParticipants] = useState<
+    Participant[]
+  >([]);
+  const [chatModels, setChatModels] = useState<
+    Array<{ id: string; display_name: string; demoted?: boolean }>
+  >([]);
+  const [editError, setEditError] = useState<string | null>(null);
   // Tracks whether the component is still mounted; if a parent unmounts the
   // dialog during analysis (rare edge case), avoid setState-after-unmount.
   const mountedRef = useRef(true);
@@ -190,6 +201,30 @@ export function RoundtableLaunchDialog(
       const inDisabled = prefs.disabledConvs.includes(created.conversation_id);
       const overThreshold = low > prefs.threshold;
       const needsConfirm = !inDisabled && (prefs.always || overThreshold);
+      setOriginalParticipants(created.participants);
+      setEditedParticipants(created.participants);
+      setEditError(null);
+      // Fetch chat-capable models for the dropdown.
+      try {
+        const ms = await api.listModels();
+        if (mountedRef.current) {
+          setChatModels(
+            ms.models
+              .filter(
+                (m) =>
+                  m.capability === 'chat' &&
+                  !(m.disabled_until && m.disabled_until > Date.now()),
+              )
+              .map((m) => ({
+                id: m.id,
+                display_name: m.display_name,
+                demoted: !!m.demoted,
+              })),
+          );
+        }
+      } catch {
+        /* non-fatal — dropdown will be empty */
+      }
       setStep({
         kind: 'preview',
         analyzed: {
@@ -214,6 +249,23 @@ export function RoundtableLaunchDialog(
 
   async function handleConfirm(): Promise<void> {
     if (step.kind !== 'preview') return;
+    // A3 — if participants were edited, PUT them first.
+    const changed =
+      JSON.stringify(editedParticipants) !==
+      JSON.stringify(originalParticipants);
+    if (changed) {
+      try {
+        await api.putRoundtableParticipants(
+          step.analyzed.id,
+          editedParticipants,
+        );
+      } catch (e) {
+        setEditError(
+          e instanceof Error ? e.message : '保存参与者失败，请检查输入',
+        );
+        return;
+      }
+    }
     // Persist "本会话不再提醒" (only when user actually proceeds).
     if (skipConv) {
       try {
@@ -337,6 +389,15 @@ export function RoundtableLaunchDialog(
             needsConfirm={step.needsConfirm}
             skipConv={skipConv}
             onSkipConvChange={setSkipConv}
+            editedParticipants={editedParticipants}
+            originalParticipants={originalParticipants}
+            chatModels={chatModels}
+            editError={editError}
+            onEditedChange={setEditedParticipants}
+            onRestore={() => {
+              setEditedParticipants(originalParticipants);
+              setEditError(null);
+            }}
             onContinue={() => void handleConfirm()}
             onCancel={onCancel}
           />
@@ -351,6 +412,12 @@ function PreviewSection({
   needsConfirm,
   skipConv,
   onSkipConvChange,
+  editedParticipants,
+  originalParticipants,
+  chatModels,
+  editError,
+  onEditedChange,
+  onRestore,
   onContinue,
   onCancel,
 }: {
@@ -387,6 +454,12 @@ function PreviewSection({
   needsConfirm: boolean;
   skipConv: boolean;
   onSkipConvChange: (v: boolean) => void;
+  editedParticipants: Participant[];
+  originalParticipants: Participant[];
+  chatModels: Array<{ id: string; display_name: string; demoted?: boolean }>;
+  editError: string | null;
+  onEditedChange: (next: Participant[]) => void;
+  onRestore: () => void;
   onContinue: () => void;
   onCancel: () => void;
 }): ReactElement {
@@ -451,16 +524,107 @@ function PreviewSection({
       </div>
 
       <div className="roundtable-participants">
-        <strong>参与者：</strong>
-        <ol data-testid="roundtable-participants-list">
-          {analyzed.participants.map((p, i) => (
-            <li key={`${p.model_id}-${i}`}>
-              <span className="role-badge">{p.role_label}</span>
-              <span className="participant-name">{p.display_name}</span>
-              <div className="participant-persona hint">{p.persona_prompt}</div>
+        <div className="roundtable-participants-head">
+          <strong>参与者：</strong>
+          <span className="hint" style={{ marginLeft: 8 }}>
+            可手动调整模型 / 角色 / 视角
+          </span>
+          {JSON.stringify(editedParticipants) !==
+          JSON.stringify(originalParticipants) ? (
+            <button
+              type="button"
+              className="link-btn"
+              data-testid="roundtable-participants-restore"
+              onClick={onRestore}
+              style={{ marginLeft: 'auto' }}
+            >
+              ↺ 恢复推荐
+            </button>
+          ) : null}
+        </div>
+        <ol
+          className="roundtable-participants-edit"
+          data-testid="roundtable-participants-list"
+        >
+          {editedParticipants.map((p, i) => (
+            <li key={i} data-testid={`roundtable-participant-edit-${i}`}>
+              <div className="participant-edit-row">
+                <select
+                  data-testid={`roundtable-participant-model-${i}`}
+                  value={p.model_id}
+                  onChange={(e) => {
+                    const next = [...editedParticipants];
+                    const m = chatModels.find((x) => x.id === e.target.value);
+                    next[i] = {
+                      ...next[i]!,
+                      model_id: e.target.value,
+                      display_name: m?.display_name ?? next[i]!.display_name,
+                    };
+                    onEditedChange(next);
+                  }}
+                >
+                  {chatModels.map((m) => (
+                    <option key={m.id} value={m.id}>
+                      {m.display_name}
+                      {m.demoted ? '（降权）' : ''}
+                    </option>
+                  ))}
+                  {chatModels.find((m) => m.id === p.model_id) ? null : (
+                    <option value={p.model_id}>{p.display_name}</option>
+                  )}
+                </select>
+                <input
+                  type="text"
+                  data-testid={`roundtable-participant-role-${i}`}
+                  value={p.role_label}
+                  maxLength={40}
+                  className="participant-role-input"
+                  onChange={(e) => {
+                    const next = [...editedParticipants];
+                    next[i] = { ...next[i]!, role_label: e.target.value };
+                    onEditedChange(next);
+                  }}
+                />
+                {editedParticipants.length > 2 ? (
+                  <button
+                    type="button"
+                    className="link-btn"
+                    data-testid={`roundtable-participant-remove-${i}`}
+                    title="移除该参与者"
+                    onClick={() => {
+                      onEditedChange(
+                        editedParticipants.filter((_, j) => j !== i),
+                      );
+                    }}
+                  >
+                    ✕
+                  </button>
+                ) : null}
+              </div>
+              <textarea
+                className="participant-persona-input"
+                data-testid={`roundtable-participant-persona-${i}`}
+                value={p.persona_prompt}
+                rows={2}
+                maxLength={2000}
+                onChange={(e) => {
+                  const next = [...editedParticipants];
+                  next[i] = { ...next[i]!, persona_prompt: e.target.value };
+                  onEditedChange(next);
+                }}
+              />
             </li>
           ))}
         </ol>
+        {editError ? (
+          <div
+            className="cost-confirm-error"
+            data-testid="roundtable-participants-error"
+            style={{ marginTop: 6 }}
+          >
+            {editError}
+          </div>
+        ) : null}
       </div>
 
       <div className="modal-actions">

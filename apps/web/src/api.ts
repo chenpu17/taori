@@ -388,6 +388,22 @@ export const api = {
         }>(r),
       ),
 
+  // A3 — replace participants list (only allowed before round 1).
+  putRoundtableParticipants: (
+    id: string,
+    participants: Array<{
+      model_id: string;
+      display_name: string;
+      role_label: string;
+      persona_prompt: string;
+    }>,
+  ) =>
+    authedFetch(`/v1/roundtable/${id}/participants`, {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ participants }),
+    }).then((r) => json<{ ok: true }>(r)),
+
   // M2.5 §F-PR — manual catalog sync (price + capability refresh).
   catalogSync: (providerId?: string | null) =>
     authedFetch('/v1/catalog/sync', {
