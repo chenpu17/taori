@@ -2454,6 +2454,9 @@ const ERROR_LABELS: Record<string, string> = {
   'provider_error/rate_limit': '速率限制',
   'provider_error/network': '网络错误',
   'provider_error/content_filter': '上游内容拦截',
+  'provider_error/auth': '鉴权失败',
+  'provider_error/config_error': '模型配置有误',
+  'provider_error/key_missing': 'API Key 未配置',
   'provider_error/unknown': '上游错误',
   unauthorized: '鉴权失败',
   validation_error: '请求参数有误',
@@ -2464,7 +2467,7 @@ const ERROR_LABELS: Record<string, string> = {
 function ChatErrorBanner({ error }: { error: Error }): JSX.Element {
   const raw = error.message ?? String(error);
   const m = raw.match(
-    /^(provider_error\/(?:quota|rate_limit|network|content_filter|unknown)|unauthorized|validation_error|upstream_unavailable|unknown)\s*:\s*(.*)$/,
+    /^(provider_error\/(?:quota|rate_limit|network|content_filter|auth|config_error|key_missing|unknown)|unauthorized|validation_error|upstream_unavailable|unknown)\s*:\s*(.*)$/,
   );
   const klass = m?.[1] ?? 'unknown';
   const detail = m?.[2]?.trim() || raw;
@@ -2502,6 +2505,8 @@ type FailureClassification =
   | 'network'
   | 'content_filter'
   | 'auth'
+  | 'config_error'
+  | 'key_missing'
   | 'unknown';
 
 interface FailureDecision {
@@ -2517,6 +2522,8 @@ const FAILURE_CLASS_LABEL: Record<FailureClassification, string> = {
   network: '网络错误',
   content_filter: '内容被供应商安全策略拦截',
   auth: '鉴权失败',
+  config_error: '模型配置有误',
+  key_missing: 'API Key 未配置',
   unknown: '未知错误',
 };
 
@@ -2526,6 +2533,8 @@ const FAILURE_CLASS_HINT: Record<FailureClassification, string> = {
   network: '请检查网络后重试。',
   content_filter: '内容策略问题，更换模型通常无效；建议改写后重试。',
   auth: '请到设置中检查 API Key。',
+  config_error: '请在「模型中心」编辑模型，确认模型名称 / endpoint ID 正确。',
+  key_missing: '请在「模型中心」→ Provider 旁边的 ⚙ 重新输入 API Key，或重启后重新配置。',
   unknown: '可重试或切换模型。',
 };
 

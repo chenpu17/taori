@@ -20,6 +20,8 @@ export const ERROR_CLASSIFICATIONS = [
   'network',
   'content_filter',
   'auth',
+  'config_error',
+  'key_missing',
   'unknown',
 ] as const;
 export type ErrorClassification = (typeof ERROR_CLASSIFICATIONS)[number];

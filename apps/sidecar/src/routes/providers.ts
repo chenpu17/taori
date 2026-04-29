@@ -46,6 +46,30 @@ export function registerProvidersRoute(
     return { providers: repo.list() };
   });
 
+  /**
+   * GET /v1/providers/key-status
+   * Returns whether the keystore currently holds a key for each provider.
+   * Used by Model Center to show a ⚠️ badge when keys need re-entry (e.g.
+   * after a dev sidecar restart with MemoryStore).
+   */
+  app.get('/v1/providers/key-status', async (): Promise<{
+    statuses: { provider_id: string; key_available: boolean }[];
+  }> => {
+    const all = repo.list();
+    const statuses = await Promise.all(
+      all.map(async (p) => {
+        if (!p.api_key_ref) return { provider_id: p.id, key_available: false };
+        try {
+          const k = await deps.keystore.read(p.api_key_ref);
+          return { provider_id: p.id, key_available: k !== null };
+        } catch {
+          return { provider_id: p.id, key_available: false };
+        }
+      }),
+    );
+    return { statuses };
+  });
+
   app.post('/v1/providers/test', async (req): Promise<ProviderTestResponse> => {
     const parsed = ProviderTestRequestSchema.safeParse(req.body);
     if (!parsed.success) {
@@ -142,6 +166,36 @@ export function registerProvidersRoute(
         }
       }
       repo.delete(req.params.id);
+      reply.code(204).send();
+    },
+  );
+
+  /**
+   * DELETE /v1/providers/:id/key
+   * Revoke the API key from the keystore without deleting the provider row.
+   * After this call, `key_available` for this provider becomes false, and
+   * the sidecar will emit `key_missing` errors on chat requests.
+   *
+   * Useful for: security wipe, testing the key-missing UX flow, and forcing
+   * the user to re-enter their key.
+   */
+  app.delete<{ Params: { id: string } }>(
+    '/v1/providers/:id/key',
+    async (req, reply) => {
+      const existing = repo.get(req.params.id);
+      if (!existing) {
+        throw new TaoriError({
+          code: 'not_found',
+          message: `Provider ${req.params.id} not found`,
+        });
+      }
+      if (existing.api_key_ref) {
+        try {
+          await deps.keystore.delete(existing.api_key_ref);
+        } catch {
+          // Already absent — treat as success
+        }
+      }
       reply.code(204).send();
     },
   );

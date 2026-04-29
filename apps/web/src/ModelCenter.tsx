@@ -58,6 +58,7 @@ export function ModelCenter({
   const [activeTab, setActiveTab] = useState<ModelCapability>('chat');
   const [models, setModels] = useState<Model[]>([]);
   const [providers, setProviders] = useState<Provider[]>([]);
+  const [keyStatus, setKeyStatus] = useState<Map<string, boolean>>(new Map());
   const [loading, setLoading] = useState(true);
   const [syncing, setSyncing] = useState(false);
   const [syncSummary, setSyncSummary] = useState<SyncSummary | null>(null);
@@ -70,12 +71,16 @@ export function ModelCenter({
   const refresh = async (): Promise<void> => {
     setLoading(true);
     try {
-      const [{ providers: ps }, { models: ms }] = await Promise.all([
+      const [{ providers: ps }, { models: ms }, keyStatusRes] = await Promise.all([
         api.listProviders(),
         api.listModels(),
+        api.providerKeyStatus().catch(() => ({ statuses: [] })),
       ]);
       setProviders(ps);
       setModels(ms);
+      const ksMap = new Map<string, boolean>();
+      for (const s of keyStatusRes.statuses) ksMap.set(s.provider_id, s.key_available);
+      setKeyStatus(ksMap);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
@@ -300,7 +305,10 @@ export function ModelCenter({
           <p className="hint">尚未配置 Provider，点击上方“+ 添加 Provider”导入。</p>
         ) : (
           <ul className="provider-chips">
-            {providers.map((p) => (
+            {providers.map((p) => {
+              const keyAvail = keyStatus.get(p.id);
+              const keyMissing = p.api_key_ref && keyAvail === false;
+              return (
               <li
                 key={p.id}
                 className={`provider-chip ${p.enabled ? '' : 'is-off'}`}
@@ -308,6 +316,15 @@ export function ModelCenter({
               >
                 <span className="provider-chip__name">{p.name}</span>
                 <span className="provider-chip__type">{p.type}</span>
+                {keyMissing && (
+                  <span
+                    className="provider-chip__key-warn"
+                    title="API Key 不在 Keystore 中 — 请重新输入（开发模式重启后需要重新配置）"
+                    data-testid={`provider-chip-key-warn-${p.id}`}
+                  >
+                    🔑
+                  </span>
+                )}
                 <button
                   type="button"
                   className="provider-chip__test"
@@ -337,7 +354,8 @@ export function ModelCenter({
                   </span>
                 )}
               </li>
-            ))}
+              );
+            })}
           </ul>
         )}
       </section>

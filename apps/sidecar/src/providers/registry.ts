@@ -87,6 +87,21 @@ export function classifyProviderError(args: {
       message: status === 402 ? 'Quota / billing issue' : 'Rate limit hit',
     };
   }
+  if (status === 400) {
+    return {
+      classification: 'config_error',
+      message:
+        'Provider returned 400 — 模型名称或接入端 ID 有误；' +
+        '火山方舟用户请确认使用正确的 endpoint ID（如 ep-xxx）或已在控制台激活该模型',
+    };
+  }
+  if (status === 404) {
+    return {
+      classification: 'config_error',
+      message:
+        'Provider returned 404 — 接入点不存在；请检查 base_url 与模型名称是否正确',
+    };
+  }
   if (status && status >= 500) {
     return {
       classification: 'network',

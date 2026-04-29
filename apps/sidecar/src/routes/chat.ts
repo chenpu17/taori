@@ -356,9 +356,19 @@ export function registerChatRoute(
         }, modelsRepo, memoriesRepo).catch((e) => req.log.error({ err: e }, 'chat.upstream_unhandled'));
         return;
       }
+      // Key is configured (api_key_ref set) but not found in the keystore.
+      // This happens when the sidecar restarts in dev mode (MemoryStore is
+      // cleared). Silently using mock would mislead the user into thinking
+      // their real provider is responding. Emit a clear key_missing error
+      // so they know to re-enter the API key in Model Center.
+      if (assistantMsg) {
+        finalizeOnEnd(stream, () => aborted, ctx, msgRepo, costsRepo, modelsRepo);
+        void produceKeyMissingStream(stream, ctx, modelsRepo, memoriesRepo);
+        return;
+      }
     }
 
-    // Fallback: M0 mock stream (no provider key configured).
+    // Fallback: M0 mock stream (no provider key configured at all).
     finalizeOnEnd(stream, () => aborted, ctx, msgRepo, costsRepo, modelsRepo);
     void produceMockStream(stream, () => aborted, ctx, modelsRepo, memoriesRepo);
   });
@@ -922,6 +932,37 @@ async function produceUpstreamStream(
   } finally {
     stream.end();
   }
+}
+
+/**
+ * Emits a key_missing failure_decision + error frame when the provider has
+ * an api_key_ref configured but the key is absent from the current keystore
+ * (e.g. dev sidecar restarted, MemoryStore cleared). This prevents the app
+ * from silently replying with a mock response instead of the real provider.
+ */
+async function produceKeyMissingStream(
+  stream: PassThrough,
+  ctx: ProduceCtx,
+  modelsRepo: ModelsRepo,
+  memoriesRepo: MemoriesRepo,
+): Promise<void> {
+  const write = (line: string): boolean => stream.write(line);
+  write(
+    `8:${JSON.stringify([
+      { type: 'meta', conversation_id: ctx.conversationId, message_id: ctx.messageId, model_id: ctx.modelId },
+    ])}\n`,
+  );
+  const decision = buildFailureDecision('key_missing', ctx, modelsRepo, memoriesRepo);
+  write(`8:${JSON.stringify([decision])}\n`);
+  write(
+    `3:${JSON.stringify(
+      'provider_error/key_missing: API key 已失效或未配置 — 请在「模型中心」重新输入 API Key',
+    )}\n`,
+  );
+  write(
+    `d:${JSON.stringify({ finishReason: 'error', usage: { promptTokens: 0, completionTokens: 0 } })}\n`,
+  );
+  stream.end();
 }
 
 async function produceMockStream(

@@ -54,6 +54,10 @@ export const api = {
     authedFetch('/v1/providers').then((r) =>
       json<{ providers: Provider[] }>(r),
     ),
+  providerKeyStatus: () =>
+    authedFetch('/v1/providers/key-status').then((r) =>
+      json<{ statuses: { provider_id: string; key_available: boolean }[] }>(r),
+    ),
   testProvider: (input: ProviderTestRequest) =>
     authedFetch('/v1/providers/test', {
       method: 'POST',
