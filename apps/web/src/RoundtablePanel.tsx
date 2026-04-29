@@ -75,10 +75,14 @@ export interface RoundtablePanelProps {
   /** Called when user cancels / archives — parent should re-render the
    *  conversation surface (M3.A.5 just navigates away from the panel). */
   onExit: () => void;
+  /** A2: user clicked "就这一点再来一轮" on a divergence item; parent
+   *  should close this panel and open a fresh launch dialog with the
+   *  divergence as the new topic. */
+  onFollowUp?: (topic: string) => void;
 }
 
 export function RoundtablePanel(props: RoundtablePanelProps): ReactElement {
-  const { roundtableId, onExit } = props;
+  const { roundtableId, onExit, onFollowUp } = props;
   const [rt, setRt] = useState<Roundtable | null>(null);
   const [, setMessages] = useState<RoundtableMessage[]>([]);
   const [cols, setCols] = useState<ColumnState[]>([]);
@@ -491,7 +495,7 @@ export function RoundtablePanel(props: RoundtablePanelProps): ReactElement {
       ) : null}
 
       {summary ? (
-        <SummaryCard summary={summary} totalCost={totalCost} />
+        <SummaryCard summary={summary} totalCost={totalCost} onFollowUp={onFollowUp} />
       ) : null}
 
       {summaryError ? (
@@ -743,9 +747,11 @@ function ParticipantColumn({
 function SummaryCard({
   summary,
   totalCost,
+  onFollowUp,
 }: {
   summary: RoundtableSummary;
   totalCost: number;
+  onFollowUp?: (topic: string) => void;
 }): ReactElement {
   return (
     <div className="roundtable-summary" data-testid="roundtable-summary">
@@ -764,18 +770,43 @@ function SummaryCard({
         <section>
           <h5>⚠️ 分歧</h5>
           <ul>
-            {summary.divergence.map((d, i) => (
-              <li key={i}>
-                <strong>{d.topic}</strong>
-                <ul>
-                  {d.positions.map((p, j) => (
-                    <li key={j}>
-                      <em>{p.role}</em>：{p.stance}
-                    </li>
-                  ))}
-                </ul>
-              </li>
-            ))}
+            {summary.divergence.map((d, i) => {
+              const followUpTopic = (() => {
+                const lines = [d.topic];
+                if (d.positions?.length) {
+                  for (const p of d.positions) {
+                    lines.push(`- ${p.role}：${p.stance}`);
+                  }
+                }
+                lines.push('请围绕以上分歧深入再讨论一轮，给出更具体的判断与依据。');
+                return lines.join('\n');
+              })();
+              return (
+                <li key={i} className="roundtable-divergence-item">
+                  <div className="roundtable-divergence-head">
+                    <strong>{d.topic}</strong>
+                    {onFollowUp ? (
+                      <button
+                        type="button"
+                        className="roundtable-divergence-followup"
+                        data-testid={`roundtable-divergence-followup-${i}`}
+                        title="就这一点再开一轮圆桌"
+                        onClick={() => onFollowUp(followUpTopic)}
+                      >
+                        🔍 就这一点再来一轮
+                      </button>
+                    ) : null}
+                  </div>
+                  <ul>
+                    {d.positions.map((p, j) => (
+                      <li key={j}>
+                        <em>{p.role}</em>：{p.stance}
+                      </li>
+                    ))}
+                  </ul>
+                </li>
+              );
+            })}
           </ul>
         </section>
       ) : null}

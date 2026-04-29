@@ -1510,6 +1510,10 @@ function ChatPanel({
         <RoundtablePanel
           roundtableId={activeRoundtableId}
           onExit={() => setActiveRoundtableId(null)}
+          onFollowUp={(topic) => {
+            setActiveRoundtableId(null);
+            setRoundtableDialog({ initialTopic: topic });
+          }}
         />
       ) : (
         <>

@@ -2463,3 +2463,24 @@ header h1::before {
 .cand-tag-demoted { background: #fff7e0; color: #946d00; }
 .cand-tag-disabled { background: #fde7e7; color: #a8211f; }
 .cand-tag-dup { background: #f0e8fb; color: #6b3fb3; }
+
+/* A2 — divergence follow-up button */
+.roundtable-divergence-item { margin-bottom: 8px; }
+.roundtable-divergence-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.roundtable-divergence-followup {
+  font-size: 12px;
+  padding: 3px 10px;
+  border-radius: 999px;
+  border: 1px solid #c7d4ff;
+  background: #f4f8ff;
+  color: #2557cc;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.roundtable-divergence-followup:hover { background: #e7efff; }
