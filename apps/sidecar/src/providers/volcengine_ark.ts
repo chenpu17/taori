@@ -5,20 +5,18 @@
  * `DiscoveredModel` with the right `capability` + pricing so a single import
  * lights up the chat / multimodal / image / video pages of the Model Center.
  *
- *   doubao-1-5-pro-32k        → chat
- *   doubao-1-5-vision-pro-32k → multimodal (vision in)
- *   doubao-seedream-3-0       → image (text-to-image)
- *   doubao-seedance-1-0-lite  → video
- *   wan2-1                    → video (alibaba wan via ark)
+ * Model discovery is **dynamic**: `listVolcengineArkModels()` calls the real
+ * `/api/v3/models` endpoint and returns whatever the user's account can access,
+ * filtered to non-Shutdown models. `ARK_METADATA` serves as a price / context
+ * enrichment table keyed by model family `name` (the field returned alongside
+ * each model's `id`). Unknown models are inferred from ID patterns.
  *
- * Pricing is approximate (CNY → USD ≈ 7.2) and bundled here because Ark's
- * /api/v3/endpoints listing does not return rates. Users can edit these in
- * the Model Center after import; values are also refreshed by Catalog Sync
- * when we reach a more reliable source.
+ * Pricing is approximate (CNY → USD ≈ 7.2). Users can edit in Model Center;
+ * values are refreshed by Catalog Sync when a more reliable source is added.
  *
  * Auth: Ark uses Bearer <API_KEY> against an OpenAI-compatible Chat Completions
- * endpoint at `<base>/api/v3/chat/completions`. We test by listing endpoints
- * (ark-native) and fall back to a chat ping if that scope is missing.
+ * endpoint at `<base>/api/v3/chat/completions`. We test by listing models
+ * (OpenAI-compat /models) and fall back gracefully on 404.
  */
 
 import {
@@ -91,11 +89,15 @@ export async function testVolcengineArk(
 }
 
 /**
- * Hardcoded Ark model family catalog. M2.5 ships only doubao + wan/seedance.
- * Prices are USD per 1M tokens (chat/multimodal) or USD per image / per
- * video-second (image/video). Source: Volcengine 计费说明 2026-04 公告，按
- * CNY→USD 1:7.2 折算并保留两位小数；用户可在 Model Center 内自行修正。
+ * Price / context metadata keyed by Ark model **family name** (the `name`
+ * field returned by `/api/v3/models`, e.g. `"doubao-1-5-pro-32k"`). This is
+ * NOT the model list — it enriches dynamically-fetched models with pricing and
+ * capability hints. Unknown families fall back to pattern-based inference.
+ *
+ * Prices: USD per 1M tokens / per image / per video-second.
+ * Source: Volcengine 计费说明，CNY→USD @ 7.2，用户可在 Model Center 内修正。
  */
+// eslint-disable-next-line @typescript-eslint/no-unused-vars -- kept for backward compat
 export interface ArkFamily {
   model_name: string;
   display_name: string;
@@ -110,112 +112,201 @@ export interface ArkFamily {
   supports_tools: boolean;
 }
 
-export const ARK_FAMILIES: ArkFamily[] = [
-  {
-    model_name: 'doubao-1-5-pro-32k',
-    display_name: 'Doubao 1.5 Pro · 32K',
-    capability: 'chat',
-    modalities: ['text'],
-    price_input_per_1m: 0.11, // ≈ ¥0.8
-    price_output_per_1m: 0.28, // ≈ ¥2
-    price_per_image: null,
-    price_per_video_second: null,
-    context_length: 32_768,
-    supports_vision: false,
-    supports_tools: true,
-  },
-  {
-    model_name: 'doubao-1-5-pro-256k',
-    display_name: 'Doubao 1.5 Pro · 256K',
-    capability: 'chat',
-    modalities: ['text'],
-    price_input_per_1m: 0.69, // ≈ ¥5
-    price_output_per_1m: 1.25, // ≈ ¥9
-    price_per_image: null,
-    price_per_video_second: null,
-    context_length: 262_144,
-    supports_vision: false,
-    supports_tools: true,
-  },
-  {
-    model_name: 'doubao-1-5-lite-32k',
-    display_name: 'Doubao 1.5 Lite · 32K',
-    capability: 'chat',
-    modalities: ['text'],
-    price_input_per_1m: 0.04, // ≈ ¥0.3
-    price_output_per_1m: 0.08, // ≈ ¥0.6
-    price_per_image: null,
-    price_per_video_second: null,
-    context_length: 32_768,
-    supports_vision: false,
-    supports_tools: true,
-  },
-  {
-    model_name: 'doubao-1-5-vision-pro-32k',
-    display_name: 'Doubao 1.5 Vision Pro · 32K',
-    capability: 'multimodal',
-    modalities: ['text', 'image'],
-    price_input_per_1m: 0.42, // ≈ ¥3
-    price_output_per_1m: 1.25, // ≈ ¥9
-    price_per_image: null,
-    price_per_video_second: null,
-    context_length: 32_768,
-    supports_vision: true,
-    supports_tools: true,
-  },
-  {
-    model_name: 'doubao-seedream-3-0-t2i',
-    display_name: 'Doubao SeeDream 3.0 (Image)',
-    capability: 'image',
-    modalities: ['image'],
-    price_input_per_1m: null,
-    price_output_per_1m: null,
-    price_per_image: 0.035, // ≈ ¥0.25
-    price_per_video_second: null,
-    context_length: null,
-    supports_vision: false,
-    supports_tools: false,
-  },
-  {
-    model_name: 'doubao-seedance-1-0-lite-t2v',
-    display_name: 'Doubao SeeDance 1.0 Lite (Video)',
-    capability: 'video',
-    modalities: ['video'],
-    price_input_per_1m: null,
-    price_output_per_1m: null,
-    price_per_image: null,
-    price_per_video_second: 0.028, // ≈ ¥0.2 / 秒
-    context_length: null,
-    supports_vision: false,
-    supports_tools: false,
-  },
-  {
-    model_name: 'wan2-1-t2v',
-    display_name: 'Wan 2.1 (Video, Alibaba)',
-    capability: 'video',
-    modalities: ['video'],
-    price_input_per_1m: null,
-    price_output_per_1m: null,
-    price_per_image: null,
-    price_per_video_second: 0.042, // ≈ ¥0.3 / 秒
-    context_length: null,
-    supports_vision: false,
-    supports_tools: false,
-  },
-];
+export const ARK_METADATA: Record<string, Omit<ArkFamily, 'model_name' | 'display_name'>> = {
+  // ── Doubao 1.5 Chat ──────────────────────────────────────────────────────
+  'doubao-1-5-pro-32k':    { capability:'chat', modalities:['text'], price_input_per_1m:0.11, price_output_per_1m:0.28, price_per_image:null, price_per_video_second:null, context_length:32_768,  supports_vision:false, supports_tools:true  },
+  'doubao-1-5-pro-256k':   { capability:'chat', modalities:['text'], price_input_per_1m:0.69, price_output_per_1m:1.25, price_per_image:null, price_per_video_second:null, context_length:262_144, supports_vision:false, supports_tools:true  },
+  'doubao-1-5-lite-32k':   { capability:'chat', modalities:['text'], price_input_per_1m:0.04, price_output_per_1m:0.08, price_per_image:null, price_per_video_second:null, context_length:32_768,  supports_vision:false, supports_tools:true  },
+  'doubao-1-5-thinking-pro':  { capability:'chat', modalities:['text'], price_input_per_1m:0.55, price_output_per_1m:2.21, price_per_image:null, price_per_video_second:null, context_length:32_768, supports_vision:false, supports_tools:false },
+  'doubao-1-5-thinking-pro-m':{ capability:'chat', modalities:['text'], price_input_per_1m:0.55, price_output_per_1m:2.21, price_per_image:null, price_per_video_second:null, context_length:32_768, supports_vision:false, supports_tools:false },
+  // ── Doubao 1.5 Vision ────────────────────────────────────────────────────
+  'doubao-1-5-vision-pro-32k': { capability:'multimodal', modalities:['text','image'], price_input_per_1m:0.42, price_output_per_1m:1.25, price_per_image:null, price_per_video_second:null, context_length:32_768, supports_vision:true, supports_tools:true  },
+  'doubao-1-5-vision-pro':     { capability:'multimodal', modalities:['text','image'], price_input_per_1m:0.42, price_output_per_1m:1.25, price_per_image:null, price_per_video_second:null, context_length:32_768, supports_vision:true, supports_tools:true  },
+  'doubao-1-5-vision-lite':    { capability:'multimodal', modalities:['text','image'], price_input_per_1m:0.11, price_output_per_1m:0.28, price_per_image:null, price_per_video_second:null, context_length:32_768, supports_vision:true, supports_tools:false },
+  'doubao-1-5-thinking-vision-pro': { capability:'multimodal', modalities:['text','image'], price_input_per_1m:0.55, price_output_per_1m:2.21, price_per_image:null, price_per_video_second:null, context_length:32_768, supports_vision:true, supports_tools:false },
+  // ── Doubao Seed series ───────────────────────────────────────────────────
+  'doubao-seed-1-6':         { capability:'chat', modalities:['text'], price_input_per_1m:0.55, price_output_per_1m:2.21, price_per_image:null, price_per_video_second:null, context_length:128_000, supports_vision:false, supports_tools:true  },
+  'doubao-seed-1-6-flash':   { capability:'chat', modalities:['text'], price_input_per_1m:0.11, price_output_per_1m:0.28, price_per_image:null, price_per_video_second:null, context_length:128_000, supports_vision:false, supports_tools:true  },
+  'doubao-seed-1-6-lite':    { capability:'chat', modalities:['text'], price_input_per_1m:0.04, price_output_per_1m:0.08, price_per_image:null, price_per_video_second:null, context_length:128_000, supports_vision:false, supports_tools:true  },
+  'doubao-seed-1-6-thinking':{ capability:'chat', modalities:['text'], price_input_per_1m:0.55, price_output_per_1m:2.21, price_per_image:null, price_per_video_second:null, context_length:128_000, supports_vision:false, supports_tools:false },
+  'doubao-seed-1-6-vision':  { capability:'multimodal', modalities:['text','image'], price_input_per_1m:0.55, price_output_per_1m:2.21, price_per_image:null, price_per_video_second:null, context_length:128_000, supports_vision:true, supports_tools:true  },
+  'doubao-seed-1-8':         { capability:'chat', modalities:['text'], price_input_per_1m:0.55, price_output_per_1m:2.21, price_per_image:null, price_per_video_second:null, context_length:128_000, supports_vision:false, supports_tools:true  },
+  'doubao-seed-2-0-pro':     { capability:'chat', modalities:['text'], price_input_per_1m:0.55, price_output_per_1m:2.21, price_per_image:null, price_per_video_second:null, context_length:128_000, supports_vision:false, supports_tools:true  },
+  'doubao-seed-2-0-lite':    { capability:'chat', modalities:['text'], price_input_per_1m:0.11, price_output_per_1m:0.28, price_per_image:null, price_per_video_second:null, context_length:128_000, supports_vision:false, supports_tools:true  },
+  'doubao-seed-2-0-mini':    { capability:'chat', modalities:['text'], price_input_per_1m:0.04, price_output_per_1m:0.08, price_per_image:null, price_per_video_second:null, context_length:128_000, supports_vision:false, supports_tools:true  },
+  // ── Image generation ─────────────────────────────────────────────────────
+  'doubao-seedream-3-0-t2i': { capability:'image', modalities:['image'], price_input_per_1m:null, price_output_per_1m:null, price_per_image:0.035, price_per_video_second:null, context_length:null, supports_vision:false, supports_tools:false },
+  'doubao-seedream-4-0':     { capability:'image', modalities:['image'], price_input_per_1m:null, price_output_per_1m:null, price_per_image:0.056, price_per_video_second:null, context_length:null, supports_vision:false, supports_tools:false },
+  'doubao-seedream-4-5':     { capability:'image', modalities:['image'], price_input_per_1m:null, price_output_per_1m:null, price_per_image:0.056, price_per_video_second:null, context_length:null, supports_vision:false, supports_tools:false },
+  'doubao-seedream-5-0':     { capability:'image', modalities:['image'], price_input_per_1m:null, price_output_per_1m:null, price_per_image:0.083, price_per_video_second:null, context_length:null, supports_vision:false, supports_tools:false },
+  'doubao-seededit-3-0-i2i': { capability:'image', modalities:['image'], price_input_per_1m:null, price_output_per_1m:null, price_per_image:0.042, price_per_video_second:null, context_length:null, supports_vision:false, supports_tools:false },
+  // ── Video generation ─────────────────────────────────────────────────────
+  'doubao-seedance-1-0-lite-t2v': { capability:'video', modalities:['video'], price_input_per_1m:null, price_output_per_1m:null, price_per_image:null, price_per_video_second:0.028, context_length:null, supports_vision:false, supports_tools:false },
+  'doubao-seedance-1-0-lite-i2v': { capability:'video', modalities:['video'], price_input_per_1m:null, price_output_per_1m:null, price_per_image:null, price_per_video_second:0.028, context_length:null, supports_vision:false, supports_tools:false },
+  'doubao-seedance-1-0-pro':      { capability:'video', modalities:['video'], price_input_per_1m:null, price_output_per_1m:null, price_per_image:null, price_per_video_second:0.056, context_length:null, supports_vision:false, supports_tools:false },
+  'doubao-seedance-1-0-pro-fast': { capability:'video', modalities:['video'], price_input_per_1m:null, price_output_per_1m:null, price_per_image:null, price_per_video_second:0.028, context_length:null, supports_vision:false, supports_tools:false },
+  'doubao-seedance-1-5-pro':      { capability:'video', modalities:['video'], price_input_per_1m:null, price_output_per_1m:null, price_per_image:null, price_per_video_second:0.083, context_length:null, supports_vision:false, supports_tools:false },
+  'doubao-seedance-2-0':          { capability:'video', modalities:['video'], price_input_per_1m:null, price_output_per_1m:null, price_per_image:null, price_per_video_second:0.111, context_length:null, supports_vision:false, supports_tools:false },
+  'doubao-seedance-2-0-fast':     { capability:'video', modalities:['video'], price_input_per_1m:null, price_output_per_1m:null, price_per_image:null, price_per_video_second:0.056, context_length:null, supports_vision:false, supports_tools:false },
+  'wan2-1-14b-t2v': { capability:'video', modalities:['video'], price_input_per_1m:null, price_output_per_1m:null, price_per_image:null, price_per_video_second:0.042, context_length:null, supports_vision:false, supports_tools:false },
+  'wan2-1-14b-i2v': { capability:'video', modalities:['video'], price_input_per_1m:null, price_output_per_1m:null, price_per_image:null, price_per_video_second:0.042, context_length:null, supports_vision:false, supports_tools:false },
+  // ── Embedding ────────────────────────────────────────────────────────────
+  'doubao-embedding':        { capability:'embedding', modalities:['text'],         price_input_per_1m:0.007, price_output_per_1m:null, price_per_image:null, price_per_video_second:null, context_length:4_096, supports_vision:false, supports_tools:false },
+  'doubao-embedding-large':  { capability:'embedding', modalities:['text'],         price_input_per_1m:0.007, price_output_per_1m:null, price_per_image:null, price_per_video_second:null, context_length:4_096, supports_vision:false, supports_tools:false },
+  'doubao-embedding-vision': { capability:'embedding', modalities:['text','image'], price_input_per_1m:0.014, price_output_per_1m:null, price_per_image:null, price_per_video_second:null, context_length:4_096, supports_vision:true,  supports_tools:false },
+  // ── Third-party models hosted on Ark ─────────────────────────────────────
+  'deepseek-v3':   { capability:'chat', modalities:['text'], price_input_per_1m:0.55, price_output_per_1m:2.21, price_per_image:null, price_per_video_second:null, context_length:64_000,  supports_vision:false, supports_tools:true  },
+  'deepseek-v3-1': { capability:'chat', modalities:['text'], price_input_per_1m:0.55, price_output_per_1m:2.21, price_per_image:null, price_per_video_second:null, context_length:64_000,  supports_vision:false, supports_tools:true  },
+  'deepseek-v3-2': { capability:'chat', modalities:['text'], price_input_per_1m:0.55, price_output_per_1m:2.21, price_per_image:null, price_per_video_second:null, context_length:64_000,  supports_vision:false, supports_tools:true  },
+  'deepseek-r1':   { capability:'chat', modalities:['text'], price_input_per_1m:0.55, price_output_per_1m:2.21, price_per_image:null, price_per_video_second:null, context_length:64_000,  supports_vision:false, supports_tools:false },
+  'kimi-k2':       { capability:'chat', modalities:['text'], price_input_per_1m:0.55, price_output_per_1m:2.21, price_per_image:null, price_per_video_second:null, context_length:128_000, supports_vision:false, supports_tools:true  },
+  'qwen3-32b':     { capability:'chat', modalities:['text'], price_input_per_1m:0.28, price_output_per_1m:0.83, price_per_image:null, price_per_video_second:null, context_length:32_768,  supports_vision:false, supports_tools:true  },
+  'qwen3-14b':     { capability:'chat', modalities:['text'], price_input_per_1m:0.14, price_output_per_1m:0.42, price_per_image:null, price_per_video_second:null, context_length:32_768,  supports_vision:false, supports_tools:true  },
+  'qwen3-8b':      { capability:'chat', modalities:['text'], price_input_per_1m:0.07, price_output_per_1m:0.21, price_per_image:null, price_per_video_second:null, context_length:32_768,  supports_vision:false, supports_tools:true  },
+  'glm-4-7':       { capability:'chat', modalities:['text'], price_input_per_1m:0.14, price_output_per_1m:0.42, price_per_image:null, price_per_video_second:null, context_length:128_000, supports_vision:false, supports_tools:true  },
+};
 
-export async function listVolcengineArkModels(): Promise<DiscoveredModel[]> {
-  return ARK_FAMILIES.map((f) => ({
-    model_name: f.model_name,
-    display_name: f.display_name,
-    capability: f.capability,
-    price_input_per_1m: f.price_input_per_1m,
-    price_output_per_1m: f.price_output_per_1m,
-    price_per_image: f.price_per_image,
-    price_per_video_second: f.price_per_video_second,
-    modalities: f.modalities,
-    context_length: f.context_length,
-    supports_vision: f.supports_vision,
-    supports_tools: f.supports_tools,
-  }));
+/** @deprecated Kept for backward compat. Prefer ARK_METADATA. */
+export const ARK_FAMILIES: ArkFamily[] = Object.entries(ARK_METADATA).map(([name, m]) => ({
+  model_name: name,
+  display_name: name,
+  ...m,
+}));
+
+// ─── Inference helpers ────────────────────────────────────────────────────────
+
+function inferCapability(id: string): DiscoveredModel['capability'] {
+  const s = id.toLowerCase();
+  if (s.includes('-t2i') || s.includes('seedream') || s.includes('seededit')) return 'image';
+  if (s.includes('-t2v') || s.includes('-i2v') || s.includes('-flf2v') || s.includes('seedance')) return 'video';
+  if (s.includes('seed3d')) return 'image';
+  if (s.includes('-vision') || s.includes('vision-pro') || s.includes('vision-lite')) return 'multimodal';
+  if (s.includes('-embedding') || s.includes('embedding-')) return 'embedding';
+  return 'chat';
+}
+
+function inferModalities(id: string, cap: DiscoveredModel['capability']): NonNullable<DiscoveredModel['modalities']> {
+  if (cap === 'image') return ['image'];
+  if (cap === 'video') return ['video'];
+  if (cap === 'embedding') return id.includes('vision') ? ['text', 'image'] : ['text'];
+  if (cap === 'multimodal') return ['text', 'image'];
+  return ['text'];
+}
+
+function inferContextLength(id: string): number | null {
+  if (id.includes('-4k')) return 4_096;
+  if (id.includes('-32k')) return 32_768;
+  if (id.includes('-128k')) return 131_072;
+  if (id.includes('-256k')) return 262_144;
+  return null;
+}
+
+/**
+ * Build a human-readable display name from a raw Ark model id + family name.
+ * Examples:
+ *   "doubao-seed-1-6-flash-250615"  → "Doubao Seed 1.6 Flash"
+ *   "doubao-1-5-vision-pro-32k-250115" → "Doubao 1.5 Vision Pro · 32K"
+ *   "deepseek-v3-250324"            → "DeepSeek V3"
+ */
+function buildDisplayName(id: string, familyName: string): string {
+  const stripped = familyName.replace(/-\d{6,8}$/, '');
+  let pretty = stripped
+    .replace(/^doubao-/, 'Doubao ')
+    .replace(/^deepseek-/, 'DeepSeek ')
+    .replace(/^kimi-/, 'Kimi ')
+    .replace(/^qwen/, 'Qwen')
+    .replace(/^glm-/, 'GLM ')
+    .replace(/^wan2-/, 'Wan2 ')
+    .replace(/^mistral-/, 'Mistral ')
+    .replace(/^hitem3d-/, 'Hitem3D ')
+    .replace(/^hyper3d-/, 'Hyper3D ')
+    .replace(/-/g, ' ')
+    .replace(/\b(\d+) (\d+)\b/g, '$1.$2') // "1 5" → "1.5"
+    .replace(/\b(\w)/g, (c) => c.toUpperCase())
+    .trim();
+  const ctxHint = id.includes('-256k') ? ' · 256K'
+    : id.includes('-128k') ? ' · 128K'
+    : id.includes('-32k') ? ' · 32K'
+    : id.includes('-4k') ? ' · 4K'
+    : '';
+  return pretty + ctxHint;
+}
+
+// ─── Ark /models API shape ────────────────────────────────────────────────────
+
+interface ArkModelListItem {
+  id: string;
+  name: string;
+  object: string;
+  status: string | null;
+  created: number;
+  version: string;
+}
+
+// ─── Public: dynamic discovery ────────────────────────────────────────────────
+
+/**
+ * Fetch the list of models accessible under `apiKey`, filter out Shutdown
+ * entries, and enrich each with capability / pricing from `ARK_METADATA`.
+ *
+ * Falls back to a static snapshot derived from ARK_METADATA when the API
+ * call fails (offline / firewall) so the import drawer still shows something.
+ */
+export async function listVolcengineArkModels(
+  baseUrl: string,
+  apiKey: string,
+): Promise<DiscoveredModel[]> {
+  const base = baseUrl.replace(/\/$/, '');
+  let apiModels: ArkModelListItem[] | null = null;
+
+  try {
+    const res = await timedFetch(`${base}/models`, {
+      method: 'GET',
+      headers: { Authorization: `Bearer ${apiKey}` },
+    });
+    if (res.ok) {
+      const body = (await res.json()) as { data?: ArkModelListItem[] };
+      apiModels = body.data ?? null;
+    }
+  } catch {
+    // network error — fall through to static fallback
+  }
+
+  if (!apiModels) {
+    return Object.entries(ARK_METADATA).map(([familyName, m]) => ({
+      model_name: familyName,
+      display_name: buildDisplayName(familyName, familyName),
+      capability: m.capability,
+      price_input_per_1m: m.price_input_per_1m,
+      price_output_per_1m: m.price_output_per_1m,
+      price_per_image: m.price_per_image,
+      price_per_video_second: m.price_per_video_second,
+      modalities: m.modalities,
+      context_length: m.context_length,
+      supports_vision: m.supports_vision,
+      supports_tools: m.supports_tools,
+    }));
+  }
+
+  // Filter: keep active + "Retiring" (still usable), drop Shutdown
+  const visible = apiModels.filter((m) => m.status !== 'Shutdown');
+
+  return visible.map((m): DiscoveredModel => {
+    // Lookup: exact id → family name → inference
+    const meta = ARK_METADATA[m.id] ?? ARK_METADATA[m.name] ?? null;
+    const cap = meta?.capability ?? inferCapability(m.id);
+    return {
+      model_name: m.id,
+      display_name: buildDisplayName(m.id, m.name),
+      capability: cap,
+      price_input_per_1m: meta?.price_input_per_1m ?? null,
+      price_output_per_1m: meta?.price_output_per_1m ?? null,
+      price_per_image: meta?.price_per_image ?? null,
+      price_per_video_second: meta?.price_per_video_second ?? null,
+      modalities: meta?.modalities ?? inferModalities(m.id, cap),
+      context_length: meta?.context_length ?? inferContextLength(m.id),
+      supports_vision: meta?.supports_vision ?? cap === 'multimodal',
+      supports_tools: meta?.supports_tools ?? (cap === 'chat'),
+    };
+  });
 }

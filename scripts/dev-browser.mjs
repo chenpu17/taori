@@ -10,6 +10,7 @@
  *  4. Forward both processes' stdio to this terminal; SIGINT kills both.
  */
 import { spawn } from 'node:child_process';
+import fs from 'node:fs';
 import { writeFile } from 'node:fs/promises';
 import { resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -22,11 +23,32 @@ function log(tag, line) {
   process.stderr.write(`[${tag}] ${line}\n`);
 }
 
+/**
+ * Read an existing bearer from .env.local so it stays stable across restarts.
+ * Returns undefined on first run (no .env.local yet).
+ */
+function readExistingBearer() {
+  try {
+    const raw = fs.readFileSync(WEB_ENV, 'utf8');
+    const m = raw.match(/^VITE_SIDECAR_BEARER=(.+)$/m);
+    return m?.[1]?.trim();
+  } catch {
+    return undefined;
+  }
+}
+
 async function main() {
+  const existingBearer = readExistingBearer();
+  const sidecarEnv = { ...process.env, FORCE_COLOR: '1' };
+  // Pass a stable SIDECAR_BEARER so the token survives sidecar hot-reloads.
+  // On first run existingBearer is undefined and the sidecar generates one;
+  // dev-browser then captures it and writes .env.local for subsequent runs.
+  if (existingBearer) sidecarEnv.SIDECAR_BEARER = existingBearer;
+
   const sidecar = spawn('pnpm', ['--filter', '@taori/sidecar', 'dev'], {
     cwd: ROOT,
     stdio: ['ignore', 'pipe', 'inherit'],
-    env: { ...process.env, FORCE_COLOR: '1' },
+    env: sidecarEnv,
   });
   let sidecarReady = false;
   let webProc = null;
@@ -37,7 +59,7 @@ async function main() {
     log('dev', `sidecar READY url=${url} bearer=${bearer.slice(0, 12)}…`);
     await writeFile(
       WEB_ENV,
-      `VITE_SIDECAR_URL=${url}\nVITE_SIDECAR_BEARER=${bearer}\n`,
+      `VITE_SIDECAR_URL=${url}\nVITE_SIDECAR_BASE_URL=${url}\nVITE_SIDECAR_BEARER=${bearer}\n`,
       'utf8',
     );
     if (!sidecarReady) {

@@ -307,7 +307,7 @@ export async function listProviderModels(args: {
     case 'openai':
       return listOpenAIModels();
     case 'volcengine_ark':
-      return listVolcengineArkModels();
+      return listVolcengineArkModels(args.base_url, args.api_key);
     default:
       return [];
   }
