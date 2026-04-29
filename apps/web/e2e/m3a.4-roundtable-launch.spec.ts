@@ -85,7 +85,7 @@ test('M3.A.4 launch dialog → analyzer fallback → preview → continue → ba
   await expect(
     dlg.getByTestId('roundtable-participants-list').locator('li'),
   ).toHaveCount(3);
-  await expect(dlg.getByTestId('roundtable-estimate')).toContainText('$');
+  await expect(dlg.getByTestId('roundtable-mode-card-fast-cost')).toContainText('$');
 
   // Continue → banner appears, dialog closes.
   await dlg.getByTestId('roundtable-launch-continue').click();

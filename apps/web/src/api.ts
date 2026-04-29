@@ -309,6 +309,29 @@ export const api = {
         estimated_cost_usd_low: number | null;
         estimated_cost_usd_high: number | null;
         created_at: number;
+        // A5 — launch preview metadata (always present, even on fallback).
+        preview: {
+          topic_type:
+            | 'business'
+            | 'technical'
+            | 'creative'
+            | 'decision'
+            | 'research'
+            | 'other'
+            | null;
+          complexity: 'low' | 'medium' | 'high' | null;
+          requested_mode: 'fast' | 'deep' | 'auto';
+          analyzer_chose_mode_reason: string | null;
+          estimated_calls: number;
+          estimated_duration_sec_low: number;
+          estimated_duration_sec_high: number;
+          alt_mode: 'fast' | 'deep';
+          alt_estimated_cost_usd_low: number | null;
+          alt_estimated_cost_usd_high: number | null;
+          alt_estimated_calls: number;
+          alt_estimated_duration_sec_low: number;
+          alt_estimated_duration_sec_high: number;
+        };
       }>(r),
     ),
   getRoundtable: (id: string) =>

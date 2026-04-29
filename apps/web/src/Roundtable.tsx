@@ -51,6 +51,28 @@ type Step =
         participants: Participant[];
         analyzer_fallback: boolean;
         estimate: { low: number; high: number };
+        preview: {
+          topic_type:
+            | 'business'
+            | 'technical'
+            | 'creative'
+            | 'decision'
+            | 'research'
+            | 'other'
+            | null;
+          complexity: 'low' | 'medium' | 'high' | null;
+          requested_mode: 'fast' | 'deep' | 'auto';
+          analyzer_chose_mode_reason: string | null;
+          estimated_calls: number;
+          estimated_duration_sec_low: number;
+          estimated_duration_sec_high: number;
+          alt_mode: 'fast' | 'deep';
+          alt_estimated_cost_usd_low: number | null;
+          alt_estimated_cost_usd_high: number | null;
+          alt_estimated_calls: number;
+          alt_estimated_duration_sec_low: number;
+          alt_estimated_duration_sec_high: number;
+        };
       };
       needsConfirm: boolean;
     }
@@ -177,6 +199,7 @@ export function RoundtableLaunchDialog(
           participants: created.participants,
           analyzer_fallback: created.analyzer_fallback,
           estimate: { low, high },
+          preview: created.preview,
         },
         needsConfirm,
       });
@@ -338,6 +361,28 @@ function PreviewSection({
     participants: Participant[];
     analyzer_fallback: boolean;
     estimate: { low: number; high: number };
+    preview: {
+      topic_type:
+        | 'business'
+        | 'technical'
+        | 'creative'
+        | 'decision'
+        | 'research'
+        | 'other'
+        | null;
+      complexity: 'low' | 'medium' | 'high' | null;
+      requested_mode: 'fast' | 'deep' | 'auto';
+      analyzer_chose_mode_reason: string | null;
+      estimated_calls: number;
+      estimated_duration_sec_low: number;
+      estimated_duration_sec_high: number;
+      alt_mode: 'fast' | 'deep';
+      alt_estimated_cost_usd_low: number | null;
+      alt_estimated_cost_usd_high: number | null;
+      alt_estimated_calls: number;
+      alt_estimated_duration_sec_low: number;
+      alt_estimated_duration_sec_high: number;
+    };
   };
   needsConfirm: boolean;
   skipConv: boolean;
@@ -345,19 +390,35 @@ function PreviewSection({
   onContinue: () => void;
   onCancel: () => void;
 }): ReactElement {
-  const modeLabel = analyzed.mode === 'fast' ? '快速' : '深度';
+  const chosenMode = analyzed.mode;
+  const altMode = analyzed.preview.alt_mode;
+
   return (
     <div data-testid="roundtable-preview">
-      <div className="roundtable-meta">
-        <div>
-          <strong>模式：</strong>
-          {modeLabel}
+      {/* A5 — Why this mode panel. Only shown when analyzer succeeded. */}
+      {analyzed.preview.analyzer_chose_mode_reason ? (
+        <div
+          className="roundtable-reason-panel"
+          data-testid="roundtable-reason-panel"
+        >
+          <div className="roundtable-reason-icon" aria-hidden>💡</div>
+          <div className="roundtable-reason-body">
+            <div className="roundtable-reason-title">为什么是这个模式</div>
+            <div
+              className="roundtable-reason-text"
+              data-testid="roundtable-reason-text"
+            >
+              {analyzed.preview.analyzer_chose_mode_reason}
+            </div>
+            <ReasonChips preview={analyzed.preview} />
+          </div>
         </div>
-        <div data-testid="roundtable-estimate">
-          <strong>预估成本：</strong>
-          {formatUsd(analyzed.estimate.low)} – {formatUsd(analyzed.estimate.high)}
-        </div>
-      </div>
+      ) : (
+        // On fallback we still render a thin chip strip so users can see at
+        // least the requested-mode signal — keeps the launch UX consistent.
+        <ReasonChips preview={analyzed.preview} />
+      )}
+
       {analyzed.analyzer_fallback ? (
         <div
           data-testid="roundtable-fallback-notice"
@@ -366,6 +427,29 @@ function PreviewSection({
           ⚠️ 分析器调用失败，已使用默认 3 角色组合（综合 / 批判 / 实践）。
         </div>
       ) : null}
+
+      {/* A5 — Mode comparison: chosen mode highlighted, alternate side-by-side. */}
+      <div className="roundtable-mode-compare" data-testid="roundtable-mode-compare">
+        <ModeCard
+          mode={chosenMode}
+          chosen={true}
+          calls={analyzed.preview.estimated_calls}
+          costLow={analyzed.estimate.low}
+          costHigh={analyzed.estimate.high}
+          durLow={analyzed.preview.estimated_duration_sec_low}
+          durHigh={analyzed.preview.estimated_duration_sec_high}
+        />
+        <ModeCard
+          mode={altMode}
+          chosen={false}
+          calls={analyzed.preview.alt_estimated_calls}
+          costLow={analyzed.preview.alt_estimated_cost_usd_low ?? 0}
+          costHigh={analyzed.preview.alt_estimated_cost_usd_high ?? 0}
+          durLow={analyzed.preview.alt_estimated_duration_sec_low}
+          durHigh={analyzed.preview.alt_estimated_duration_sec_high}
+        />
+      </div>
+
       <div className="roundtable-participants">
         <strong>参与者：</strong>
         <ol data-testid="roundtable-participants-list">
@@ -378,6 +462,7 @@ function PreviewSection({
           ))}
         </ol>
       </div>
+
       <div className="modal-actions">
         <button
           type="button"
@@ -385,7 +470,13 @@ function PreviewSection({
           autoFocus
           onClick={onContinue}
         >
-          {needsConfirm ? '确认并开始（' + formatUsd(analyzed.estimate.low) + ' – ' + formatUsd(analyzed.estimate.high) + '）' : '开始'}
+          {needsConfirm
+            ? '确认并开始（' +
+              formatUsd(analyzed.estimate.low) +
+              ' – ' +
+              formatUsd(analyzed.estimate.high) +
+              '）'
+            : '开始'}
         </button>
         <button
           type="button"
@@ -408,6 +499,142 @@ function PreviewSection({
           </label>
         </div>
       ) : null}
+    </div>
+  );
+}
+
+const TOPIC_TYPE_LABEL: Record<string, string> = {
+  business: '商业决策',
+  technical: '技术抉择',
+  creative: '创意发散',
+  decision: '决策类',
+  research: '研究类',
+  other: '一般话题',
+};
+const COMPLEXITY_LABEL: Record<string, string> = {
+  low: '复杂度低',
+  medium: '复杂度中',
+  high: '复杂度高',
+};
+
+function ReasonChips({
+  preview,
+}: {
+  preview: {
+    topic_type: string | null;
+    complexity: 'low' | 'medium' | 'high' | null;
+    requested_mode: 'fast' | 'deep' | 'auto';
+  };
+}): ReactElement | null {
+  const chips: { key: string; label: string }[] = [];
+  if (preview.topic_type) {
+    chips.push({
+      key: 'topic',
+      label: TOPIC_TYPE_LABEL[preview.topic_type] ?? preview.topic_type,
+    });
+  }
+  if (preview.complexity) {
+    chips.push({ key: 'cx', label: COMPLEXITY_LABEL[preview.complexity] });
+  }
+  chips.push({
+    key: 'req',
+    label:
+      preview.requested_mode === 'auto'
+        ? '由分析器决定模式'
+        : `用户已指定 ${preview.requested_mode === 'fast' ? '快速' : '深度'}`,
+  });
+  if (chips.length === 0) return null;
+  return (
+    <div className="roundtable-reason-chips" data-testid="roundtable-reason-chips">
+      {chips.map((c) => (
+        <span
+          key={c.key}
+          className="roundtable-chip"
+          data-testid={`roundtable-reason-chip-${c.key}`}
+        >
+          {c.label}
+        </span>
+      ))}
+    </div>
+  );
+}
+
+function formatDuration(low: number, high: number): string {
+  if (low === high) return `约 ${Math.round(low)} 秒`;
+  return `约 ${Math.round(low)}–${Math.round(high)} 秒`;
+}
+
+function ModeCard({
+  mode,
+  chosen,
+  calls,
+  costLow,
+  costHigh,
+  durLow,
+  durHigh,
+}: {
+  mode: 'fast' | 'deep';
+  chosen: boolean;
+  calls: number;
+  costLow: number;
+  costHigh: number;
+  durLow: number;
+  durHigh: number;
+}): ReactElement {
+  const label = mode === 'fast' ? '⚡ 快速' : '🔍 深度';
+  const sub =
+    mode === 'fast'
+      ? '一轮独立观点 + 自动总结'
+      : '盲审 → 互见反驳 → 总结（重要决策）';
+  return (
+    <div
+      className={`roundtable-mode-card ${chosen ? 'chosen' : 'alt'}`}
+      data-testid={`roundtable-mode-card-${mode}`}
+      data-chosen={chosen ? 'true' : 'false'}
+    >
+      <div className="roundtable-mode-card-header">
+        <span className="roundtable-mode-card-label">{label}</span>
+        {chosen ? (
+          <span
+            className="roundtable-mode-card-badge"
+            data-testid="roundtable-mode-card-chosen-badge"
+          >
+            本次使用
+          </span>
+        ) : (
+          <span className="roundtable-mode-card-altbadge">备选</span>
+        )}
+      </div>
+      <div className="roundtable-mode-card-sub">{sub}</div>
+      <div className="roundtable-mode-card-grid">
+        <div>
+          <div className="roundtable-mode-card-key">调用次数</div>
+          <div
+            className="roundtable-mode-card-val"
+            data-testid={`roundtable-mode-card-${mode}-calls`}
+          >
+            {calls}
+          </div>
+        </div>
+        <div>
+          <div className="roundtable-mode-card-key">预估成本</div>
+          <div
+            className="roundtable-mode-card-val"
+            data-testid={`roundtable-mode-card-${mode}-cost`}
+          >
+            {formatUsd(costLow)} – {formatUsd(costHigh)}
+          </div>
+        </div>
+        <div>
+          <div className="roundtable-mode-card-key">预估耗时</div>
+          <div
+            className="roundtable-mode-card-val"
+            data-testid={`roundtable-mode-card-${mode}-duration`}
+          >
+            {formatDuration(durLow, durHigh)}
+          </div>
+        </div>
+      </div>
     </div>
   );
 }

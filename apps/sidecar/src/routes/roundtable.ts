@@ -32,7 +32,11 @@ import {
   pickFallbackParticipantModels,
 } from '../roundtable/model-pick.js';
 import { runAnalyzer, buildFallbackOutput } from '../roundtable/analyzer.js';
-import { estimateRoundtableCostRange } from '../roundtable/cost-estimate.js';
+import {
+  estimateRoundtableCostRange,
+  estimateRoundtableCallsAndDuration,
+  buildAnalyzerModeReason,
+} from '../roundtable/cost-estimate.js';
 import { runRound } from '../roundtable/round-runner.js';
 import { runSummary } from '../roundtable/summarizer.js';
 import { renderRoundtableMarkdown } from '../roundtable/export.js';
@@ -193,6 +197,36 @@ export function registerRoundtableRoute(
       topicLength: body.topic.length,
     });
 
+    // A5 — also compute the alternate-mode estimate so the launch dialog can
+    // show fast vs deep side-by-side. Same participants, just different round
+    // count.
+    const altMode: 'fast' | 'deep' =
+      analyzerOutput.suggested_mode === 'fast' ? 'deep' : 'fast';
+    const altEstimate = estimateRoundtableCostRange({
+      mode: altMode,
+      analyzerModel,
+      participantModels,
+      summarizerModel,
+      topicLength: body.topic.length,
+    });
+    const callsChosen = estimateRoundtableCallsAndDuration({
+      mode: analyzerOutput.suggested_mode,
+      hasAnalyzer: !analyzerFailed && !!analyzerModel,
+      participantCount: analyzerOutput.participants.length,
+    });
+    const callsAlt = estimateRoundtableCallsAndDuration({
+      mode: altMode,
+      hasAnalyzer: !analyzerFailed && !!analyzerModel,
+      participantCount: analyzerOutput.participants.length,
+    });
+    const launchReason = buildAnalyzerModeReason({
+      topicType: analyzerFailed ? null : analyzerOutput.topic_type,
+      complexity: analyzerFailed ? null : analyzerOutput.complexity,
+      requestedMode,
+      chosenMode: analyzerOutput.suggested_mode,
+      analyzerFallback: analyzerFailed,
+    });
+
     const inserted = rtRepo.insert({
       id: pendingId,
       conversation_id: conv.id,
@@ -220,6 +254,22 @@ export function registerRoundtableRoute(
       estimated_cost_usd_low: inserted.estimated_cost_usd_low,
       estimated_cost_usd_high: inserted.estimated_cost_usd_high,
       created_at: inserted.created_at,
+      // A5 — launch preview metadata (renderer-only; not persisted).
+      preview: {
+        topic_type: analyzerFailed ? null : analyzerOutput.topic_type,
+        complexity: analyzerFailed ? null : analyzerOutput.complexity,
+        requested_mode: requestedMode,
+        analyzer_chose_mode_reason: launchReason,
+        estimated_calls: callsChosen.calls,
+        estimated_duration_sec_low: callsChosen.durationSecLow,
+        estimated_duration_sec_high: callsChosen.durationSecHigh,
+        alt_mode: altMode,
+        alt_estimated_cost_usd_low: altEstimate.low,
+        alt_estimated_cost_usd_high: altEstimate.high,
+        alt_estimated_calls: callsAlt.calls,
+        alt_estimated_duration_sec_low: callsAlt.durationSecLow,
+        alt_estimated_duration_sec_high: callsAlt.durationSecHigh,
+      },
     });
   });
 

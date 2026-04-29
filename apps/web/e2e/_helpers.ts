@@ -3,6 +3,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
+const TEST_ENV_FILE = path.join(HERE, '.test-env');
 
 export interface SidecarEnv {
   url: string;
@@ -10,15 +11,19 @@ export interface SidecarEnv {
 }
 
 export function readSidecarEnv(): SidecarEnv {
-  const envPath = path.resolve(HERE, '..', '.env.local');
+  // Prefer .test-env written by global-setup (isolated test sidecar).
+  // Fall back to .env.local for backwards-compat standalone usage.
+  const envPath = fs.existsSync(TEST_ENV_FILE)
+    ? TEST_ENV_FILE
+    : path.resolve(HERE, '..', '.env.local');
   const raw = fs.readFileSync(envPath, 'utf8');
   const map: Record<string, string> = {};
   for (const line of raw.split('\n')) {
     const m = line.match(/^([A-Z_]+)=(.+)$/);
-    if (m) map[m[1]] = m[2].trim();
+    if (m) map[m[1]!] = m[2]!.trim();
   }
-  const url = map.VITE_SIDECAR_URL;
-  const bearer = map.VITE_SIDECAR_BEARER;
+  const url = map['VITE_SIDECAR_URL'];
+  const bearer = map['VITE_SIDECAR_BEARER'];
   if (!url || !bearer) {
     throw new Error(`missing VITE_SIDECAR_* in ${envPath}`);
   }

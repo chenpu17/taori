@@ -83,6 +83,53 @@ export type CreateRoundtableRequest = z.infer<
   typeof CreateRoundtableRequestSchema
 >;
 
+/**
+ * A5 — fields surfaced to the launch dialog so users can:
+ *   1. See *why* the analyzer chose this mode (topic_type + complexity)
+ *   2. Compare fast vs deep cost ranges side-by-side
+ *
+ * `topic_type` / `complexity` may be null when analyzer fell back to fixed
+ * personas (we don't have that signal). `analyzer_chose_mode_reason` is a
+ * short human-readable Chinese sentence built server-side; renderer just
+ * displays it.
+ */
+export const RoundtableTopicTypeSchema = z.enum([
+  'business',
+  'technical',
+  'creative',
+  'decision',
+  'research',
+  'other',
+]);
+export type RoundtableTopicType = z.infer<typeof RoundtableTopicTypeSchema>;
+
+export const RoundtableComplexitySchema = z.enum(['low', 'medium', 'high']);
+export type RoundtableComplexity = z.infer<typeof RoundtableComplexitySchema>;
+
+export const RoundtableLaunchPreviewSchema = z.object({
+  topic_type: RoundtableTopicTypeSchema.nullable(),
+  complexity: RoundtableComplexitySchema.nullable(),
+  /** What the user requested ('auto'/'fast'/'deep'). */
+  requested_mode: RoundtableModeSchema,
+  /** Human-readable reason in Chinese, built server-side. */
+  analyzer_chose_mode_reason: z.string().nullable(),
+  /** Estimated total calls for the chosen mode (analyzer + participants × rounds + summarizer). */
+  estimated_calls: z.number().int().nonnegative(),
+  /** Estimated wall-clock duration range in seconds for the chosen mode. */
+  estimated_duration_sec_low: z.number().nonnegative(),
+  estimated_duration_sec_high: z.number().nonnegative(),
+  /** Cost & duration estimate for the OTHER mode (so renderer can show comparison). */
+  alt_mode: RoundtableStoredModeSchema,
+  alt_estimated_cost_usd_low: z.number().nullable(),
+  alt_estimated_cost_usd_high: z.number().nullable(),
+  alt_estimated_calls: z.number().int().nonnegative(),
+  alt_estimated_duration_sec_low: z.number().nonnegative(),
+  alt_estimated_duration_sec_high: z.number().nonnegative(),
+});
+export type RoundtableLaunchPreview = z.infer<
+  typeof RoundtableLaunchPreviewSchema
+>;
+
 export const RoundtableSchema = z.object({
   id: z.string(),
   conversation_id: z.string(),

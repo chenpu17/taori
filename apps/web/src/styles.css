@@ -1357,6 +1357,85 @@ header h1::before {
 .roundtable-participants .participant-name { font-weight: 600; }
 .roundtable-participants .participant-persona { margin-top: 6px; font-size: 12px; color: var(--muted); line-height: 1.6; }
 
+/* A5 — launch dialog redesign: reason panel + mode comparison cards */
+.modal-card.roundtable-launch { width: 720px; max-width: 95vw; }
+.roundtable-reason-panel {
+  display: flex; gap: 12px;
+  padding: 12px 14px;
+  margin: 12px 0 14px;
+  background: rgba(139, 92, 246, 0.06);
+  border: 1px solid rgba(139, 92, 246, 0.25);
+  border-radius: var(--r-md);
+}
+.roundtable-reason-icon { font-size: 20px; line-height: 1.2; }
+.roundtable-reason-body { flex: 1; }
+.roundtable-reason-title {
+  font-size: 11px; font-weight: 600; color: var(--fg-soft);
+  text-transform: uppercase; letter-spacing: 0.05em;
+  margin-bottom: 4px;
+}
+.roundtable-reason-text { font-size: 13px; line-height: 1.55; color: var(--fg); }
+.roundtable-reason-chips { margin-top: 8px; display: flex; flex-wrap: wrap; gap: 6px; }
+.roundtable-chip {
+  font-size: 11px;
+  padding: 2px 8px;
+  border-radius: var(--r-pill);
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  color: var(--fg-soft);
+}
+
+.roundtable-mode-compare {
+  display: grid; grid-template-columns: 1fr 1fr; gap: 10px;
+  margin: 14px 0;
+}
+.roundtable-mode-card {
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  padding: 12px 14px;
+  background: var(--surface-2);
+  transition: border-color var(--dur-1), box-shadow var(--dur-1);
+}
+.roundtable-mode-card.chosen {
+  border-color: var(--brand);
+  background: rgba(139, 92, 246, 0.05);
+  box-shadow: var(--shadow-glow);
+}
+.roundtable-mode-card.alt { opacity: 0.85; }
+.roundtable-mode-card-header {
+  display: flex; align-items: center; justify-content: space-between;
+  margin-bottom: 4px;
+}
+.roundtable-mode-card-label { font-weight: 600; font-size: 14px; }
+.roundtable-mode-card-badge {
+  font-size: 10px; font-weight: 600;
+  padding: 2px 8px;
+  border-radius: var(--r-pill);
+  background: var(--brand-grad);
+  color: white;
+  letter-spacing: 0.04em;
+}
+.roundtable-mode-card-altbadge {
+  font-size: 10px; color: var(--muted);
+  padding: 2px 8px;
+  border-radius: var(--r-pill);
+  background: var(--surface);
+  border: 1px solid var(--border);
+}
+.roundtable-mode-card-sub { font-size: 12px; color: var(--muted); margin-bottom: 10px; }
+.roundtable-mode-card-grid {
+  display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 8px;
+}
+.roundtable-mode-card-key {
+  font-size: 10px; color: var(--muted);
+  text-transform: uppercase; letter-spacing: 0.05em;
+  margin-bottom: 2px;
+}
+.roundtable-mode-card-val { font-size: 13px; font-weight: 500; color: var(--fg); }
+@media (max-width: 600px) {
+  .roundtable-mode-compare { grid-template-columns: 1fr; }
+}
+
 /* Active roundtable banner above chat */
 .roundtable-banner {
   margin: 10px 24px 0;
