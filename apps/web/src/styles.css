@@ -308,15 +308,18 @@ header h1::before {
   padding: 6px 10px;
   border: 1px solid var(--border);
   border-radius: 8px;
-  background: rgba(255, 255, 255, 0.6);
+  background: var(--surface-elev);
   color: var(--fg);
   font-size: 13px;
   outline: none;
-  transition: border-color var(--dur-1), box-shadow var(--dur-1);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04);
+  transition: border-color var(--dur-1), box-shadow var(--dur-1), background var(--dur-1);
 }
+.conv-search::placeholder { color: var(--muted-2); }
 .conv-search:focus {
   border-color: rgba(99, 102, 241, 0.55);
-  box-shadow: 0 0 0 2px rgba(99, 102, 241, 0.15);
+  background: var(--surface);
+  box-shadow: 0 0 0 2px rgba(99, 102, 241, 0.15), var(--shadow-1);
 }
 .sidebar-batch-bar {
   display: flex;
@@ -2927,8 +2930,11 @@ header h1::before {
   padding: 6px 8px;
   border-radius: 8px;
   border: 1px solid rgba(99, 102, 241, 0.2);
+  background: var(--surface-elev);
+  color: var(--fg);
   font-size: 13px;
 }
+.import-drawer__filters input::placeholder { color: var(--muted-2); }
 .import-drawer__list {
   list-style: none;
   margin: 0;
@@ -3415,6 +3421,7 @@ header h1::before {
   border: 1px solid #c8d0d8;
   border-radius: 6px;
   background: #fff;
+  color: #0f172a;
   cursor: pointer;
 }
 .msg-edit-actions button:first-child {

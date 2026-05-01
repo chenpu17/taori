@@ -260,4 +260,35 @@ describe('chat M1.2', () => {
     expect(parsed[0].kind).toBe('image');
     expect(parsed[0].name).toBe('a.png');
   });
+
+  it('accepts generated-image sized vision attachments instead of failing at the HTTP parser', async () => {
+    const provRepo = new ProvidersRepo(db);
+    const modRepo = new ModelsRepo(db);
+    const provider = provRepo.create({
+      name: 'OR',
+      type: 'openrouter',
+      base_url: 'https://openrouter.example.com/api/v1',
+    });
+    const model = modRepo.create({
+      provider_id: provider.id,
+      model_name: 'vision-large',
+      capability: 'multimodal',
+      display_name: 'Vision Large',
+      supports_vision: true,
+    });
+    const largeB64 = 'a'.repeat(1_500_000);
+    const res = await app.inject({
+      method: 'POST',
+      url: '/v1/chat',
+      headers: { authorization: `Bearer ${bearer}`, 'content-type': 'application/json' },
+      payload: JSON.stringify({
+        model_id: model.id,
+        messages: [{ role: 'user', content: '请理解这张图片' }],
+        attachments: [{ kind: 'image', mime: 'image/png', data_b64: largeB64, name: 'generated.png' }],
+      }),
+    });
+    expect(res.statusCode).toBe(200);
+    expect(res.payload).toContain('"message_id":"msg_');
+    expect(res.payload).not.toContain('"code":"internal"');
+  });
 });

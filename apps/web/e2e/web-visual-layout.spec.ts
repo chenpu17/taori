@@ -203,6 +203,32 @@ async function scrollToBottom(locator: Locator): Promise<void> {
   });
 }
 
+async function expectReadableContrast(locator: Locator): Promise<void> {
+  const contrast = await locator.evaluate((el) => {
+    const style = getComputedStyle(el);
+    const parse = (color: string): [number, number, number] => {
+      const match = color.match(/rgba?\((\d+),\s*(\d+),\s*(\d+)/);
+      if (!match) throw new Error(`Unsupported CSS color: ${color}`);
+      return [Number(match[1]), Number(match[2]), Number(match[3])];
+    };
+    const luminance = ([r, g, b]: [number, number, number]): number => {
+      const linear = [r, g, b].map((channel) => {
+        const value = channel / 255;
+        return value <= 0.03928
+          ? value / 12.92
+          : Math.pow((value + 0.055) / 1.055, 2.4);
+      });
+      return 0.2126 * linear[0]! + 0.7152 * linear[1]! + 0.0722 * linear[2]!;
+    };
+    const fg = luminance(parse(style.color));
+    const bg = luminance(parse(style.backgroundColor));
+    const lighter = Math.max(fg, bg);
+    const darker = Math.min(fg, bg);
+    return (lighter + 0.05) / (darker + 0.05);
+  });
+  expect(contrast).toBeGreaterThanOrEqual(4.5);
+}
+
 test('small viewport: image picker remains scrollable and actions reachable with many models', async ({
   page,
 }) => {
@@ -326,6 +352,35 @@ test('small viewport: model center fits horizontally and can scroll to close', a
   await expect(center).toBeVisible();
   await expectHorizontallyWithinViewport(page, center);
   await expect(page.getByTestId('model-center-close')).toBeInViewport();
+});
+
+test('visual contrast: sidebar search, import filters, and edit cancel remain readable', async ({
+  page,
+}) => {
+  await seedChatModels(1);
+  await seedChatCost('视觉对比回归：按钮和过滤输入框');
+  const conversationId = await findConversationContaining('视觉对比回归');
+
+  await page.goto('/');
+  await expect(page.getByTestId('chat-panel')).toBeVisible({ timeout: 10_000 });
+  await expectReadableContrast(page.getByTestId('conv-search'));
+
+  await page.getByTestId('open-model-center').click();
+  await expect(page.getByTestId('model-center')).toBeVisible();
+  await page.getByTestId('model-center-import').click();
+  await expect(page.getByTestId('import-drawer')).toBeVisible();
+  await expectReadableContrast(page.getByTestId('import-drawer-provider'));
+  await expectReadableContrast(page.getByTestId('import-drawer-capability'));
+  await expectReadableContrast(page.getByTestId('import-drawer-filter'));
+  await page.getByTestId('import-drawer').getByLabel('关闭').click();
+  await page.getByTestId('model-center-close').click();
+
+  await page.locator(`[data-testid="conv-item"][data-conv-id="${conversationId}"]`).click();
+  const firstUser = page.locator('.msg.user').first();
+  await firstUser.hover();
+  await firstUser.getByTestId('msg-edit').click();
+  await expect(firstUser.getByTestId('msg-edit-cancel')).toBeVisible();
+  await expectReadableContrast(firstUser.getByTestId('msg-edit-cancel'));
 });
 
 test('small viewport: settings long content can scroll to danger zone and actions stay reachable', async ({

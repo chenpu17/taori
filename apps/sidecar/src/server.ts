@@ -53,6 +53,10 @@ export interface BuildServerArgs {
 
 export function buildServer(args: BuildServerArgs): FastifyInstance {
   const app = Fastify({
+    // Chat requests can include image attachments as base64. Generated images
+    // sent back into vision models commonly exceed Fastify's 1MB default, so
+    // align the parser cap with ChatRequest's 20MB aggregate validation.
+    bodyLimit: 25_000_000,
     logger: {
       level: args.config.isDev ? 'info' : 'warn',
       // Sidecar logs go to stderr so stdout stays clean for the READY line.
@@ -117,6 +121,13 @@ export function buildServer(args: BuildServerArgs): FastifyInstance {
       reply.code(ERROR_HTTP_STATUS.validation_error).send({
         code: 'validation_error',
         message: err.message,
+      });
+      return;
+    }
+    if (err.code === 'FST_ERR_CTP_BODY_TOO_LARGE') {
+      reply.code(ERROR_HTTP_STATUS.validation_error).send({
+        code: 'validation_error',
+        message: '请求体过大：图片或附件总大小不能超过 20MB（base64）',
       });
       return;
     }
