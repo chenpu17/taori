@@ -16,17 +16,27 @@ import {
   messages,
   cost_records,
   memories,
+  prompt_templates,
+  personas,
   files,
   roundtables,
   roundtable_messages,
 } from '../schema.js';
 import type {
+  ErrorClassification,
+  ModelHealthRow,
   Participant,
   RoundtableStoredMode,
   RoundtableStatus,
   SummaryStorage,
   RoundtableMessageStatus,
   RoundtableMessageClassification,
+  PromptTemplate,
+  PromptTemplateCreate,
+  PromptTemplateUpdate,
+  Persona,
+  PersonaCreate,
+  PersonaUpdate,
 } from '@taori/shared';
 import {
   makeId,
@@ -41,6 +51,8 @@ import {
 
 type ProviderRow = typeof providers.$inferSelect;
 type ModelRow = typeof models.$inferSelect;
+type PromptTemplateRow = typeof prompt_templates.$inferSelect;
+type PersonaRow = typeof personas.$inferSelect;
 
 function toProvider(row: ProviderRow): Provider {
   return {
@@ -100,6 +112,28 @@ function toModel(row: ModelRow): Model {
     demoted: row.demoted ?? false,
     disabled_until: row.disabled_until ?? null,
     failure_count_24h: row.failure_count_24h ?? 0,
+  };
+}
+
+function toPromptTemplate(row: PromptTemplateRow): PromptTemplate {
+  return {
+    id: row.id,
+    name: row.name,
+    description: row.description ?? null,
+    content: row.content,
+    created_at: row.created_at,
+    updated_at: row.updated_at,
+  };
+}
+
+function toPersona(row: PersonaRow): Persona {
+  return {
+    id: row.id,
+    name: row.name,
+    description: row.description ?? null,
+    prompt: row.prompt,
+    created_at: row.created_at,
+    updated_at: row.updated_at,
   };
 }
 
@@ -598,6 +632,129 @@ export class ModelsRepo {
   }
 }
 
+export class PromptTemplatesRepo {
+  constructor(private db: Db) {}
+
+  list(): PromptTemplate[] {
+    return this.db
+      .select()
+      .from(prompt_templates)
+      .orderBy(asc(prompt_templates.updated_at), asc(prompt_templates.created_at))
+      .all()
+      .reverse()
+      .map(toPromptTemplate);
+  }
+
+  get(id: string): PromptTemplate | null {
+    const row = this.db
+      .select()
+      .from(prompt_templates)
+      .where(eq(prompt_templates.id, id))
+      .get();
+    return row ? toPromptTemplate(row) : null;
+  }
+
+  create(input: PromptTemplateCreate): PromptTemplate {
+    const now = Date.now();
+    const row = this.db
+      .insert(prompt_templates)
+      .values({
+        id: makeId('prompt_template'),
+        name: input.name,
+        description: input.description ?? null,
+        content: input.content,
+        created_at: now,
+        updated_at: now,
+      })
+      .returning()
+      .get();
+    return toPromptTemplate(row);
+  }
+
+  update(id: string, patch: PromptTemplateUpdate): PromptTemplate | null {
+    const row = this.db
+      .update(prompt_templates)
+      .set({
+        ...(patch.name !== undefined && { name: patch.name }),
+        ...(patch.description !== undefined && {
+          description: patch.description ?? null,
+        }),
+        ...(patch.content !== undefined && { content: patch.content }),
+        updated_at: Date.now(),
+      })
+      .where(eq(prompt_templates.id, id))
+      .returning()
+      .get();
+    return row ? toPromptTemplate(row) : null;
+  }
+
+  delete(id: string): boolean {
+    const res = this.db
+      .delete(prompt_templates)
+      .where(eq(prompt_templates.id, id))
+      .run();
+    return res.changes > 0;
+  }
+}
+
+export class PersonasRepo {
+  constructor(private db: Db) {}
+
+  list(): Persona[] {
+    return this.db
+      .select()
+      .from(personas)
+      .orderBy(asc(personas.updated_at), asc(personas.created_at))
+      .all()
+      .reverse()
+      .map(toPersona);
+  }
+
+  get(id: string): Persona | null {
+    const row = this.db.select().from(personas).where(eq(personas.id, id)).get();
+    return row ? toPersona(row) : null;
+  }
+
+  create(input: PersonaCreate): Persona {
+    const now = Date.now();
+    const row = this.db
+      .insert(personas)
+      .values({
+        id: makeId('persona'),
+        name: input.name,
+        description: input.description ?? null,
+        prompt: input.prompt,
+        created_at: now,
+        updated_at: now,
+      })
+      .returning()
+      .get();
+    return toPersona(row);
+  }
+
+  update(id: string, patch: PersonaUpdate): Persona | null {
+    const row = this.db
+      .update(personas)
+      .set({
+        ...(patch.name !== undefined && { name: patch.name }),
+        ...(patch.description !== undefined && {
+          description: patch.description ?? null,
+        }),
+        ...(patch.prompt !== undefined && { prompt: patch.prompt }),
+        updated_at: Date.now(),
+      })
+      .where(eq(personas.id, id))
+      .returning()
+      .get();
+    return row ? toPersona(row) : null;
+  }
+
+  delete(id: string): boolean {
+    const res = this.db.delete(personas).where(eq(personas.id, id)).run();
+    return res.changes > 0;
+  }
+}
+
 export interface ConversationRow {
   id: string;
   type: string;
@@ -770,6 +927,15 @@ export class MessagesRepo {
       .all() as MessageRow[];
   }
 
+  get(id: string): MessageRow | null {
+    const row = this.db
+      .select()
+      .from(messages)
+      .where(eq(messages.id, id))
+      .get();
+    return row ? (row as MessageRow) : null;
+  }
+
   insert(input: {
     id?: string;
     conversation_id: string;
@@ -812,6 +978,14 @@ export class MessagesRepo {
         status: patch.status,
         error: patch.error ?? null,
       })
+      .where(eq(messages.id, id))
+      .run();
+  }
+
+  updateAttachments(id: string, attachments: string | null): void {
+    this.db
+      .update(messages)
+      .set({ attachments })
       .where(eq(messages.id, id))
       .run();
   }
@@ -906,6 +1080,8 @@ export interface CostInsert {
   estimated_cost_usd: number | null;
   actual_cost_usd: number | null;
   success: boolean;
+  classification?: ErrorClassification | null;
+  first_token_ms?: number | null;
   duration_ms: number | null;
 }
 
@@ -917,6 +1093,135 @@ export interface CostRecord extends CostInsert {
 
 export class CostsRepo {
   constructor(private db: Db) {}
+
+  private startOfToday(now = new Date()): number {
+    return new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
+  }
+
+  private startOfWeek(now = new Date()): number {
+    const day = now.getDay();
+    const diff = day === 0 ? 6 : day - 1;
+    return new Date(
+      now.getFullYear(),
+      now.getMonth(),
+      now.getDate() - diff,
+    ).getTime();
+  }
+
+  private startOfMonth(now = new Date()): number {
+    return new Date(now.getFullYear(), now.getMonth(), 1).getTime();
+  }
+
+  private scopeStart(scope: 'session' | 'today' | 'week' | 'month'): number | null {
+    if (scope === 'today') return this.startOfToday();
+    if (scope === 'week') return this.startOfWeek();
+    if (scope === 'month') return this.startOfMonth();
+    return null;
+  }
+
+  private listWindowRows(
+    scope: 'session' | 'today' | 'week' | 'month',
+    conversationId: string | null,
+  ): Array<{
+    model_id: string | null;
+    model_name_snapshot: string | null;
+    feature: string;
+    sum_usd: number;
+    success: boolean;
+    created_at: number;
+    conversation_id: string | null;
+    conversation_title: string | null;
+  }> {
+    if (scope === 'session' && !conversationId) return [];
+    const clauses = [];
+    const start = this.scopeStart(scope);
+    if (start != null) clauses.push(sql`${cost_records.created_at} >= ${start}`);
+    if (scope === 'session' && conversationId) {
+      clauses.push(eq(cost_records.conversation_id, conversationId));
+    }
+    const query = this.db
+      .select({
+        model_id: cost_records.model_id,
+        model_name_snapshot: cost_records.model_name_snapshot,
+        feature: cost_records.feature,
+        sum_usd: sql<number>`COALESCE(${cost_records.actual_cost_usd}, 0)`,
+        success: cost_records.success,
+        created_at: cost_records.created_at,
+        conversation_id: cost_records.conversation_id,
+        conversation_title: conversations.title,
+      })
+      .from(cost_records)
+      .leftJoin(conversations, eq(cost_records.conversation_id, conversations.id))
+      .orderBy(asc(cost_records.created_at));
+    const rows = (clauses.length > 0 ? query.where(and(...clauses)) : query).all() as Array<{
+      model_id: string | null;
+      model_name_snapshot: string | null;
+      feature: string;
+      sum_usd: number;
+      success: boolean;
+      created_at: number;
+      conversation_id: string | null;
+      conversation_title: string | null;
+    }>;
+    return rows;
+  }
+
+  private makeTrendBuckets(
+    scope: 'session' | 'today' | 'week' | 'month',
+    rows: Array<{ created_at: number }>,
+  ): Array<{ start: number; label: string }> {
+    if (scope === 'today') {
+      const now = new Date();
+      const start = this.startOfToday(now);
+      const currentHour = now.getHours();
+      return Array.from({ length: currentHour + 1 }, (_, hour) => ({
+        start: start + hour * 60 * 60 * 1000,
+        label: `${String(hour).padStart(2, '0')}:00`,
+      }));
+    }
+    const byDay = (startMs: number, count: number, label: (date: Date) => string) =>
+      Array.from({ length: count }, (_, i) => {
+        const date = new Date(startMs + i * 24 * 60 * 60 * 1000);
+        return { start: date.getTime(), label: label(date) };
+      });
+    if (scope === 'week') {
+      const now = new Date();
+      const start = this.startOfWeek(now);
+      const days = Math.floor((this.startOfToday(now) - start) / (24 * 60 * 60 * 1000)) + 1;
+      return byDay(start, days, (date) => `${date.getMonth() + 1}/${date.getDate()}`);
+    }
+    if (scope === 'month') {
+      const now = new Date();
+      const start = this.startOfMonth(now);
+      return byDay(start, now.getDate(), (date) => `${date.getDate()}`);
+    }
+    if (rows.length === 0) {
+      const today = this.startOfToday();
+      return [{ start: today, label: '今天' }];
+    }
+    const first = new Date(rows[0]!.created_at);
+    const last = new Date(rows[rows.length - 1]!.created_at);
+    const start = new Date(first.getFullYear(), first.getMonth(), first.getDate()).getTime();
+    const end = new Date(last.getFullYear(), last.getMonth(), last.getDate()).getTime();
+    const days = Math.max(1, Math.floor((end - start) / (24 * 60 * 60 * 1000)) + 1);
+    return byDay(start, days, (date) => `${date.getMonth() + 1}/${date.getDate()}`);
+  }
+
+  private bucketStartForScope(
+    scope: 'session' | 'today' | 'week' | 'month',
+    createdAt: number,
+  ): number {
+    const date = new Date(createdAt);
+    if (scope === 'today') {
+      return new Date(
+        date.getFullYear(),
+        date.getMonth(),
+        date.getDate(),
+        date.getHours(),
+      ).getTime();
+    }
+    return new Date(date.getFullYear(), date.getMonth(), date.getDate()).getTime();
+  }
 
   insert(input: CostInsert): CostRecord {
     const id = makeId('cost');
@@ -940,6 +1245,8 @@ export class CostsRepo {
         estimated_cost_usd: input.estimated_cost_usd,
         actual_cost_usd: input.actual_cost_usd,
         success: input.success,
+        classification: input.classification ?? null,
+        first_token_ms: input.first_token_ms ?? null,
         duration_ms: input.duration_ms,
         created_at: now,
       })
@@ -989,6 +1296,94 @@ export class CostsRepo {
       today_usd: today.total_usd,
       month_usd: month.total_usd,
     };
+  }
+
+  modelHealth24h(): Map<string, ModelHealthRow> {
+    const since = Date.now() - 24 * 60 * 60 * 1000;
+    const rows = this.db
+      .select({
+        model_id: cost_records.model_id,
+        success: cost_records.success,
+        classification: cost_records.classification,
+        first_token_ms: cost_records.first_token_ms,
+        duration_ms: cost_records.duration_ms,
+        created_at: cost_records.created_at,
+      })
+      .from(cost_records)
+      .where(
+        and(
+          isNotNull(cost_records.model_id),
+          sql`${cost_records.created_at} >= ${since}`,
+        ),
+      )
+      .all() as Array<{
+      model_id: string | null;
+      success: boolean;
+      classification: ErrorClassification | null;
+      first_token_ms: number | null;
+      duration_ms: number | null;
+      created_at: number;
+    }>;
+
+    const grouped = new Map<
+      string,
+      ModelHealthRow & {
+        firstTokenTotal: number;
+        firstTokenCount: number;
+        durationTotal: number;
+        durationCount: number;
+      }
+    >();
+
+    for (const row of rows) {
+      if (!row.model_id) continue;
+      const current = grouped.get(row.model_id) ?? {
+        model_id: row.model_id,
+        calls_24h: 0,
+        failures_24h: 0,
+        avg_first_token_ms: null,
+        avg_duration_ms: null,
+        last_failure_at: null,
+        last_failure_classification: null,
+        firstTokenTotal: 0,
+        firstTokenCount: 0,
+        durationTotal: 0,
+        durationCount: 0,
+      };
+      current.calls_24h += 1;
+      if (!row.success) {
+        current.failures_24h += 1;
+        if (current.last_failure_at == null || row.created_at >= current.last_failure_at) {
+          current.last_failure_at = row.created_at;
+          current.last_failure_classification = row.classification ?? null;
+        }
+      }
+      if (typeof row.first_token_ms === 'number') {
+        current.firstTokenTotal += row.first_token_ms;
+        current.firstTokenCount += 1;
+      }
+      if (typeof row.duration_ms === 'number') {
+        current.durationTotal += row.duration_ms;
+        current.durationCount += 1;
+      }
+      grouped.set(row.model_id, current);
+    }
+
+    const out = new Map<string, ModelHealthRow>();
+    for (const [modelId, row] of grouped.entries()) {
+      out.set(modelId, {
+        model_id: row.model_id,
+        calls_24h: row.calls_24h,
+        failures_24h: row.failures_24h,
+        avg_first_token_ms:
+          row.firstTokenCount > 0 ? row.firstTokenTotal / row.firstTokenCount : null,
+        avg_duration_ms:
+          row.durationCount > 0 ? row.durationTotal / row.durationCount : null,
+        last_failure_at: row.last_failure_at,
+        last_failure_classification: row.last_failure_classification,
+      });
+    }
+    return out;
   }
 
   /** For per-message display. */
@@ -1072,7 +1467,7 @@ export class CostsRepo {
    * subtotals per spec §3.3.
    */
   breakdown(
-    scope: 'session' | 'today' | 'month',
+    scope: 'session' | 'today' | 'week' | 'month',
     conversationId: string | null,
   ): Array<{
     model_id: string | null;
@@ -1083,36 +1478,9 @@ export class CostsRepo {
     success_count: number;
     billed_failure_count: number;
   }> {
-    let timeWhere = sql`1=1`;
-    if (scope === 'today') {
-      const start = new Date();
-      start.setHours(0, 0, 0, 0);
-      timeWhere = sql`created_at >= ${start.getTime()}`;
-    } else if (scope === 'month') {
-      const start = new Date();
-      start.setDate(1);
-      start.setHours(0, 0, 0, 0);
-      timeWhere = sql`created_at >= ${start.getTime()}`;
-    }
-    let convWhere = sql`1=1`;
-    if (scope === 'session') {
-      if (!conversationId) return [];
-      convWhere = sql`conversation_id = ${conversationId}`;
-    }
-    const rows = this.db
-      .select({
-        model_id: cost_records.model_id,
-        model_name_snapshot: cost_records.model_name_snapshot,
-        feature: cost_records.feature,
-        sum_usd: sql<number>`COALESCE(SUM(actual_cost_usd), 0)`,
-        count: sql<number>`COUNT(*)`,
-        success_count: sql<number>`SUM(CASE WHEN success = 1 THEN 1 ELSE 0 END)`,
-        billed_failure_count: sql<number>`SUM(CASE WHEN success = 0 AND actual_cost_usd > 0 THEN 1 ELSE 0 END)`,
-      })
-      .from(cost_records)
-      .where(and(timeWhere, convWhere))
-      .groupBy(cost_records.model_id, cost_records.feature)
-      .all() as Array<{
+    const grouped = new Map<
+      string,
+      {
         model_id: string | null;
         model_name_snapshot: string | null;
         feature: string;
@@ -1120,8 +1488,126 @@ export class CostsRepo {
         count: number;
         success_count: number;
         billed_failure_count: number;
-      }>;
-    return rows;
+      }
+    >();
+    for (const row of this.listWindowRows(scope, conversationId)) {
+      const key = `${row.model_id ?? 'null'}::${row.feature}`;
+      const current = grouped.get(key) ?? {
+        model_id: row.model_id,
+        model_name_snapshot: row.model_name_snapshot,
+        feature: row.feature,
+        sum_usd: 0,
+        count: 0,
+        success_count: 0,
+        billed_failure_count: 0,
+      };
+      current.sum_usd += row.sum_usd;
+      current.count += 1;
+      current.success_count += row.success ? 1 : 0;
+      current.billed_failure_count += !row.success && row.sum_usd > 0 ? 1 : 0;
+      grouped.set(key, current);
+    }
+    return Array.from(grouped.values()).sort((a, b) => b.sum_usd - a.sum_usd);
+  }
+
+  breakdownBy(
+    scope: 'session' | 'today' | 'week' | 'month',
+    groupBy: 'model' | 'conversation' | 'feature',
+    conversationId: string | null,
+  ): Array<{
+    key: string;
+    label: string;
+    model_id: string | null;
+    model_name_snapshot: string | null;
+    conversation_id: string | null;
+    conversation_title: string | null;
+    feature: string | null;
+    sum_usd: number;
+    count: number;
+    success_count: number;
+    billed_failure_count: number;
+    trend: Array<{ bucket_start: number; label: string; sum_usd: number; count: number }>;
+  }> {
+    const rows = this.listWindowRows(scope, conversationId);
+    const buckets = this.makeTrendBuckets(scope, rows);
+    const bucketTemplate = buckets.map((bucket) => ({
+      bucket_start: bucket.start,
+      label: bucket.label,
+      sum_usd: 0,
+      count: 0,
+    }));
+    const grouped = new Map<
+      string,
+      {
+        key: string;
+        label: string;
+        model_id: string | null;
+        model_name_snapshot: string | null;
+        conversation_id: string | null;
+        conversation_title: string | null;
+        feature: string | null;
+        sum_usd: number;
+        count: number;
+        success_count: number;
+        billed_failure_count: number;
+        trend: Array<{ bucket_start: number; label: string; sum_usd: number; count: number }>;
+      }
+    >();
+    const bucketIndex = new Map<number, number>();
+    for (let i = 0; i < buckets.length; i++) bucketIndex.set(buckets[i]!.start, i);
+
+    for (const row of rows) {
+      const bucketStart = this.bucketStartForScope(scope, row.created_at);
+      let key: string;
+      let label: string;
+      let modelId: string | null = null;
+      let modelNameSnapshot: string | null = null;
+      let feature: string | null = null;
+      let targetConversationId: string | null = null;
+      let conversationTitle: string | null = null;
+      if (groupBy === 'model') {
+        modelId = row.model_id;
+        modelNameSnapshot = row.model_name_snapshot;
+        key = row.model_id ?? `snapshot:${row.model_name_snapshot ?? 'deleted'}`;
+        label = row.model_name_snapshot ?? '(已删除模型)';
+      } else if (groupBy === 'conversation') {
+        targetConversationId = row.conversation_id;
+        conversationTitle = row.conversation_title;
+        key = row.conversation_id ?? 'no-conversation';
+        label =
+          row.conversation_title
+          ?? (row.conversation_id ? '未命名会话' : '无会话归属');
+      } else {
+        feature = row.feature;
+        key = row.feature;
+        label = row.feature;
+      }
+      const current = grouped.get(key) ?? {
+        key,
+        label,
+        model_id: modelId,
+        model_name_snapshot: modelNameSnapshot,
+        conversation_id: targetConversationId,
+        conversation_title: conversationTitle,
+        feature,
+        sum_usd: 0,
+        count: 0,
+        success_count: 0,
+        billed_failure_count: 0,
+        trend: bucketTemplate.map((bucket) => ({ ...bucket })),
+      };
+      current.sum_usd += row.sum_usd;
+      current.count += 1;
+      current.success_count += row.success ? 1 : 0;
+      current.billed_failure_count += !row.success && row.sum_usd > 0 ? 1 : 0;
+      const idx = bucketIndex.get(bucketStart);
+      if (idx != null) {
+        current.trend[idx]!.sum_usd += row.sum_usd;
+        current.trend[idx]!.count += 1;
+      }
+      grouped.set(key, current);
+    }
+    return Array.from(grouped.values()).sort((a, b) => b.sum_usd - a.sum_usd);
   }
 }
 
@@ -1380,6 +1866,26 @@ export class RoundtablesRepo {
     return rows.map(decodeRoundtable);
   }
 
+  listByAssociatedConversation(conversationId: string): RoundtableRow[] {
+    const rows = this.db
+      .select()
+      .from(roundtables)
+      .where(
+        sql`${roundtables.conversation_id} = ${conversationId} OR ${roundtables.origin_conversation_id} = ${conversationId}`,
+      )
+      .orderBy(asc(roundtables.created_at))
+      .all();
+    return rows.map(decodeRoundtable);
+  }
+
+  setOriginConversation(id: string, conversationId: string): void {
+    this.db
+      .update(roundtables)
+      .set({ origin_conversation_id: conversationId, updated_at: Date.now() })
+      .where(eq(roundtables.id, id))
+      .run();
+  }
+
   setStatus(id: string, status: RoundtableStatus): void {
     this.db
       .update(roundtables)
@@ -1452,6 +1958,20 @@ export class RoundtablesRepo {
       .update(roundtables)
       .set({
         participants: JSON.stringify(participants),
+        updated_at: Date.now(),
+      })
+      .where(eq(roundtables.id, id))
+      .run();
+    return this.get(id);
+  }
+
+  setSummarizerModel(id: string, modelId: string | null): RoundtableRow | null {
+    const row = this.get(id);
+    if (!row) return null;
+    this.db
+      .update(roundtables)
+      .set({
+        summarizer_model_id: modelId,
         updated_at: Date.now(),
       })
       .where(eq(roundtables.id, id))

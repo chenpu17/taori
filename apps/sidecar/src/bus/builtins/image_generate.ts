@@ -160,39 +160,45 @@ export function createImageGenerateTool(
       if (!adapterResult) throw new Error('image adapter returned empty result');
 
       const buf = Buffer.from(adapterResult.b64, 'base64');
-      const ext = adapterResult.mime === 'image/jpeg' ? 'jpg' : 'png';
+      const ext = imageExtension(adapterResult.mime);
       const dir = path.join(deps.filesDir, ctx.conversationId);
       await fs.mkdir(dir, { recursive: true });
       const filename = `img_${Date.now()}_${Math.random().toString(36).slice(2, 8)}.${ext}`;
       const fullPath = path.join(dir, filename);
       await fs.writeFile(fullPath, buf);
 
+      const targetMessageId = ctx.targetMessageId ?? null;
       const fileRow = deps.files.insert({
         conversation_id: ctx.conversationId,
-        message_id: null,
+        message_id: targetMessageId,
         original_path: fullPath,
         mime_type: adapterResult.mime,
         size_bytes: buf.length,
       });
+      const imageAttachment = {
+        file_id: fileRow.id,
+        kind: 'image',
+        mime: adapterResult.mime,
+        width: adapterResult.width,
+        height: adapterResult.height,
+        data_b64: adapterResult.b64,
+      };
 
-      const msgRow = deps.messages.insert({
+      const assistantMessageId = targetMessageId ?? deps.messages.insert({
         conversation_id: ctx.conversationId,
         role: 'assistant',
         content: `Generated with ${model.model_name}`,
         model_id: model.id,
         status: 'complete',
         parent_message_id: ctx.sourceMessageId,
-        attachments: JSON.stringify([
-          {
-            file_id: fileRow.id,
-            kind: 'image',
-            mime: adapterResult.mime,
-            width: adapterResult.width,
-            height: adapterResult.height,
-            data_b64: adapterResult.b64,
-          },
-        ]),
-      });
+        attachments: JSON.stringify([imageAttachment]),
+      }).id;
+
+      if (targetMessageId) {
+        const target = deps.messages.get(targetMessageId);
+        const existing = parseAttachments(target?.attachments);
+        deps.messages.updateAttachments(targetMessageId, JSON.stringify([...existing, imageAttachment]));
+      }
 
       return {
         output: {
@@ -200,18 +206,28 @@ export function createImageGenerateTool(
           width: adapterResult.width,
           height: adapterResult.height,
           content_type: adapterResult.mime,
-          assistant_message_id: msgRow.id,
+          assistant_message_id: assistantMessageId,
         },
         cost: {
           actual_usd: pricePerCall,
           model_id: model.id,
           model_name_snapshot: model.model_name,
           price_per_call_snapshot: model.price_per_call ?? null,
-          assistant_message_id: msgRow.id,
+          assistant_message_id: assistantMessageId,
         },
       };
     },
   };
+}
+
+function parseAttachments(raw: string | null | undefined): unknown[] {
+  if (!raw) return [];
+  try {
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
 }
 
 function vErr(msg: string): Error {
@@ -231,6 +247,8 @@ async function callAdapter(
       return adapterSdWebui(args);
     case 'volcengine_ark':
       return adapterVolcengineArk(args);
+    case 'huawei_maas':
+      return adapterHuaweiMaas(args);
     default:
       throw vErr(`unsupported provider type for image_generate: ${type}`);
   }
@@ -278,7 +296,7 @@ async function adapterVolcengineArk(args: {
   };
   const item = json.data?.[0];
   if (item?.b64_json) {
-    return { b64: item.b64_json, mime: 'image/png', width: imgDim, height: imgDim };
+    return { ...parseBase64Image(item.b64_json), width: imgDim, height: imgDim };
   }
   if (item?.url) {
     const imgRes = await fetch(item.url);
@@ -292,6 +310,63 @@ async function adapterVolcengineArk(args: {
     };
   }
   throw new Error('Ark images: empty response');
+}
+
+/**
+ * Huawei MaaS image generation lives at /v1/images/generations, while chat
+ * uses the OpenAI-compatible /openai/v1 prefix. Derive the image endpoint
+ * from the configured chat base URL so users only configure one provider.
+ */
+async function adapterHuaweiMaas(args: {
+  baseUrl: string;
+  apiKey: string | null;
+  modelName: string;
+  prompt: string;
+}): Promise<AdapterResult> {
+  if (!args.apiKey) throw vErr('Huawei MaaS image adapter requires api_key');
+  const imageBase = args.baseUrl
+    .replace(/\/+$/, '')
+    .replace(/\/openai\/v1$/i, '/v1');
+  const url = `${imageBase}/images/generations`;
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: {
+      authorization: `Bearer ${args.apiKey}`,
+      'content-type': 'application/json',
+    },
+    body: JSON.stringify({
+      model: args.modelName,
+      prompt: args.prompt,
+      n: 1,
+      size: '1024x1024',
+      response_format: 'b64_json',
+    }),
+  });
+  if (!res.ok) {
+    const text = await res.text().catch(() => '');
+    const err = new Error(`Huawei MaaS images upstream ${res.status}: ${text.slice(0, 200)}`);
+    Object.assign(err, { upstreamStatus: res.status });
+    throw err;
+  }
+  const json = (await res.json()) as {
+    data?: Array<{ b64_json?: string; url?: string }>;
+  };
+  const item = json.data?.[0];
+  if (item?.b64_json) {
+    return { ...parseBase64Image(item.b64_json), width: 1024, height: 1024 };
+  }
+  if (item?.url) {
+    const imgRes = await fetch(item.url);
+    if (!imgRes.ok) throw new Error(`Huawei MaaS image fetch failed ${imgRes.status}`);
+    const buf = Buffer.from(await imgRes.arrayBuffer());
+    return {
+      b64: buf.toString('base64'),
+      mime: imgRes.headers.get('content-type') ?? 'image/png',
+      width: 1024,
+      height: 1024,
+    };
+  }
+  throw new Error('Huawei MaaS images: empty response');
 }
 
 async function adapterOpenAI(args: {
@@ -325,7 +400,7 @@ async function adapterOpenAI(args: {
   const json = (await res.json()) as { data?: Array<{ b64_json?: string }> };
   const b64 = json.data?.[0]?.b64_json;
   if (!b64) throw new Error('OpenAI images: missing b64_json');
-  return { b64, mime: 'image/png', width: 1024, height: 1024 };
+  return { ...parseBase64Image(b64), width: 1024, height: 1024 };
 }
 
 async function adapterReplicate(args: {
@@ -383,7 +458,41 @@ async function adapterSdWebui(args: {
   const json = (await res.json()) as { images?: string[] };
   const b64 = json.images?.[0];
   if (!b64) throw new Error('SD WebUI: missing images[0]');
-  return { b64, mime: 'image/png', width: 512, height: 512 };
+  return { ...parseBase64Image(b64), width: 512, height: 512 };
+}
+
+function parseBase64Image(raw: string, fallbackMime = 'image/png'): {
+  b64: string;
+  mime: string;
+} {
+  const trimmed = raw.trim();
+  const match = /^data:([^;,]+);base64,(.*)$/is.exec(trimmed);
+  if (!match) {
+    return { b64: trimmed, mime: normalizeImageMime(fallbackMime) };
+  }
+  const [, mime, b64] = match;
+  return {
+    b64: (b64 ?? '').replace(/\s/g, ''),
+    mime: normalizeImageMime(mime),
+  };
+}
+
+function normalizeImageMime(mime: string | undefined): string {
+  const lower = (mime ?? 'image/png').toLowerCase();
+  return lower === 'image/jpg' ? 'image/jpeg' : lower;
+}
+
+function imageExtension(mime: string): string {
+  switch (normalizeImageMime(mime)) {
+    case 'image/jpeg':
+      return 'jpg';
+    case 'image/webp':
+      return 'webp';
+    case 'image/gif':
+      return 'gif';
+    default:
+      return 'png';
+  }
 }
 
 // Synthesize a 1x1 PNG for tests. Smallest valid PNG.

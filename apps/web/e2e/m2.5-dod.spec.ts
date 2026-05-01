@@ -91,7 +91,7 @@ test('M2.5 DoD: image session-memory persists → picker skipped on 2nd send', a
   await expect(page.getByTestId('chat-panel')).toBeVisible({ timeout: 10_000 });
 
   // FIRST send — picker opens, user selects "session" memory.
-  await page.getByTestId('composer-input').fill('画一张机器人');
+  await page.getByTestId('composer-input').fill('/image 画一张机器人');
   await page.getByTestId('composer-send').click();
 
   const dialog = page.getByTestId('image-picker-dialog');
@@ -125,7 +125,7 @@ test('M2.5 DoD: image session-memory persists → picker skipped on 2nd send', a
 
   // SECOND send — picker MUST NOT appear (session memory hit auto-submits via
   // the cost-confirm gate; spec §7 step 7).
-  await page.getByTestId('composer-input').fill('画一张猫');
+  await page.getByTestId('composer-input').fill('/image 画一张猫');
   await page.getByTestId('composer-send').click();
 
   // Cost-confirm appears (image_always default ON), then continue → no picker.
@@ -155,7 +155,7 @@ test('M2.5 DoD: cost panel total equals sum of cost_records for the conversation
   await expect(page.getByTestId('chat-panel')).toBeVisible({ timeout: 10_000 });
 
   // Trigger one image generation so a cost_record lands.
-  await page.getByTestId('composer-input').fill('画一张机器人');
+  await page.getByTestId('composer-input').fill('/image 画一张机器人');
   await page.getByTestId('composer-send').click();
   const dialog = page.getByTestId('image-picker-dialog');
   await expect(dialog).toBeVisible({ timeout: 10_000 });
@@ -217,7 +217,7 @@ test('M2.5 DoD §7 step 7: cost_confirm_disabled_models hit overrides image_alwa
   await page.goto('/');
   await expect(page.getByTestId('chat-panel')).toBeVisible({ timeout: 10_000 });
 
-  await page.getByTestId('composer-input').fill('画一张机器人');
+  await page.getByTestId('composer-input').fill('/image 画一张机器人');
   await page.getByTestId('composer-send').click();
 
   const dialog = page.getByTestId('image-picker-dialog');
@@ -250,7 +250,7 @@ test('M2.5 DoD §7 step 7: cost_confirm_disabled_conversations checkbox path', a
   await expect(page.getByTestId('chat-panel')).toBeVisible({ timeout: 10_000 });
 
   // First image generation: open confirm, tick "本会话不再提醒", continue.
-  await page.getByTestId('composer-input').fill('画一张机器人');
+  await page.getByTestId('composer-input').fill('/image 画一张机器人');
   await page.getByTestId('composer-send').click();
   let dialog = page.getByTestId('image-picker-dialog');
   await expect(dialog).toBeVisible({ timeout: 10_000 });
@@ -265,7 +265,7 @@ test('M2.5 DoD §7 step 7: cost_confirm_disabled_conversations checkbox path', a
   );
 
   // Second image generation in the SAME conversation.
-  await page.getByTestId('composer-input').fill('画一只猫');
+  await page.getByTestId('composer-input').fill('/image 画一只猫');
   await page.getByTestId('composer-send').click();
   dialog = page.getByTestId('image-picker-dialog');
   await expect(dialog).toBeVisible({ timeout: 10_000 });

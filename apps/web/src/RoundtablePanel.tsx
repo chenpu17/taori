@@ -95,7 +95,12 @@ export function RoundtablePanel(props: RoundtablePanelProps): ReactElement {
   const [summaryError, setSummaryError] = useState<{
     message: string;
     fallback_text: string;
+    model_id?: string | null;
   } | null>(null);
+  const [summaryModelOptions, setSummaryModelOptions] = useState<
+    Array<{ id: string; display_name: string; demoted?: boolean }>
+  >([]);
+  const [selectedSummaryModelId, setSelectedSummaryModelId] = useState('');
   const [actionBusy, setActionBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [totalCost, setTotalCost] = useState<number>(0);
@@ -127,6 +132,7 @@ export function RoundtablePanel(props: RoundtablePanelProps): ReactElement {
         setSummaryError({
           message: '总结失败，使用兜底文本',
           fallback_text: (s as { raw_text?: string }).raw_text ?? '',
+          model_id: r.roundtable.summarizer_model_id,
         });
       } else if (s) {
         setSummary(s as RoundtableSummary);
@@ -143,6 +149,45 @@ export function RoundtablePanel(props: RoundtablePanelProps): ReactElement {
   useEffect(() => {
     void refresh();
   }, [roundtableId, refresh]);
+
+  useEffect(() => {
+    if (!summaryError && !rt) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await api.listModels();
+        if (cancelled || !mountedRef.current) return;
+        const options = res.models
+          .filter(
+            (m) =>
+              m.capability === 'chat' &&
+              m.enabled &&
+              !(m.disabled_until && m.disabled_until > Date.now()),
+          )
+          .map((m) => ({
+            id: m.id,
+            display_name: m.display_name,
+            demoted: !!m.demoted,
+          }));
+        setSummaryModelOptions(options);
+        const current = summaryError?.model_id ?? rt?.summarizer_model_id ?? null;
+        const preferred =
+          options.find((m) => m.id !== current && !m.demoted)?.id ??
+          options.find((m) => m.id !== current)?.id ??
+          current ??
+          options[0]?.id ??
+          '';
+        setSelectedSummaryModelId((prev) =>
+          prev && options.some((m) => m.id === prev) ? prev : preferred,
+        );
+      } catch {
+        if (!cancelled && mountedRef.current) setSummaryModelOptions([]);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [summaryError, rt?.summarizer_model_id]);
 
   function handleAnnotation(ann: RoundtableAnnotation): void {
     if (ann.type === 'rt.round_start') {
@@ -234,6 +279,7 @@ export function RoundtablePanel(props: RoundtablePanelProps): ReactElement {
       setSummaryError({
         message: ann.message,
         fallback_text: ann.fallback_text,
+        model_id: ann.model_id ?? rt?.summarizer_model_id ?? null,
       });
       setSummaryStreaming('');
     }
@@ -269,7 +315,7 @@ export function RoundtablePanel(props: RoundtablePanelProps): ReactElement {
     }
   }
 
-  async function runSummary(): Promise<void> {
+  async function runSummary(modelOverrideId?: string): Promise<void> {
     if (!rt || actionBusy) return;
     setActionBusy(true);
     setError(null);
@@ -280,6 +326,7 @@ export function RoundtablePanel(props: RoundtablePanelProps): ReactElement {
       await streamRoundtableAnnotations({
         path: `/v1/roundtable/${rt.id}/summarize`,
         method: 'POST',
+        body: modelOverrideId ? { model_id: modelOverrideId } : undefined,
         signal: ctrl.signal,
         onAnnotation: handleAnnotation,
       });
@@ -489,12 +536,16 @@ export function RoundtablePanel(props: RoundtablePanelProps): ReactElement {
       </div>
 
       {summaryStreaming ? (
-        <pre
+        <div
           className="roundtable-summary-streaming"
           data-testid="roundtable-summary-streaming"
+          data-raw-length={summaryStreaming.length}
+          aria-live="polite"
         >
-          {summaryStreaming}
-        </pre>
+          <span className="roundtable-summary-spinner" aria-hidden="true" />
+          <span>正在整理圆桌结论…</span>
+          <span className="hint">结构化结果完成后会自动显示</span>
+        </div>
       ) : null}
 
       {summary ? (
@@ -522,8 +573,38 @@ export function RoundtablePanel(props: RoundtablePanelProps): ReactElement {
             onClick={() => void runSummary()}
             data-testid="roundtable-summary-retry"
           >
-            重试总结
+            用原模型重试
           </button>
+          {summaryModelOptions.length > 0 ? (
+            <div className="roundtable-summary-retry-panel">
+              <label>
+                <span>换用总结模型</span>
+                <select
+                  value={selectedSummaryModelId}
+                  onChange={(e) => setSelectedSummaryModelId(e.target.value)}
+                  data-testid="roundtable-summary-model-select"
+                >
+                  {summaryModelOptions.map((m) => (
+                    <option key={m.id} value={m.id}>
+                      {m.display_name}
+                      {m.id === (summaryError.model_id ?? rt.summarizer_model_id)
+                        ? '（当前）'
+                        : ''}
+                      {m.demoted ? '（降权）' : ''}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <button
+                type="button"
+                disabled={actionBusy || !selectedSummaryModelId}
+                onClick={() => void runSummary(selectedSummaryModelId)}
+                data-testid="roundtable-summary-retry-switch"
+              >
+                换模型并重试总结
+              </button>
+            </div>
+          ) : null}
         </div>
       ) : null}
 
@@ -744,7 +825,12 @@ function ParticipantColumn({
                 ) : null}
               </div>
             ) : (
-              <pre className="roundtable-cell-body">{content}</pre>
+              <pre
+                className="roundtable-cell-body"
+                data-testid={`roundtable-cell-body-${participantIndex}-${round}`}
+              >
+                {content}
+              </pre>
             )}
           </div>
         );
@@ -769,20 +855,43 @@ function SummaryCard({
   const [loopbackBusy, setLoopbackBusy] = useState(false);
   const [loopbackError, setLoopbackError] = useState<string | null>(null);
   const [loopbackDone, setLoopbackDone] = useState(false);
-  async function handleLoopback(): Promise<void> {
-    if (!onLoopback) return;
+  const [loopbackConversationId, setLoopbackConversationId] = useState<
+    string | null
+  >(null);
+  const autoLoopbackStartedRef = useRef<string | null>(null);
+
+  async function writeLoopback(): Promise<string | null> {
     setLoopbackBusy(true);
     setLoopbackError(null);
     try {
       const res = await api.postRoundtableLoopback(roundtableId);
+      setLoopbackConversationId(res.conversation_id);
       setLoopbackDone(true);
-      onLoopback(res.conversation_id);
+      return res.conversation_id;
     } catch (err) {
       setLoopbackError(err instanceof Error ? err.message : String(err));
+      return null;
     } finally {
       setLoopbackBusy(false);
     }
   }
+
+  useEffect(() => {
+    if (autoLoopbackStartedRef.current === roundtableId) return;
+    autoLoopbackStartedRef.current = roundtableId;
+    void writeLoopback();
+  }, [roundtableId, summary]);
+
+  async function handleLoopback(): Promise<void> {
+    if (!onLoopback) return;
+    if (loopbackDone && loopbackConversationId) {
+      onLoopback(loopbackConversationId);
+      return;
+    }
+    const conversationId = await writeLoopback();
+    if (conversationId) onLoopback(conversationId);
+  }
+
   return (
     <div className="roundtable-summary" data-testid="roundtable-summary">
       <h4>结论</h4>
@@ -873,11 +982,15 @@ function SummaryCard({
             type="button"
             className="roundtable-loopback-btn"
             data-testid="roundtable-loopback"
-            disabled={loopbackBusy || loopbackDone}
+            disabled={loopbackBusy}
             onClick={() => void handleLoopback()}
             title="把这次圆桌的结论作为一条 assistant 消息写入原对话，继续聊"
           >
-            {loopbackDone ? '✓ 已带回' : loopbackBusy ? '回填中…' : '↪ 带回原对话继续聊天'}
+            {loopbackBusy
+              ? '回填中…'
+              : loopbackDone
+                ? '✓ 已带回，查看原对话'
+                : '↪ 带回原对话继续聊天'}
           </button>
           {loopbackError ? (
             <span

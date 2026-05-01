@@ -8,6 +8,7 @@ import { fileURLToPath } from 'node:url';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 export const TEST_ENV_FILE = path.join(HERE, '.test-env');
+export const TEST_LOCK_FILE = path.join(HERE, '.test-lock');
 
 function readTestEnv(): Record<string, string> {
   if (!fs.existsSync(TEST_ENV_FILE)) return {};
@@ -49,6 +50,7 @@ export default async function globalTeardown(): Promise<void> {
 
   // Clean up .test-env.
   try { fs.unlinkSync(TEST_ENV_FILE); } catch { /* ignore */ }
+  try { fs.unlinkSync(TEST_LOCK_FILE); } catch { /* ignore */ }
 
   console.log('[global-teardown] Done.');
 }

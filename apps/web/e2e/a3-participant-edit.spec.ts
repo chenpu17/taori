@@ -54,6 +54,7 @@ test.beforeEach(async () => {
 test('A3 user can edit role label and remove a participant before launch', async ({
   page,
 }) => {
+  await page.setViewportSize({ width: 1024, height: 640 });
   await page.route('**/api.openai.invalid/**', (route) => route.abort());
 
   await page.goto('/');
@@ -67,6 +68,12 @@ test('A3 user can edit role label and remove a participant before launch', async
   await expect(dlg.getByTestId('roundtable-preview')).toBeVisible({
     timeout: 15_000,
   });
+  await expect(dlg.getByTestId('roundtable-launch-continue')).toBeVisible();
+  const continueBox = await dlg
+    .getByTestId('roundtable-launch-continue')
+    .boundingBox();
+  expect(continueBox).toBeTruthy();
+  expect(continueBox!.y + continueBox!.height).toBeLessThanOrEqual(640);
 
   // Three participants from analyzer fallback.
   const list = dlg.getByTestId('roundtable-participants-list');

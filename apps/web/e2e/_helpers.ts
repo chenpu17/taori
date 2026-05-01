@@ -11,11 +11,23 @@ export interface SidecarEnv {
 }
 
 export function readSidecarEnv(): SidecarEnv {
-  // Prefer .test-env written by global-setup (isolated test sidecar).
-  // Fall back to .env.local for backwards-compat standalone usage.
-  const envPath = fs.existsSync(TEST_ENV_FILE)
-    ? TEST_ENV_FILE
-    : path.resolve(HERE, '..', '.env.local');
+  // E2E tests must never fall back to the developer's .env.local: many specs
+  // call resetSidecar(), which would wipe the real dev.db/providers/models if
+  // another Playwright process removed .test-env mid-run.
+  if (!fs.existsSync(TEST_ENV_FILE)) {
+    if (process.env.ALLOW_E2E_DEV_SIDECAR === '1') {
+      const devEnvPath = path.resolve(HERE, '..', '.env.local');
+      return readEnvFile(devEnvPath);
+    }
+    throw new Error(
+      `missing isolated e2e env file: ${TEST_ENV_FILE}. ` +
+      'Run through Playwright globalSetup, or set ALLOW_E2E_DEV_SIDECAR=1 explicitly.',
+    );
+  }
+  return readEnvFile(TEST_ENV_FILE);
+}
+
+function readEnvFile(envPath: string): SidecarEnv {
   const raw = fs.readFileSync(envPath, 'utf8');
   const map: Record<string, string> = {};
   for (const line of raw.split('\n')) {
@@ -43,8 +55,10 @@ export async function authedFetch(
 
 /** Reset sidecar state to "no providers/models" so an Onboarding flow runs. */
 export async function resetSidecar(env: SidecarEnv): Promise<void> {
-  // Delete conversations first — clears history + sidebar entries (cascades
-  // to messages via FK; cost_records keep with conversation_id=NULL).
+  await authedFetch(env, '/v1/admin/clear-all-data', { method: 'POST' });
+
+  // Keep the legacy targeted cleanup as a compatibility fallback for older
+  // sidecars that may not yet implement the admin clear endpoint.
   const c = await authedFetch(env, '/v1/conversations');
   if (c.ok) {
     const { conversations } = (await c.json()) as { conversations: { id: string }[] };
@@ -65,6 +79,26 @@ export async function resetSidecar(env: SidecarEnv): Promise<void> {
     for (const x of providers) {
       await authedFetch(env, `/v1/providers/${x.id}`, { method: 'DELETE' });
     }
+  }
+
+  // E2E isolation also needs the renderer-side preference keys cleared;
+  // otherwise a previous spec can leak global budget / confirm gates into
+  // the next one even though chat/model state was reset.
+  const globalMemoryKeys = [
+    'monthly_budget_usd',
+    'monthly_budget_alert_state',
+    'cost_confirm_threshold_usd',
+    'cost_confirm_image_always',
+    'cost_confirm_disabled_models',
+    'cost_confirm_disabled_conversations',
+    'active_chat_model_id',
+  ];
+  for (const key of globalMemoryKeys) {
+    await authedFetch(
+      env,
+      `/v1/memories?scope=global&key=${encodeURIComponent(key)}`,
+      { method: 'DELETE' },
+    );
   }
 }
 

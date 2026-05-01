@@ -11,6 +11,8 @@ export const PROVIDER_TYPES = [
   // M2.5 — Volcengine Ark MaaS (one API key, many model families:
   // doubao chat/vision, doubao-seed image, wan/seedance video).
   'volcengine_ark',
+  // Huawei Cloud ModelArts MaaS (OpenAI-compatible chat + MaaS image API).
+  'huawei_maas',
 ] as const;
 export type ProviderType = (typeof PROVIDER_TYPES)[number];
 

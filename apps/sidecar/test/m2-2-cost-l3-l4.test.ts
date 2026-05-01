@@ -2,8 +2,9 @@
  * M2.2 — cost transparency L3 (stream badge) + L4 (confirm + session panel).
  *
  * Sidecar surface area:
- *   - GET /v1/costs/breakdown?scope={session|today|month} — per-(model, feature)
- *     aggregation for the session-cost panel (§3.3).
+ *   - GET /v1/costs/breakdown?scope={session|today|week|month}
+ *     + group_by={model_feature|model|conversation|feature}
+ *     aggregation for the session-cost panel and dashboard.
  *   - ModelsRepo.pickCheapestActive(capability, excludeId) — used by the
  *     confirm modal's "改用低成本模型" button (§3.2).
  *   - cost_confirm_* memories rely on the existing /v1/memories surface
@@ -18,7 +19,10 @@ import {
   CostsRepo,
   ProvidersRepo,
   ModelsRepo,
+  ConversationsRepo,
 } from '../src/db/repos/index.js';
+import { cost_records } from '../src/db/schema.js';
+import { eq } from 'drizzle-orm';
 import type { FastifyInstance } from 'fastify';
 import os from 'node:os';
 import path from 'node:path';
@@ -166,5 +170,127 @@ describe('M2.2 cost L3+L4', () => {
       headers: { authorization: `Bearer ${bearer}` },
     });
     expect(r.statusCode).toBe(400);
+  });
+
+  it('GET /v1/costs/breakdown?scope=week&group_by=model returns grouped rows with trends', async () => {
+    const pr = new ProvidersRepo(db).create({
+      name: 'P', type: 'openrouter', base_url: 'https://example.invalid', api_key: null,
+    });
+    const mr = new ModelsRepo(db);
+    const conv = new ConversationsRepo(db).create({ title: 'Weekly Spend' });
+    const alpha = mr.create({
+      provider_id: pr.id, model_name: 'alpha', capability: 'chat', display_name: 'Alpha', price_input_per_1m: 1,
+    });
+    const beta = mr.create({
+      provider_id: pr.id, model_name: 'beta', capability: 'chat', display_name: 'Beta', price_input_per_1m: 1,
+    });
+    const costs = new CostsRepo(db);
+    const now = new Date();
+    const monday = new Date(now);
+    monday.setDate(now.getDate() - ((now.getDay() + 6) % 7));
+    monday.setHours(9, 0, 0, 0);
+    const wednesday = new Date(monday);
+    wednesday.setDate(monday.getDate() + 2);
+    const lateWeek = new Date(now);
+    lateWeek.setHours(16, 0, 0, 0);
+
+    const alpha1 = costs.insert({
+      conversation_id: conv.id,
+      source_type: 'message',
+      source_id: 'msg_one',
+      feature: 'chat',
+      model_id: alpha.id,
+      model_name_snapshot: alpha.display_name,
+      actual_cost_usd: 1.25,
+      success: true,
+    });
+    db.update(cost_records).set({ created_at: monday.getTime() }).where(eq(cost_records.id, alpha1.id)).run();
+    const alpha2 = costs.insert({
+      conversation_id: conv.id,
+      source_type: 'message',
+      source_id: 'msg_two',
+      feature: 'chat',
+      model_id: alpha.id,
+      model_name_snapshot: alpha.display_name,
+      actual_cost_usd: 0.75,
+      success: false,
+    });
+    db.update(cost_records).set({ created_at: wednesday.getTime() }).where(eq(cost_records.id, alpha2.id)).run();
+    const beta1 = costs.insert({
+      conversation_id: conv.id,
+      source_type: 'message',
+      source_id: 'msg_three',
+      feature: 'chat',
+      model_id: beta.id,
+      model_name_snapshot: beta.display_name,
+      actual_cost_usd: 0.5,
+      success: true,
+    });
+    db.update(cost_records).set({ created_at: lateWeek.getTime() }).where(eq(cost_records.id, beta1.id)).run();
+
+    const r = await app.inject({
+      method: 'GET',
+      url: '/v1/costs/breakdown?scope=week&group_by=model',
+      headers: { authorization: `Bearer ${bearer}` },
+    });
+    expect(r.statusCode).toBe(200);
+    const body = r.json();
+    expect(body.ok).toBe(true);
+    expect(body.data.scope).toBe('week');
+    expect(body.data.group_by).toBe('model');
+    const alphaRow = body.data.rows.find((x: { key: string }) => x.key === alpha.id);
+    expect(alphaRow).toBeTruthy();
+    expect(alphaRow.label).toBe('Alpha');
+    expect(alphaRow.sum_usd).toBeCloseTo(2.0, 6);
+    expect(alphaRow.count).toBe(2);
+    expect(alphaRow.success_count).toBe(1);
+    expect(alphaRow.billed_failure_count).toBe(1);
+    expect(Array.isArray(alphaRow.trend)).toBe(true);
+    expect(alphaRow.trend.some((point: { sum_usd: number }) => point.sum_usd > 0)).toBe(true);
+  });
+
+  it('GET /v1/costs/breakdown?group_by=conversation uses conversation titles', async () => {
+    const pr = new ProvidersRepo(db).create({
+      name: 'P', type: 'openrouter', base_url: 'https://example.invalid', api_key: null,
+    });
+    const mr = new ModelsRepo(db);
+    const convRepo = new ConversationsRepo(db);
+    const named = convRepo.create({ title: 'Project Alpha' });
+    const untitled = convRepo.create({ title: null });
+    const model = mr.create({
+      provider_id: pr.id, model_name: 'alpha', capability: 'chat', display_name: 'Alpha', price_input_per_1m: 1,
+    });
+    const costs = new CostsRepo(db);
+    costs.insert({
+      conversation_id: named.id,
+      source_type: 'message',
+      source_id: 'msg_named',
+      feature: 'chat',
+      model_id: model.id,
+      model_name_snapshot: model.display_name,
+      actual_cost_usd: 0.4,
+      success: true,
+    });
+    costs.insert({
+      conversation_id: untitled.id,
+      source_type: 'message',
+      source_id: 'msg_untitled',
+      feature: 'chat',
+      model_id: model.id,
+      model_name_snapshot: model.display_name,
+      actual_cost_usd: 0.2,
+      success: true,
+    });
+
+    const r = await app.inject({
+      method: 'GET',
+      url: '/v1/costs/breakdown?scope=month&group_by=conversation',
+      headers: { authorization: `Bearer ${bearer}` },
+    });
+    expect(r.statusCode).toBe(200);
+    const body = r.json();
+    expect(body.data.group_by).toBe('conversation');
+    expect(body.data.rows.some((x: { label: string }) => x.label === 'Project Alpha')).toBe(true);
+    expect(body.data.rows.some((x: { label: string }) => x.label === '未命名会话')).toBe(true);
   });
 });

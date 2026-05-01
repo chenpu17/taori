@@ -24,7 +24,7 @@ import {
   ModelReorderRequestSchema,
   TaoriError,
 } from '@taori/shared';
-import { ProvidersRepo, ModelsRepo } from '../db/repos/index.js';
+import { ProvidersRepo, ModelsRepo, CostsRepo } from '../db/repos/index.js';
 import { classifyProviderError } from '../providers/registry.js';
 import type { BuildServerArgs } from '../server.js';
 
@@ -36,9 +36,29 @@ export function registerModelsRoute(
 ): void {
   const repo = new ModelsRepo(deps.db);
   const providersRepo = new ProvidersRepo(deps.db);
+  const costsRepo = new CostsRepo(deps.db);
 
   app.get('/v1/models', async () => {
     return { models: repo.list() };
+  });
+
+  app.get('/v1/models/health', async () => {
+    const health = costsRepo.modelHealth24h();
+    const rows = repo.list().map((model) => {
+      const row = health.get(model.id);
+      return (
+        row ?? {
+          model_id: model.id,
+          calls_24h: 0,
+          failures_24h: 0,
+          avg_first_token_ms: null,
+          avg_duration_ms: null,
+          last_failure_at: null,
+          last_failure_classification: null,
+        }
+      );
+    });
+    return { rows };
   });
 
   app.post('/v1/models', async (req, reply) => {
@@ -193,8 +213,8 @@ export function registerModelsRoute(
    * POST /v1/models/:id/test — MC-4 availability probe.
    *
    * Sends a 1-token "ping" through the configured provider so we can report a
-   * binary up/down + latency. Falls back to a synthetic OK when no API key is
-   * configured (so the M0/dev path keeps working without a network round-trip).
+   * binary up/down + latency. Missing credentials are reported as a failed
+   * probe so Model Center does not mark an unusable model as healthy.
    */
   app.post<{ Params: { id: string } }>(
     '/v1/models/:id/test',
@@ -209,9 +229,10 @@ export function registerModelsRoute(
       const provider = model.provider_id ? providersRepo.get(model.provider_id) : null;
       if (!provider || !provider.api_key_ref) {
         return {
-          ok: true,
+          ok: false,
           latency_ms: 0,
           note: 'no_api_key_configured',
+          error: { classification: 'key_missing', message: 'API key is not configured' },
         };
       }
       const apiKey = await deps.keystore.read(provider.api_key_ref).catch(() => null);

@@ -11,6 +11,9 @@
  */
 
 import {
+  sql,
+} from 'drizzle-orm';
+import {
   sqliteTable,
   text,
   integer,
@@ -164,13 +167,31 @@ export const memories = sqliteTable(
     updated_at: integer('updated_at').notNull(),
   },
   (t) => ({
-    uniqIdx: uniqueIndex('memories_scope_key_uniq').on(
+    uniqIdx: uniqueIndex('memories_scope_key_uniq_v2').on(
       t.scope,
-      t.scope_id,
+      sql`COALESCE(${t.scope_id}, '')`,
       t.key,
     ),
   }),
 );
+
+export const prompt_templates = sqliteTable('prompt_templates', {
+  id: text('id').primaryKey(),
+  name: text('name').notNull(),
+  description: text('description'),
+  content: text('content').notNull(),
+  created_at: integer('created_at').notNull(),
+  updated_at: integer('updated_at').notNull(),
+});
+
+export const personas = sqliteTable('personas', {
+  id: text('id').primaryKey(),
+  name: text('name').notNull(),
+  description: text('description'),
+  prompt: text('prompt').notNull(),
+  created_at: integer('created_at').notNull(),
+  updated_at: integer('updated_at').notNull(),
+});
 
 export const cost_records = sqliteTable(
   'cost_records',
@@ -195,6 +216,8 @@ export const cost_records = sqliteTable(
     estimated_cost_usd: real('estimated_cost_usd'),
     actual_cost_usd: real('actual_cost_usd'),
     success: integer('success', { mode: 'boolean' }).notNull().default(true),
+    classification: text('classification'),
+    first_token_ms: integer('first_token_ms'),
     duration_ms: integer('duration_ms'),
     created_at: integer('created_at').notNull(),
   },

@@ -1,4 +1,4 @@
-import { test, expect } from '@playwright/test';
+import { test, expect, type Page } from '@playwright/test';
 import { readSidecarEnv, resetSidecar, seedDefaultModel, authedFetch } from './_helpers';
 
 /**
@@ -12,7 +12,17 @@ test.beforeEach(async () => {
   await seedDefaultModel(env);
 });
 
+async function suppressTips(page: Page): Promise<void> {
+  await page.addInitScript(() => {
+    localStorage.setItem('tip_image_first_seen', 'true');
+    localStorage.setItem('tip_fallback_first_seen', 'true');
+    localStorage.setItem('tip_cost_first_seen', 'true');
+    localStorage.setItem('tip_roundtable_first_seen', 'true');
+  });
+}
+
 test('M2.2 L3: stream cost badge appears + click expands details', async ({ page }) => {
+  await suppressTips(page);
   await page.goto('/');
   await expect(page.getByTestId('chat-panel')).toBeVisible({ timeout: 10_000 });
 
@@ -39,6 +49,19 @@ test('M2.2 L3: stream cost badge appears + click expands details', async ({ page
 
 test('M2.2 L4: confirm modal triggers when estimate exceeds threshold', async ({ page }) => {
   const env = readSidecarEnv();
+  const providers = (await (await authedFetch(env, '/v1/providers')).json()) as {
+    providers: Array<{ id: string }>;
+  };
+  await authedFetch(env, '/v1/models', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      provider_id: providers.providers[0]!.id,
+      model_name: 'unknown-price-peer',
+      capability: 'chat',
+      display_name: 'Unknown Price Peer',
+    }),
+  });
   // Force threshold to a near-zero value so any non-empty input triggers.
   await authedFetch(env, '/v1/memories', {
     method: 'PUT',
@@ -49,6 +72,7 @@ test('M2.2 L4: confirm modal triggers when estimate exceeds threshold', async ({
     }),
   });
 
+  await suppressTips(page);
   await page.goto('/');
   await expect(page.getByTestId('chat-panel')).toBeVisible({ timeout: 10_000 });
 
@@ -59,7 +83,15 @@ test('M2.2 L4: confirm modal triggers when estimate exceeds threshold', async ({
   await expect(page.getByTestId('cost-confirm-dialog')).toBeVisible({ timeout: 5_000 });
   await expect(page.getByTestId('cost-confirm-continue')).toBeVisible();
   await expect(page.getByTestId('cost-confirm-cheaper')).toBeVisible();
+  await expect(page.getByTestId('cost-confirm-cheaper')).toBeDisabled();
+  await expect(page.getByTestId('cost-confirm-cheaper')).toHaveAttribute(
+    'title',
+    '没有已知价格更低的同能力模型可切换',
+  );
   await expect(page.getByTestId('cost-confirm-cancel')).toBeVisible();
+  await expect(page.getByTestId('cost-confirm-rationale')).toContainText('触发原因');
+  await expect(page.getByTestId('cost-confirm-rationale')).toContainText('下一步');
+  await expect(page.getByTestId('cost-confirm-rationale')).toContainText('没有已知价格更低');
 
   // Cancel: modal closes, no assistant message appears.
   await page.getByTestId('cost-confirm-cancel').click();
@@ -79,6 +111,7 @@ test('M2.2 L4: continue path proceeds with submission', async ({ page }) => {
     }),
   });
 
+  await suppressTips(page);
   await page.goto('/');
   await expect(page.getByTestId('chat-panel')).toBeVisible({ timeout: 10_000 });
   await page.getByTestId('composer-input').fill('please continue');
@@ -103,6 +136,7 @@ test('M2.2 L4: session cost panel opens on cost-bar click + shows breakdown', as
     }),
   });
 
+  await suppressTips(page);
   await page.goto('/');
   await expect(page.getByTestId('chat-panel')).toBeVisible({ timeout: 10_000 });
 

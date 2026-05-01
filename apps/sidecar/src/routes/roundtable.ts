@@ -27,6 +27,7 @@ import {
   RoundtableMessagesRepo,
   RoundtablesRepo,
 } from '../db/repos/index.js';
+import type { Model } from '@taori/shared';
 import type { BuildServerArgs } from '../server.js';
 import {
   pickAnalyzerModel,
@@ -65,6 +66,35 @@ export function registerRoundtableRoute(
   // introduced, migrate this to a SQLite advisory flag or external lock.
   const inFlightStreams = new Set<string>();
 
+  const resolveRoundtableChatModel = (modelId: string, purpose: string): Model => {
+    const m = modelsRepo.get(modelId);
+    if (!m) {
+      throw new TaoriError({
+        code: 'validation_error',
+        message: `${purpose}模型不存在：${modelId}`,
+      });
+    }
+    if (m.capability !== 'chat') {
+      throw new TaoriError({
+        code: 'validation_error',
+        message: `${purpose}模型 ${m.display_name} 非 chat 能力`,
+      });
+    }
+    if (!m.enabled || (m.disabled_until && m.disabled_until > Date.now())) {
+      throw new TaoriError({
+        code: 'validation_error',
+        message: `${purpose}模型 ${m.display_name} 当前不可用`,
+      });
+    }
+    if (!m.provider_id || !providersRepo.get(m.provider_id)) {
+      throw new TaoriError({
+        code: 'validation_error',
+        message: `${purpose}模型 ${m.display_name} 的提供商不可用`,
+      });
+    }
+    return m;
+  };
+
   app.post('/v1/roundtable', async (req, reply) => {
     const parsed = CreateRoundtableRequestSchema.safeParse(req.body);
     if (!parsed.success) {
@@ -76,7 +106,23 @@ export function registerRoundtableRoute(
       });
     }
     const body = parsed.data;
-    const conv = convRepo.ensure(body.conversation_id, { type: 'roundtable' });
+    const requestedConv = body.conversation_id
+      ? convRepo.get(body.conversation_id)
+      : null;
+    let originConversationId =
+      body.origin_conversation_id ??
+      (requestedConv?.type === 'chat' ? requestedConv.id : null);
+    if (originConversationId) {
+      const origin = convRepo.get(originConversationId);
+      if (!origin || origin.type !== 'chat') originConversationId = null;
+    }
+    const conv =
+      requestedConv?.type === 'roundtable'
+        ? requestedConv
+        : convRepo.ensure(
+            requestedConv ? undefined : body.conversation_id,
+            { type: 'roundtable' },
+          );
     const requestedMode = body.mode ?? 'auto';
 
     const allEnabledChat = modelsRepo
@@ -102,7 +148,9 @@ export function registerRoundtableRoute(
       display_name: m.display_name,
       model_name: m.model_name,
     }));
-    const analyzerModel = pickAnalyzerModel(modelsRepo, memoriesRepo);
+    const analyzerModel = body.analyzer_model_id
+      ? resolveRoundtableChatModel(body.analyzer_model_id, '分析')
+      : pickAnalyzerModel(modelsRepo, memoriesRepo);
     const analyzerProvider = analyzerModel?.provider_id
       ? providersRepo.get(analyzerModel.provider_id)
       : null;
@@ -154,6 +202,16 @@ export function registerRoundtableRoute(
         summarizerModelId: fallbackModels[0]!.id,
         requestedMode,
       });
+    }
+    if (body.summarizer_model_id) {
+      const summarizerOverride = resolveRoundtableChatModel(
+        body.summarizer_model_id,
+        '总结',
+      );
+      analyzerOutput = {
+        ...analyzerOutput,
+        summarizer_model_id: summarizerOverride.id,
+      };
     }
 
     const participantModels = analyzerOutput.participants
@@ -236,7 +294,7 @@ export function registerRoundtableRoute(
       mode: analyzerOutput.suggested_mode,
       participants: analyzerOutput.participants,
       summarizer_model_id: analyzerOutput.summarizer_model_id,
-      origin_conversation_id: body.origin_conversation_id ?? null,
+      origin_conversation_id: originConversationId,
       analyzer_fallback: analyzerFailed,
       status: 'analyzing',
       current_round: 0,
@@ -430,9 +488,9 @@ export function registerRoundtableRoute(
    *   - Target conversation: prefer roundtable.origin_conversation_id; if
    *     null (or the original conv was deleted), mint a fresh chat conv
    *     and write into that one.
-   *   - Idempotent in spirit: nothing prevents the user from clicking
-   *     twice — each click appends another assistant message. The renderer
-   *     is responsible for one-shot UX (disable button after click).
+   *   - Idempotent by a deterministic message id; auto-loopback, reload, and
+   *     manual click all resolve to the same assistant message without
+   *     polluting chat content with technical markers.
    *   - Returns { conversation_id, message_id } so the renderer can switch
    *     active conversation and refresh.
    */
@@ -459,6 +517,26 @@ export function registerRoundtableRoute(
         });
       }
 
+      const loopbackMessageId = `message_roundtable_loopback_${rt.id}`;
+      const topicMessageId = `message_roundtable_topic_${rt.id}`;
+      const existing = messagesRepo.getById(loopbackMessageId);
+      if (existing) {
+        if (!messagesRepo.getById(topicMessageId)) {
+          messagesRepo.insert({
+            id: topicMessageId,
+            conversation_id: existing.conversation_id,
+            role: 'user',
+            content: `发起圆桌讨论：${rt.topic}`,
+            status: 'complete',
+          });
+          convRepo.touch(existing.conversation_id);
+        }
+        return reply.code(200).send({
+          conversation_id: existing.conversation_id,
+          message_id: existing.id,
+        });
+      }
+
       let targetConvId: string | null = null;
       if (rt.origin_conversation_id) {
         const exists = convRepo.get(rt.origin_conversation_id);
@@ -470,11 +548,22 @@ export function registerRoundtableRoute(
           title: `圆桌结论：${rt.topic.slice(0, 40)}`,
         });
         targetConvId = fresh.id;
+        rtRepo.setOriginConversation(rt.id, targetConvId);
       }
 
       const summaryMd = renderRoundtableSummaryMarkdown(rt.summary);
       const header = `> 🔍 来自圆桌讨论 · ${rt.topic}\n\n`;
+      if (!messagesRepo.getById(topicMessageId)) {
+        messagesRepo.insert({
+          id: topicMessageId,
+          conversation_id: targetConvId,
+          role: 'user',
+          content: `发起圆桌讨论：${rt.topic}`,
+          status: 'complete',
+        });
+      }
       const inserted = messagesRepo.insert({
+        id: loopbackMessageId,
         conversation_id: targetConvId,
         role: 'assistant',
         content: header + summaryMd,
@@ -498,7 +587,7 @@ export function registerRoundtableRoute(
   app.get<{ Params: { id: string } }>(
     '/v1/conversations/:id/roundtable',
     async (req) => {
-      const list = rtRepo.listByConversation(req.params.id);
+      const list = rtRepo.listByAssociatedConversation(req.params.id);
       const last = list[list.length - 1];
       return { roundtable_id: last?.id ?? null };
     },
@@ -959,6 +1048,16 @@ export function registerRoundtableRoute(
   app.post<{ Params: { id: string } }>(
     '/v1/roundtable/:id/summarize',
     async (req, reply) => {
+      const Body = z
+        .object({ model_id: z.string().min(1).optional() })
+        .optional();
+      const parsedBody = Body.safeParse(req.body);
+      if (!parsedBody.success) {
+        throw new TaoriError({
+          code: 'validation_error',
+          message: parsedBody.error.message,
+        });
+      }
       const rt = rtRepo.get(req.params.id);
       if (!rt) {
         throw new TaoriError({
@@ -1005,6 +1104,37 @@ export function registerRoundtableRoute(
           message: 'no_content_to_summarize',
           details: { hint: '没有任何完成的发言可总结' },
         });
+      }
+
+      let summaryRt = rt;
+      const overrideModelId = parsedBody.data?.model_id;
+      if (overrideModelId && overrideModelId !== rt.summarizer_model_id) {
+        const m = modelsRepo.get(overrideModelId);
+        if (!m) {
+          throw new TaoriError({
+            code: 'validation_error',
+            message: `模型不存在：${overrideModelId}`,
+          });
+        }
+        if (m.capability !== 'chat') {
+          throw new TaoriError({
+            code: 'validation_error',
+            message: `模型 ${m.display_name} 非 chat 能力，不能用于圆桌总结`,
+          });
+        }
+        if (!m.enabled || (m.disabled_until && m.disabled_until > Date.now())) {
+          throw new TaoriError({
+            code: 'validation_error',
+            message: `模型 ${m.display_name} 当前不可用`,
+          });
+        }
+        if (!m.provider_id || !providersRepo.get(m.provider_id)) {
+          throw new TaoriError({
+            code: 'validation_error',
+            message: `模型 ${m.display_name} 的提供商不可用`,
+          });
+        }
+        summaryRt = rtRepo.setSummarizerModel(rt.id, m.id) ?? rt;
       }
 
       const revertStatus = rt.status; // 'round1' | 'round2'
@@ -1061,7 +1191,7 @@ export function registerRoundtableRoute(
             log: req.log,
           },
           {
-            roundtable: { ...rt, status: 'summarizing' },
+            roundtable: { ...summaryRt, status: 'summarizing' },
             messages,
             stream,
             signal: abortController.signal,

@@ -175,6 +175,36 @@ export const ARK_FAMILIES: ArkFamily[] = Object.entries(ARK_METADATA).map(([name
 
 // ─── Inference helpers ────────────────────────────────────────────────────────
 
+function stripArkVersionSuffix(id: string): string {
+  return id
+    .toLowerCase()
+    .trim()
+    .replace(/-\d{6,8}$/, '');
+}
+
+function metadataForArkModel(id: string, familyName?: string | null): Omit<ArkFamily, 'model_name' | 'display_name'> | null {
+  const candidates = [
+    id,
+    familyName ?? '',
+    stripArkVersionSuffix(id),
+    familyName ? stripArkVersionSuffix(familyName) : '',
+  ].filter(Boolean);
+
+  for (const candidate of candidates) {
+    const exact = ARK_METADATA[candidate];
+    if (exact) return exact;
+  }
+
+  // Ark `/models` commonly returns endpoint ids with a date/version suffix,
+  // e.g. doubao-1-5-lite-32k-250115. Prefer the longest catalog prefix so
+  // specific families win over broader names.
+  const normalized = stripArkVersionSuffix(id);
+  const prefix = Object.keys(ARK_METADATA)
+    .filter((key) => normalized === key || normalized.startsWith(`${key}-`))
+    .sort((a, b) => b.length - a.length)[0];
+  return prefix ? ARK_METADATA[prefix]! : null;
+}
+
 function inferCapability(id: string): DiscoveredModel['capability'] {
   const s = id.toLowerCase();
   if (s.includes('-t2i') || s.includes('seedream') || s.includes('seededit')) return 'image';
@@ -230,6 +260,24 @@ function buildDisplayName(id: string, familyName: string): string {
     : id.includes('-4k') ? ' · 4K'
     : '';
   return pretty + ctxHint;
+}
+
+export function enrichVolcengineArkModel(modelName: string): DiscoveredModel | null {
+  const meta = metadataForArkModel(modelName);
+  if (!meta) return null;
+  return {
+    model_name: modelName,
+    display_name: buildDisplayName(modelName, stripArkVersionSuffix(modelName)),
+    capability: meta.capability,
+    price_input_per_1m: meta.price_input_per_1m,
+    price_output_per_1m: meta.price_output_per_1m,
+    price_per_image: meta.price_per_image,
+    price_per_video_second: meta.price_per_video_second,
+    modalities: meta.modalities,
+    context_length: meta.context_length,
+    supports_vision: meta.supports_vision,
+    supports_tools: meta.supports_tools,
+  };
 }
 
 // ─── Ark /models API shape ────────────────────────────────────────────────────
@@ -292,8 +340,7 @@ export async function listVolcengineArkModels(
   const visible = apiModels.filter((m) => m.status == null || (m.status !== 'Shutdown' && m.status !== 'Retiring'));
 
   return visible.map((m): DiscoveredModel => {
-    // Lookup: exact id → family name → inference
-    const meta = ARK_METADATA[m.id] ?? ARK_METADATA[m.name] ?? null;
+    const meta = metadataForArkModel(m.id, m.name);
     const cap = meta?.capability ?? inferCapability(m.id);
     return {
       model_name: m.id,

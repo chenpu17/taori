@@ -22,6 +22,7 @@ import type {
   DiscoveredModel,
 } from '@taori/shared';
 import { listProviderModels } from '../providers/registry.js';
+import { enrichVolcengineArkModel } from '../providers/volcengine_ark.js';
 import type { KeyStore } from '../keystore.js';
 import type { ModelsRepo, ProvidersRepo } from '../db/repos/index.js';
 
@@ -41,6 +42,30 @@ function priceChanged(a: number | null, b: number | null): boolean {
   return Math.abs(a - b) > PRICE_EPSILON;
 }
 
+function catalogPatch(dm: DiscoveredModel): Parameters<ModelsRepo['patchPricing']>[2] {
+  return {
+    price_input_per_1m: dm.price_input_per_1m,
+    price_output_per_1m: dm.price_output_per_1m,
+    price_per_image: dm.price_per_image ?? null,
+    price_per_video_second: dm.price_per_video_second ?? null,
+    modalities: dm.modalities,
+    capability: dm.capability,
+    context_length: dm.context_length,
+    supports_vision: dm.supports_vision,
+    supports_tools: dm.supports_tools ?? false,
+  };
+}
+
+function capabilityPatch(dm: DiscoveredModel): Parameters<ModelsRepo['patchPricing']>[2] {
+  return {
+    modalities: dm.modalities,
+    capability: dm.capability,
+    context_length: dm.context_length,
+    supports_vision: dm.supports_vision,
+    supports_tools: dm.supports_tools ?? false,
+  };
+}
+
 export async function syncCatalog(
   deps: CatalogSyncDeps,
   filterProviderId?: string,
@@ -56,6 +81,18 @@ export async function syncCatalog(
   let totalModels = 0;
 
   for (const provider of targets) {
+    if (provider.type === 'volcengine_ark') {
+      const existing = deps.models
+        .list()
+        .filter((m) => m.provider_id === provider.id);
+      for (const model of existing) {
+        const enriched = enrichVolcengineArkModel(model.model_name);
+        if (enriched) {
+          deps.models.patchPricing(provider.id, model.model_name, capabilityPatch(enriched));
+        }
+      }
+    }
+
     if (!provider.api_key_ref) continue;
     let apiKey: string | null = null;
     try {
@@ -126,7 +163,9 @@ export async function syncCatalog(
           display_name: dm.display_name,
           change: 'unchanged',
         });
-        deps.models.patchPricing(provider.id, dm.model_name, {});
+        // "Unchanged" only means no visible price delta. Capability metadata
+        // still needs refreshing so old imports gain newly-known tool support.
+        deps.models.patchPricing(provider.id, dm.model_name, catalogPatch(dm));
         continue;
       }
 
@@ -146,15 +185,7 @@ export async function syncCatalog(
           price_per_image: dm.price_per_image ?? null,
         },
       });
-      deps.models.patchPricing(provider.id, dm.model_name, {
-        price_input_per_1m: dm.price_input_per_1m,
-        price_output_per_1m: dm.price_output_per_1m,
-        price_per_image: dm.price_per_image ?? null,
-        price_per_video_second: dm.price_per_video_second ?? null,
-        modalities: dm.modalities,
-        context_length: dm.context_length,
-        supports_vision: dm.supports_vision,
-      });
+      deps.models.patchPricing(provider.id, dm.model_name, catalogPatch(dm));
     }
   }
 

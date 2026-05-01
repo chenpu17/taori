@@ -51,6 +51,28 @@ describe('classifyProviderError (spec §7.5.2)', () => {
       'content_filter',
     );
   });
+
+  it('AI_RetryError lastError status/message → quota or rate_limit', () => {
+    const quota = Object.assign(new Error('Failed after retries'), {
+      name: 'AI_RetryError',
+      lastError: Object.assign(new Error('You exceeded your current quota'), {
+        statusCode: 429,
+      }),
+    });
+    expect(classifyProviderError({ err: quota }).classification).toBe('quota');
+
+    const rateLimit = Object.assign(new Error('Failed after retries'), {
+      name: 'AI_RetryError',
+      errors: [
+        Object.assign(new Error('Too many requests'), {
+          statusCode: 429,
+        }),
+      ],
+    });
+    expect(classifyProviderError({ err: rateLimit }).classification).toBe(
+      'rate_limit',
+    );
+  });
 });
 
 describe('ModelsRepo demote/disable (spec §7.5.2)', () => {

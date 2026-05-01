@@ -12,12 +12,13 @@
  * Auto-fallback, Provider deletion, and the Danger Zone.
  */
 
-import { useEffect, useMemo, useState } from 'react';
+import { Fragment, useEffect, useMemo, useState } from 'react';
 import type { FormEvent, JSX } from 'react';
 import { api } from './api.js';
 import {
   formatUsd,
   type Model,
+  type ModelHealthRow,
   type ModelCapability,
   type ModelDiscoveryResponse,
   type Provider,
@@ -48,11 +49,38 @@ interface SyncSummary {
   }[];
 }
 
+const FAILURE_LABELS: Record<string, string> = {
+  rate_limit: '限流',
+  quota: '额度耗尽',
+  network: '网络失败',
+  auth: '鉴权失败',
+  content_filter: '内容拦截',
+  unknown: '未知失败',
+  key_missing: 'Key 缺失',
+};
+
+function formatMetricMs(value: number | null): string {
+  if (value == null || !Number.isFinite(value)) return '—';
+  return `${Math.round(value)}ms`;
+}
+
+function formatAgo(ts: number | null): string {
+  if (ts == null) return '—';
+  const diff = Math.max(0, Date.now() - ts);
+  const minute = 60 * 1000;
+  const hour = 60 * minute;
+  if (diff < minute) return '刚刚';
+  if (diff < hour) return `${Math.floor(diff / minute)} 分钟前`;
+  return `${Math.floor(diff / hour)} 小时前`;
+}
+
 export function ModelCenter({
   onClose,
+  onChanged,
   onReopenOnboarding,
 }: {
   onClose: () => void;
+  onChanged?: () => void;
   onReopenOnboarding: () => void;
 }): JSX.Element {
   const [activeTab, setActiveTab] = useState<ModelCapability>('chat');
@@ -63,6 +91,8 @@ export function ModelCenter({
   const [syncing, setSyncing] = useState(false);
   const [syncSummary, setSyncSummary] = useState<SyncSummary | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [healthRows, setHealthRows] = useState<Map<string, ModelHealthRow>>(new Map());
+  const [expandedModelId, setExpandedModelId] = useState<string | null>(null);
   const [importDrawer, setImportDrawer] = useState<{
     capability: ModelCapability;
     providerId: string | null;
@@ -71,13 +101,15 @@ export function ModelCenter({
   const refresh = async (): Promise<void> => {
     setLoading(true);
     try {
-      const [{ providers: ps }, { models: ms }, keyStatusRes] = await Promise.all([
+      const [{ providers: ps }, { models: ms }, keyStatusRes, healthRes] = await Promise.all([
         api.listProviders(),
         api.listModels(),
         api.providerKeyStatus().catch(() => ({ statuses: [] })),
+        api.modelsHealth().catch(() => ({ rows: [] })),
       ]);
       setProviders(ps);
       setModels(ms);
+      setHealthRows(new Map(healthRes.rows.map((row) => [row.model_id, row])));
       const ksMap = new Map<string, boolean>();
       for (const s of keyStatusRes.statuses) ksMap.set(s.provider_id, s.key_available);
       setKeyStatus(ksMap);
@@ -141,6 +173,7 @@ export function ModelCenter({
         diffs: res.diffs.filter((d) => d.change !== 'unchanged').slice(0, 50),
       });
       await refresh();
+      onChanged?.();
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
@@ -152,6 +185,7 @@ export function ModelCenter({
     try {
       await api.updateModel(m.id, { enabled: !m.enabled });
       await refresh();
+      onChanged?.();
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     }
@@ -161,6 +195,7 @@ export function ModelCenter({
     try {
       await api.setDefaultModel(m.id, m.capability as ModelCapability);
       await refresh();
+      onChanged?.();
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     }
@@ -171,6 +206,7 @@ export function ModelCenter({
     try {
       await api.deleteModel(m.id);
       await refresh();
+      onChanged?.();
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     }
@@ -181,6 +217,7 @@ export function ModelCenter({
     try {
       await api.deleteProvider(p.id);
       await refresh();
+      onChanged?.();
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     }
@@ -200,6 +237,7 @@ export function ModelCenter({
     try {
       await api.reorderModels(m.capability as ModelCapability, next.map((x) => x.id));
       await refresh();
+      onChanged?.();
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     }
@@ -213,6 +251,7 @@ export function ModelCenter({
       await api.updateModel(editing.id, patch);
       setEditing(null);
       await refresh();
+      onChanged?.();
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     }
@@ -259,7 +298,10 @@ export function ModelCenter({
   const tab = CAPABILITY_TABS.find((t) => t.id === activeTab)!;
 
   return (
-    <div className="model-center" data-testid="model-center">
+    <div
+      className={`model-center${editing ? ' is-editing' : ''}`}
+      data-testid="model-center"
+    >
       <header className="model-center__header">
         <div>
           <h2>模型中心</h2>
@@ -434,93 +476,111 @@ export function ModelCenter({
                 const isFirstInCap = idxInCap === 0;
                 const isLastInCap = idxInCap === sameCapList.length - 1;
                 return (
-                  <tr key={m.id} data-testid={`model-row-${m.id}`}>
-                    <td>
-                      <div className="model-cell-name">
-                        <strong>{m.alias ?? m.display_name ?? m.model_name}</strong>
-                        {isDefault && <span className="badge badge--default">默认</span>}
-                        {m.demoted && (
-                          <span
-                            className="badge badge--demoted"
-                            title="该模型被自动降级（连续失败）"
-                            data-testid={`model-row-demoted-${m.id}`}
-                          >
-                            ⚠️ 降级
+                  <Fragment key={m.id}>
+                    <tr data-testid={`model-row-${m.id}`}>
+                      <td>
+                        <div className="model-cell-name">
+                          <strong>{m.alias ?? m.display_name ?? m.model_name}</strong>
+                          {isDefault && <span className="badge badge--default">默认</span>}
+                          {m.demoted && (
+                            <span
+                              className="badge badge--demoted"
+                              title="该模型被自动降级（连续失败）"
+                              data-testid={`model-row-demoted-${m.id}`}
+                            >
+                              ⚠️ 降级
+                            </span>
+                          )}
+                        </div>
+                        <div className="model-cell-id">{m.model_name}</div>
+                      </td>
+                      <td>
+                        {prov ? (
+                          <span className="model-cell-provider">
+                            {prov.name} · <em>{prov.type}</em>
                           </span>
+                        ) : (
+                          '—'
                         )}
-                      </div>
-                      <div className="model-cell-id">{m.model_name}</div>
-                    </td>
-                    <td>
-                      {prov ? (
-                        <span className="model-cell-provider">
-                          {prov.name} · <em>{prov.type}</em>
-                        </span>
-                      ) : (
-                        '—'
-                      )}
-                    </td>
-                    <td>{priceCell}</td>
-                    <td>
-                      <label className="switch">
-                        <input
-                          type="checkbox"
-                          checked={m.enabled}
-                          onChange={() => void onToggleEnabled(m)}
-                          data-testid={`model-row-enabled-${m.id}`}
-                        />
-                        <span>{m.enabled ? '启用' : '禁用'}</span>
-                      </label>
-                    </td>
-                    <td>
-                      <div className="model-cell-actions">
-                        <button
-                          type="button"
-                          onClick={() => void onMove(m, -1)}
-                          disabled={isFirstInCap}
-                          data-testid={`model-row-up-${m.id}`}
-                          title="上移（兜底优先级 +1）"
-                          aria-label="上移"
-                        >
-                          ▲
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => void onMove(m, 1)}
-                          disabled={isLastInCap}
-                          data-testid={`model-row-down-${m.id}`}
-                          title="下移（兜底优先级 -1）"
-                          aria-label="下移"
-                        >
-                          ▼
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => void onSetDefault(m)}
-                          disabled={isDefault}
-                          data-testid={`model-row-default-${m.id}`}
-                        >
-                          {isDefault ? '已是默认' : '设为默认'}
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => setEditing(m)}
-                          data-testid={`model-edit-${m.id}`}
-                          title="编辑模型（重命名 / 改价格 / 改能力）"
-                        >
-                          编辑
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => void onDelete(m)}
-                          data-testid={`model-row-delete-${m.id}`}
-                          title="删除模型"
-                        >
-                          删除
-                        </button>
-                      </div>
-                    </td>
-                  </tr>
+                      </td>
+                      <td>{priceCell}</td>
+                      <td>
+                        <label className="switch">
+                          <input
+                            type="checkbox"
+                            checked={m.enabled}
+                            onChange={() => void onToggleEnabled(m)}
+                            data-testid={`model-row-enabled-${m.id}`}
+                          />
+                          <span>{m.enabled ? '启用' : '禁用'}</span>
+                        </label>
+                      </td>
+                      <td>
+                        <div className="model-cell-actions">
+                          <button
+                            type="button"
+                            onClick={() => void onMove(m, -1)}
+                            disabled={isFirstInCap}
+                            data-testid={`model-row-up-${m.id}`}
+                            title="上移（兜底优先级 +1）"
+                            aria-label="上移"
+                          >
+                            ▲
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => void onMove(m, 1)}
+                            disabled={isLastInCap}
+                            data-testid={`model-row-down-${m.id}`}
+                            title="下移（兜底优先级 -1）"
+                            aria-label="下移"
+                          >
+                            ▼
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => void onSetDefault(m)}
+                            disabled={isDefault}
+                            data-testid={`model-row-default-${m.id}`}
+                          >
+                            {isDefault ? '已是默认' : '设为默认'}
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() =>
+                              setExpandedModelId((current) => (current === m.id ? null : m.id))
+                            }
+                            data-testid={`model-health-toggle-${m.id}`}
+                          >
+                            {expandedModelId === m.id ? '收起健康' : '健康'}
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => setEditing(m)}
+                            data-testid={`model-edit-${m.id}`}
+                            title="编辑模型（重命名 / 改价格 / 改能力）"
+                          >
+                            编辑
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => void onDelete(m)}
+                            data-testid={`model-row-delete-${m.id}`}
+                            title="删除模型"
+                          >
+                            删除
+                          </button>
+                        </div>
+                      </td>
+                    </tr>
+                    {expandedModelId === m.id && (
+                      <tr className="model-health-row" data-testid={`model-health-panel-${m.id}`}>
+                        <td colSpan={5}>
+                          <ModelHealthPanel health={healthRows.get(m.id) ?? null} />
+                        </td>
+                      </tr>
+                    )}
+                  </Fragment>
                 );
               })}
             </tbody>
@@ -538,6 +598,7 @@ export function ModelCenter({
           onImported={async () => {
             setImportDrawer(null);
             await refresh();
+            onChanged?.();
           }}
         />
       )}
@@ -548,6 +609,53 @@ export function ModelCenter({
           onSave={(patch) => void onSaveEdit(patch)}
         />
       )}
+    </div>
+  );
+}
+
+function ModelHealthPanel({
+  health,
+}: {
+  health: ModelHealthRow | null;
+}): JSX.Element {
+  const row = health ?? {
+    model_id: '',
+    calls_24h: 0,
+    failures_24h: 0,
+    avg_first_token_ms: null,
+    avg_duration_ms: null,
+    last_failure_at: null,
+    last_failure_classification: null,
+  };
+
+  const lastFailureText = row.last_failure_classification
+    ? `${FAILURE_LABELS[row.last_failure_classification] ?? row.last_failure_classification} · ${formatAgo(row.last_failure_at)}`
+    : '—';
+
+  return (
+    <div className="model-health-panel">
+      <div className="model-health-panel__cards">
+        <article className="model-health-card">
+          <span className="model-health-card__label">最近 24h 调用</span>
+          <strong data-testid="model-health-calls">{row.calls_24h}</strong>
+        </article>
+        <article className="model-health-card">
+          <span className="model-health-card__label">最近 24h 失败</span>
+          <strong data-testid="model-health-failures">{row.failures_24h}</strong>
+        </article>
+        <article className="model-health-card">
+          <span className="model-health-card__label">平均首字延迟</span>
+          <strong data-testid="model-health-ttfb">{formatMetricMs(row.avg_first_token_ms)}</strong>
+        </article>
+        <article className="model-health-card">
+          <span className="model-health-card__label">平均总耗时</span>
+          <strong>{formatMetricMs(row.avg_duration_ms)}</strong>
+        </article>
+      </div>
+      <div className="model-health-panel__footer">
+        <span className="model-health-panel__footer-label">最近失败分类</span>
+        <strong data-testid="model-health-last-failure">{lastFailureText}</strong>
+      </div>
     </div>
   );
 }

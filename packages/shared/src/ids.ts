@@ -16,6 +16,8 @@ export const ID_PREFIXES = {
   roundtable_message: 'rtmsg_',
   cost: 'cost_',
   memory: 'mem_',
+  prompt_template: 'ptpl_',
+  persona: 'per_',
 } as const;
 
 export type IdPrefixKey = keyof typeof ID_PREFIXES;

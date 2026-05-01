@@ -1,11 +1,11 @@
 /**
- * A4 — round-table conclusion can be sent back to the original chat
- * conversation as an assistant message ("↪ 带回原对话继续聊天").
+ * A4 — round-table conclusion is written back to a chat conversation as an
+ * assistant message, then the user can jump there to keep chatting.
  *
  * We launch a roundtable from a fresh state (no active chat conv), drive it
- * to a completed summary, then click the loopback button. The panel should
- * close, the chat panel should switch to the new chat conversation, and the
- * persisted assistant message should contain the summary body.
+ * to a completed summary. The panel should auto-persist the conclusion once,
+ * then the loopback button should close the panel, switch to the chat
+ * conversation, and show the persisted assistant message.
  */
 import { test, expect } from '@playwright/test';
 import {
@@ -100,24 +100,26 @@ test('A4 user can write the round-table conclusion back into a chat conversation
     timeout: 30_000,
   });
 
-  // Loopback button is visible. Click it.
+  // Loopback auto-persisted; clicking the button now navigates to that chat.
   const loopback = panel.getByTestId('roundtable-loopback');
   await expect(loopback).toBeVisible();
+  await expect(loopback).toContainText('已带回', { timeout: 10_000 });
   await loopback.click();
 
   // The roundtable panel should close and chat panel should be active again.
   await expect(panel).toBeHidden({ timeout: 10_000 });
   await expect(page.getByTestId('chat-panel')).toBeVisible();
 
-  // The new chat conv should have an assistant message containing the
-  // summary marker.
+  // The new chat conv should preserve both the original roundtable topic and
+  // the assistant summary marker.
   const messages = page.getByTestId('messages');
   await expect(messages).toBeVisible();
+  await expect(messages).toContainText('发起圆桌讨论：A4 — 选 SaaS 计费模型', { timeout: 10_000 });
   await expect(messages).toContainText('来自圆桌讨论', { timeout: 10_000 });
   await expect(messages).toContainText('推荐决策');
 
   // Cross-check via API: the chat conversation that received the loopback
-  // exists and has exactly one assistant message.
+  // exists and has the user topic followed by the assistant conclusion.
   const convsRes = await authedFetch(env, '/v1/conversations');
   const convs = (await convsRes.json()) as {
     conversations: Array<{ id: string; type: string; title: string | null }>;
@@ -133,7 +135,9 @@ test('A4 user can write the round-table conclusion back into a chat conversation
   const msgsBody = (await msgsRes.json()) as {
     messages: Array<{ role: string; content: string | null }>;
   };
-  expect(msgsBody.messages).toHaveLength(1);
-  expect(msgsBody.messages[0]!.role).toBe('assistant');
-  expect(msgsBody.messages[0]!.content).toContain('推荐决策');
+  expect(msgsBody.messages).toHaveLength(2);
+  expect(msgsBody.messages[0]!.role).toBe('user');
+  expect(msgsBody.messages[0]!.content).toContain('发起圆桌讨论：A4 — 选 SaaS 计费模型');
+  expect(msgsBody.messages[1]!.role).toBe('assistant');
+  expect(msgsBody.messages[1]!.content).toContain('推荐决策');
 });

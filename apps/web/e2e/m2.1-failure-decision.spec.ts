@@ -84,6 +84,25 @@ test('M2.1 forced rate_limit → failure_decision card with switch + retry butto
   await expect(page.getByTestId('fdc-retry')).toBeVisible();
   await expect(page.getByTestId('fdc-switch')).toBeVisible();
   await expect(page.getByTestId('fdc-switch')).toContainText('Fallback');
+  await expect(page.getByTestId('fdc-rationale')).toContainText('失败来源');
+  await expect(page.getByTestId('fdc-rationale')).toContainText('处理策略');
+});
+
+test('M2.1 manual model switch clears stale failure_decision card', async ({ page }) => {
+  await page.route('**/v1/chat', async (route) => {
+    const headers = { ...route.request().headers(), 'x-test-force-classification': 'rate_limit' };
+    await route.continue({ headers });
+  });
+
+  await page.goto('/');
+  await expect(page.getByTestId('chat-panel')).toBeVisible({ timeout: 10_000 });
+
+  await page.getByTestId('composer-input').fill('please fail with rate_limit');
+  await page.getByTestId('composer-send').click();
+
+  await expect(page.getByTestId('failure-decision-card')).toBeVisible({ timeout: 15_000 });
+  await page.getByTestId('active-model').selectOption(fallbackId);
+  await expect(page.getByTestId('failure-decision-card')).toHaveCount(0);
 });
 
 test('M2.1 forced content_filter → card hides switch button', async ({ page }) => {
@@ -153,7 +172,7 @@ test('M2.1 auto-fallback ON → single-hop switch + system note', async ({ page 
   await page.getByTestId('composer-send').click();
 
   // System note injected by the renderer when auto-fallback fires.
-  await expect(page.locator('.msg.system', { hasText: '已自动切换到' })).toBeVisible({
+  await expect(page.locator('.msg.system', { hasText: '已自动切换到' }).first()).toBeVisible({
     timeout: 15_000,
   });
   // Eventually the second attempt also fails → card shows up.

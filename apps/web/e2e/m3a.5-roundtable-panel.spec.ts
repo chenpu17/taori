@@ -140,3 +140,283 @@ test('M3.A.5 cost label visible in panel header', async ({ page }) => {
   await expect(cost).toBeVisible();
   await expect(cost).toContainText('$');
 });
+
+test('M3.A.5 deep round content stays scrollable and summary JSON is hidden', async ({
+  page,
+}) => {
+  const now = Date.now();
+  const participants = [
+    {
+      model_id: 'model_a',
+      display_name: 'Doubao 1.5 Pro 32K',
+      role_label: '儒家新辩者',
+      persona_prompt: '你从儒家视角参与圆桌讨论，给出结构化判断。',
+    },
+    {
+      model_id: 'model_b',
+      display_name: 'Doubao Seed',
+      role_label: '道家新辩者',
+      persona_prompt: '你从道家视角参与圆桌讨论，给出结构化判断。',
+    },
+    {
+      model_id: 'model_c',
+      display_name: 'Chat 2',
+      role_label: '现实主义者',
+      persona_prompt: '你从现实主义视角参与圆桌讨论，给出结构化判断。',
+    },
+  ];
+  const longSpeech = Array.from({ length: 28 }, (_, i) =>
+    `第 ${i + 1} 点：这是一段足够长的圆桌发言，用来验证第一轮内容不会把第二轮挤出不可滚动区域。`,
+  ).join('\n');
+  const baseRoundtable = {
+    id: 'rt_scroll',
+    conversation_id: 'conv_scroll',
+    topic: '孔子和老子的贡献谁更大',
+    mode: 'deep',
+    participants,
+    summarizer_model_id: 'model_a',
+    analyzer_fallback: false,
+    status: 'round2',
+    current_round: 2,
+    summary: null,
+    estimated_cost_usd_low: 0.01,
+    estimated_cost_usd_high: 0.02,
+    created_at: now,
+    updated_at: now,
+    completed_at: null,
+  };
+  const messages = participants.flatMap((_, participantIndex) => [
+    {
+      id: `msg_${participantIndex}_1`,
+      roundtable_id: 'rt_scroll',
+      round: 1,
+      participant_index: participantIndex,
+      model_id: participants[participantIndex]!.model_id,
+      content: longSpeech,
+      status: 'complete',
+      classification: null,
+      error_message: null,
+      visible_to_others: true,
+      created_at: now,
+      updated_at: now,
+    },
+    {
+      id: `msg_${participantIndex}_2`,
+      roundtable_id: 'rt_scroll',
+      round: 2,
+      participant_index: participantIndex,
+      model_id: participants[participantIndex]!.model_id,
+      content: `第二轮观点 ${participantIndex + 1}：这里应该可以直接看到或滚动看到。`,
+      status: 'complete',
+      classification: null,
+      error_message: null,
+      visible_to_others: true,
+      created_at: now,
+      updated_at: now,
+    },
+  ]);
+
+  await page.route('**/v1/roundtable/rt_scroll/summarize', async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: 'text/plain; charset=utf-8',
+      headers: { 'x-vercel-ai-data-stream': 'v1' },
+      body:
+        '8:[{"type":"rt.summary_delta","text_chunk":"{\\"consensus\\":[\\"raw json should not be visible\\"],\\"divergence\\":["}]\n',
+    });
+  });
+  await page.route('**/v1/roundtable/rt_scroll', async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        roundtable: baseRoundtable,
+        messages,
+        total_cost_usd: 0.0123,
+      }),
+    });
+  });
+  await page.route('**/v1/roundtable', async (route) => {
+    await route.fulfill({
+      status: 201,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        ...baseRoundtable,
+        preview: {
+          topic_type: 'research',
+          complexity: 'medium',
+          requested_mode: 'deep',
+          analyzer_chose_mode_reason: '用户选择深度模式，需要两轮讨论。',
+          estimated_calls: 8,
+          estimated_duration_sec_low: 20,
+          estimated_duration_sec_high: 40,
+          alt_mode: 'fast',
+          alt_estimated_cost_usd_low: 0.005,
+          alt_estimated_cost_usd_high: 0.01,
+          alt_estimated_calls: 5,
+          alt_estimated_duration_sec_low: 10,
+          alt_estimated_duration_sec_high: 20,
+        },
+      }),
+    });
+  });
+
+  await page.goto('/');
+  await expect(page.getByTestId('chat-panel')).toBeVisible({ timeout: 10_000 });
+  await page.getByTestId('composer-input').fill('孔子和老子的贡献谁更大');
+  await page.getByTestId('composer-roundtable').click();
+
+  const dlg = page.getByTestId('roundtable-launch-dialog');
+  await dlg.getByTestId('roundtable-mode-select').selectOption('deep');
+  await dlg.getByTestId('roundtable-launch-start').click();
+  await expect(dlg.getByTestId('roundtable-preview')).toBeVisible();
+  await dlg.getByTestId('roundtable-launch-continue').click();
+
+  const panel = page.getByTestId('roundtable-panel');
+  await expect(panel.getByTestId('roundtable-cell-0-2')).toContainText(
+    '第二轮观点 1',
+  );
+
+  const round1Body = panel.getByTestId('roundtable-cell-body-0-1');
+  await expect(round1Body).toBeVisible();
+  await expect
+    .poll(async () =>
+      round1Body.evaluate((el) => el.scrollHeight > el.clientHeight),
+    )
+    .toBe(true);
+
+  await panel.getByTestId('roundtable-action-summarize').click();
+  const streaming = panel.getByTestId('roundtable-summary-streaming');
+  await expect(streaming).toBeVisible();
+  await expect(streaming).toContainText('正在整理圆桌结论');
+  await expect(streaming).not.toContainText('raw json should not be visible');
+  await expect(streaming).not.toContainText('consensus');
+});
+
+test('M3.A.5 completed summary remains reachable when content is long', async ({
+  page,
+}) => {
+  const now = Date.now();
+  const participants = [
+    {
+      model_id: 'model_a',
+      display_name: 'Doubao 1.5 Pro 32K',
+      role_label: '儒家新辩者',
+      persona_prompt: '你从儒家视角参与圆桌讨论，给出结构化判断。',
+    },
+    {
+      model_id: 'model_b',
+      display_name: 'Doubao Seed',
+      role_label: '道家新辩者',
+      persona_prompt: '你从道家视角参与圆桌讨论，给出结构化判断。',
+    },
+    {
+      model_id: 'model_c',
+      display_name: 'Chat 2',
+      role_label: '现实主义者',
+      persona_prompt: '你从现实主义视角参与圆桌讨论，给出结构化判断。',
+    },
+  ];
+  const summary = {
+    consensus: Array.from({ length: 8 }, (_, i) =>
+      `共识 ${i + 1}：孔子与老子都在中国思想史中有不可替代的影响。`,
+    ),
+    divergence: Array.from({ length: 10 }, (_, i) => ({
+      topic: `分歧 ${i + 1}：贡献评价维度`,
+      positions: [
+        {
+          role: '儒家新辩者',
+          stance: '孔子在制度、教育、伦理秩序上影响更广。',
+        },
+        {
+          role: '道家新辩者',
+          stance: '老子在精神超越和思想弹性上提供更深的路径。',
+        },
+      ],
+    })),
+    risks: Array.from({ length: 6 }, (_, i) =>
+      `风险 ${i + 1}：用单一尺度衡量思想贡献会压扁历史语境。`,
+    ),
+    recommended_decision:
+      '不要简单判定谁绝对更大，应按文化制度影响与哲学精神影响分维度陈述。',
+    next_steps: Array.from({ length: 8 }, (_, i) =>
+      `下一步 ${i + 1}：把论证拆成教育、政治伦理、个人修养、哲学本体四个维度。`,
+    ),
+  };
+  const completedRoundtable = {
+    id: 'rt_summary_scroll',
+    conversation_id: 'conv_summary_scroll',
+    topic: '孔子和老子的贡献谁更大',
+    mode: 'deep',
+    participants,
+    summarizer_model_id: 'model_a',
+    analyzer_fallback: false,
+    status: 'completed',
+    current_round: 2,
+    summary,
+    estimated_cost_usd_low: 0.01,
+    estimated_cost_usd_high: 0.02,
+    created_at: now,
+    updated_at: now,
+    completed_at: now,
+  };
+
+  await page.route('**/v1/roundtable/rt_summary_scroll', async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        roundtable: completedRoundtable,
+        messages: [],
+        total_cost_usd: 0.0456,
+      }),
+    });
+  });
+  await page.route('**/v1/roundtable', async (route) => {
+    await route.fulfill({
+      status: 201,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        ...completedRoundtable,
+        preview: {
+          topic_type: 'research',
+          complexity: 'medium',
+          requested_mode: 'deep',
+          analyzer_chose_mode_reason: '用户选择深度模式，需要两轮讨论。',
+          estimated_calls: 8,
+          estimated_duration_sec_low: 20,
+          estimated_duration_sec_high: 40,
+          alt_mode: 'fast',
+          alt_estimated_cost_usd_low: 0.005,
+          alt_estimated_cost_usd_high: 0.01,
+          alt_estimated_calls: 5,
+          alt_estimated_duration_sec_low: 10,
+          alt_estimated_duration_sec_high: 20,
+        },
+      }),
+    });
+  });
+
+  await page.goto('/');
+  await expect(page.getByTestId('chat-panel')).toBeVisible({ timeout: 10_000 });
+  await page.getByTestId('composer-input').fill('孔子和老子的贡献谁更大');
+  await page.getByTestId('composer-roundtable').click();
+
+  const dlg = page.getByTestId('roundtable-launch-dialog');
+  await dlg.getByTestId('roundtable-mode-select').selectOption('deep');
+  await dlg.getByTestId('roundtable-launch-start').click();
+  await expect(dlg.getByTestId('roundtable-preview')).toBeVisible();
+  await dlg.getByTestId('roundtable-launch-continue').click();
+
+  const panel = page.getByTestId('roundtable-panel');
+  await expect(panel.getByTestId('roundtable-summary')).toBeVisible();
+  await expect
+    .poll(async () => panel.evaluate((el) => el.scrollHeight > el.clientHeight))
+    .toBe(true);
+
+  await panel.evaluate((el) => {
+    el.scrollTop = el.scrollHeight;
+  });
+  await expect(panel.getByTestId('roundtable-loopback')).toBeInViewport();
+  await expect(panel.getByText('总成本：$0.0456')).toBeInViewport();
+});

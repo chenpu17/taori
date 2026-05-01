@@ -32,8 +32,7 @@ interface RoundtableLaunchResult {
 
 export interface RoundtableLaunchDialogProps {
   initialTopic: string;
-  /** When provided, the new roundtable joins this conversation (instead of
-   *  creating a fresh roundtable conversation). */
+  /** When provided, the final summary is written back to this chat conversation. */
   conversationId: string | null;
   onLaunched: (result: RoundtableLaunchResult) => void;
   onCancel: () => void;
@@ -97,6 +96,8 @@ export function RoundtableLaunchDialog(
 
   const [topic, setTopic] = useState(initialTopic);
   const [mode, setMode] = useState<RoundtableMode>('auto');
+  const [analyzerModelId, setAnalyzerModelId] = useState('');
+  const [summarizerModelId, setSummarizerModelId] = useState('');
   const [step, setStep] = useState<Step>({ kind: 'edit' });
   const [prefs, setPrefs] = useState<ConfirmPrefs>(DEFAULT_PREFS);
   const [skipConv, setSkipConv] = useState(false);
@@ -118,6 +119,35 @@ export function RoundtableLaunchDialog(
     mountedRef.current = true;
     return () => {
       mountedRef.current = false;
+    };
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const ms = await api.listModels();
+        if (cancelled || !mountedRef.current) return;
+        setChatModels(
+          ms.models
+            .filter(
+              (m) =>
+                m.capability === 'chat' &&
+                m.enabled &&
+                !(m.disabled_until && m.disabled_until > Date.now()),
+            )
+            .map((m) => ({
+              id: m.id,
+              display_name: m.display_name,
+              demoted: !!m.demoted,
+            })),
+        );
+      } catch {
+        if (!cancelled && mountedRef.current) setChatModels([]);
+      }
+    })();
+    return () => {
+      cancelled = true;
     };
   }, []);
 
@@ -193,7 +223,9 @@ export function RoundtableLaunchDialog(
       const created = await api.createRoundtable({
         topic: trimmedTopic,
         mode,
-        ...(conversationId ? { conversation_id: conversationId, origin_conversation_id: conversationId } : {}),
+        ...(conversationId ? { origin_conversation_id: conversationId } : {}),
+        ...(analyzerModelId ? { analyzer_model_id: analyzerModelId } : {}),
+        ...(summarizerModelId ? { summarizer_model_id: summarizerModelId } : {}),
       });
       if (!mountedRef.current) return;
       const low = created.estimated_cost_usd_low ?? 0;
@@ -331,6 +363,38 @@ export function RoundtableLaunchDialog(
                 <option value="auto">自动（让分析器决定）</option>
                 <option value="fast">快速（仅 1 轮 + 总结）</option>
                 <option value="deep">深度（2 轮互见 + 总结）</option>
+              </select>
+            </label>
+            <label className="roundtable-field">
+              <span>分析模型</span>
+              <select
+                data-testid="roundtable-analyzer-model-select"
+                value={analyzerModelId}
+                onChange={(e) => setAnalyzerModelId(e.target.value)}
+              >
+                <option value="">自动选择低成本 chat 模型</option>
+                {chatModels.map((m) => (
+                  <option key={m.id} value={m.id}>
+                    {m.display_name}
+                    {m.demoted ? '（降权）' : ''}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label className="roundtable-field">
+              <span>总结模型</span>
+              <select
+                data-testid="roundtable-summarizer-model-select"
+                value={summarizerModelId}
+                onChange={(e) => setSummarizerModelId(e.target.value)}
+              >
+                <option value="">自动沿用分析器推荐</option>
+                {chatModels.map((m) => (
+                  <option key={m.id} value={m.id}>
+                    {m.display_name}
+                    {m.demoted ? '（降权）' : ''}
+                  </option>
+                ))}
               </select>
             </label>
             <div className="modal-actions">

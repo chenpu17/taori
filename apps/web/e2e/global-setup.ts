@@ -16,8 +16,11 @@ import { fileURLToPath } from 'node:url';
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const WEB_DIR = path.resolve(HERE, '..');
 const ROOT = path.resolve(WEB_DIR, '..', '..');
-const SIDECAR_DIST = path.join(ROOT, 'apps', 'sidecar', 'dist', 'index.js');
+const SIDECAR_DIR = path.join(ROOT, 'apps', 'sidecar');
+const SIDECAR_ENTRY = path.join(SIDECAR_DIR, 'src', 'index.ts');
+const SIDECAR_TSX = path.join(SIDECAR_DIR, 'node_modules', 'tsx', 'dist', 'cli.mjs');
 export const TEST_ENV_FILE = path.join(HERE, '.test-env');
+export const TEST_LOCK_FILE = path.join(HERE, '.test-lock');
 
 export const TEST_SIDECAR_PORT = 17900;
 export const TEST_VITE_PORT = 5174;
@@ -59,12 +62,40 @@ function startProcess(
   return proc;
 }
 
+function isProcessAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function acquireE2ELock(): void {
+  if (fs.existsSync(TEST_LOCK_FILE)) {
+    const existingPid = Number(fs.readFileSync(TEST_LOCK_FILE, 'utf8'));
+    if (Number.isFinite(existingPid) && isProcessAlive(existingPid)) {
+      throw new Error(
+        `Another Playwright e2e run is active (pid=${existingPid}). ` +
+        'Run e2e specs in a single Playwright process; shared test ports and .test-env are not parallel-safe.',
+      );
+    }
+    fs.rmSync(TEST_LOCK_FILE, { force: true });
+  }
+  fs.writeFileSync(TEST_LOCK_FILE, String(process.pid), { flag: 'wx' });
+}
+
 export default async function globalSetup(): Promise<void> {
-  // Verify sidecar dist exists (must be built before running tests).
-  if (!fs.existsSync(SIDECAR_DIST)) {
+  acquireE2ELock();
+
+  // E2E must boot the current sidecar source, not a potentially stale dist
+  // build, otherwise renderer/sidecar contract changes can silently diverge.
+  if (!fs.existsSync(SIDECAR_TSX) || !fs.existsSync(SIDECAR_ENTRY)) {
     throw new Error(
-      `Sidecar dist not found at ${SIDECAR_DIST}.\n` +
-      `Run: cd apps/sidecar && pnpm build`,
+      `Sidecar runtime not found.\n` +
+      `Expected: ${SIDECAR_TSX}\n` +
+      `Entry: ${SIDECAR_ENTRY}\n` +
+      `Run: pnpm install`,
     );
   }
 
@@ -72,7 +103,7 @@ export default async function globalSetup(): Promise<void> {
   const dbPath = path.join(os.tmpdir(), `taori-test-${Date.now()}.db`);
 
   // ── Start test sidecar ──────────────────────────────────────────────────
-  const sidecarProc = startProcess('node', [SIDECAR_DIST], ROOT, {
+  const sidecarProc = startProcess('node', [SIDECAR_TSX, SIDECAR_ENTRY], SIDECAR_DIR, {
     DB_PATH: dbPath,
     SIDECAR_PORT: String(TEST_SIDECAR_PORT),
     SIDECAR_BEARER: TEST_BEARER,

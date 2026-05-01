@@ -19,8 +19,9 @@ const AvgOutputQuery = z.object({
 });
 
 const BreakdownQuery = z.object({
-  scope: z.enum(['session', 'today', 'month']),
+  scope: z.enum(['session', 'today', 'week', 'month']),
   conversation_id: z.string().optional(),
+  group_by: z.enum(['model_feature', 'model', 'conversation', 'feature']).optional(),
 });
 
 export function registerCostsRoute(app: FastifyInstance, deps: BuildServerArgs): void {
@@ -49,19 +50,22 @@ export function registerCostsRoute(app: FastifyInstance, deps: BuildServerArgs):
     return { ok: true, data: repo.avgOutputTokens(parsed.data.model_id) };
   });
 
-  // M2.2 §3.3: session-cost panel breakdown by (model, feature). Rendered
-  // when the user clicks any segment of the bottom cost-bar (`今日 / 本月
-  // / 本会话`). One query per scope; the renderer joins to active models
-  // for display names — we return both the live model id and the
-  // snapshot name so deleted-model rows keep their label.
+  // M2.2 session panel + D1 dashboard share this endpoint. The default
+  // `group_by=model_feature` preserves the original M2 behavior so the
+  // session-cost drawer stays backward-compatible; D1 opts into
+  // `model|conversation|feature` plus `scope=week`.
   app.get('/v1/costs/breakdown', async (req, reply) => {
     const parsed = BreakdownQuery.safeParse(req.query);
     if (!parsed.success) {
       reply.code(400);
       return { ok: false, error: parsed.error.errors[0]?.message ?? 'invalid query' };
     }
-    const { scope, conversation_id } = parsed.data;
-    const rows = repo.breakdown(scope, conversation_id ?? null);
-    return { ok: true, data: { scope, rows } };
+    const { scope, conversation_id, group_by } = parsed.data;
+    const normalizedGroupBy = group_by ?? 'model_feature';
+    const rows =
+      normalizedGroupBy === 'model_feature'
+        ? repo.breakdown(scope, conversation_id ?? null)
+        : repo.breakdownBy(scope, normalizedGroupBy, conversation_id ?? null);
+    return { ok: true, data: { scope, group_by: normalizedGroupBy, rows } };
   });
 }

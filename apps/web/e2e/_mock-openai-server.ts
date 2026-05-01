@@ -24,6 +24,15 @@ interface ChatRequest {
   stream?: boolean;
   temperature?: number;
   max_tokens?: number;
+  tools?: unknown[];
+}
+interface MockModelListItem {
+  id: string;
+  object?: string;
+  name?: string;
+  status?: string | null;
+  created?: number;
+  version?: string;
 }
 
 function textOf(m: ChatMessage): string {
@@ -155,22 +164,138 @@ function sseFinal(model: string, prompt: number, completion: number): string {
   );
 }
 
+function sseToolCallStart(model: string): string {
+  return (
+    'data: ' +
+    JSON.stringify({
+      id: 'chatcmpl-mock-tool',
+      object: 'chat.completion.chunk',
+      created: Math.floor(Date.now() / 1000),
+      model,
+      choices: [
+        {
+          index: 0,
+          delta: {
+            role: 'assistant',
+            tool_calls: [
+              {
+                index: 0,
+                id: 'call_image_generate_1',
+                type: 'function',
+                function: { name: 'image_generate', arguments: '' },
+              },
+            ],
+          },
+          finish_reason: null,
+        },
+      ],
+    }) +
+    '\n\n'
+  );
+}
+
+function sseToolCallArgs(model: string, args: string): string {
+  return (
+    'data: ' +
+    JSON.stringify({
+      id: 'chatcmpl-mock-tool',
+      object: 'chat.completion.chunk',
+      created: Math.floor(Date.now() / 1000),
+      model,
+      choices: [
+        {
+          index: 0,
+          delta: { tool_calls: [{ index: 0, function: { arguments: args } }] },
+          finish_reason: null,
+        },
+      ],
+    }) +
+    '\n\n'
+  );
+}
+
+function sseToolCallFinal(model: string): string {
+  return (
+    'data: ' +
+    JSON.stringify({
+      id: 'chatcmpl-mock-tool',
+      object: 'chat.completion.chunk',
+      created: Math.floor(Date.now() / 1000),
+      model,
+      choices: [{ index: 0, delta: {}, finish_reason: 'tool_calls' }],
+      usage: { prompt_tokens: 20, completion_tokens: 4, total_tokens: 24 },
+    }) +
+    '\n\n'
+  );
+}
+
+function hasToolResult(messages: ChatMessage[]): boolean {
+  return messages.some((m) => m.role === 'tool');
+}
+
+function hasImageInput(messages: ChatMessage[]): boolean {
+  return messages.some(
+    (m) =>
+      Array.isArray(m.content) &&
+      m.content.some((p) => p.type === 'image' || p.type === 'image_url'),
+  );
+}
+
+function shouldMockImageTool(body: ChatRequest): boolean {
+  if (!Array.isArray(body.tools) || body.tools.length === 0 || hasToolResult(body.messages)) {
+    return false;
+  }
+  const lastUser = [...body.messages].reverse().find((m) => m.role === 'user');
+  const text = lastUser ? textOf(lastUser).toLowerCase() : '';
+  const negative =
+    /不要|别|无需|不用|不要生成|不要画|do not|don't|dont|without generating|no image/.test(text);
+  if (negative) return false;
+  return (
+    /生成|画|绘制|图片|图像|照片|海报|generate|draw|create|make|image|picture|photo|illustration|poster/.test(
+      text,
+    )
+  );
+}
+
 export function startMockOpenAI(
   port = 17891,
-  opts: { streamDelayMs?: number; fixedReply?: string } = {},
+  opts: {
+    streamDelayMs?: number;
+    fixedReply?: string;
+    imageToolCalls?: boolean;
+    models?: MockModelListItem[];
+  } = {},
 ): http.Server {
   const server = http.createServer((req, res) => {
-    if (req.method === 'GET' && req.url === '/v1/models') {
+    if (req.method === 'GET' && req.url?.endsWith('/models')) {
       res.writeHead(200, { 'content-type': 'application/json' });
       res.end(
         JSON.stringify({
-          data: [
+          data: opts.models ?? [
             { id: 'mock-strategy', object: 'model' },
             { id: 'mock-user', object: 'model' },
             { id: 'mock-tech', object: 'model' },
           ],
         }),
       );
+      return;
+    }
+    if (req.method === 'POST' && req.url?.includes('/images/generations')) {
+      const chunks: Buffer[] = [];
+      req.on('data', (c) => chunks.push(c));
+      req.on('end', () => {
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end(
+          JSON.stringify({
+            data: [
+              {
+                b64_json:
+                  'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=',
+              },
+            ],
+          }),
+        );
+      });
       return;
     }
     if (req.method !== 'POST' || !req.url?.includes('/chat/completions')) {
@@ -192,11 +317,61 @@ export function startMockOpenAI(
       const { kind, role } = classifyAndRoleFromMessages(body.messages);
       const text =
         opts.fixedReply ??
-        (kind === 'analyzer'
+        (opts.imageToolCalls && hasToolResult(body.messages)
+          ? '图片已生成。'
+          : hasImageInput(body.messages)
+          ? '我看到了这张图片：主体清晰、背景简洁，适合继续做风格描述或用途分析。'
+          : kind === 'analyzer'
           ? analyzerResponse(body.messages)
           : kind === 'summarizer'
           ? summaryResponse()
           : roundSpeech(role));
+
+      if (opts.imageToolCalls && shouldMockImageTool(body)) {
+        if (!body.stream) {
+          res.writeHead(200, { 'content-type': 'application/json' });
+          res.end(
+            JSON.stringify({
+              id: 'chatcmpl-mock-tool',
+              object: 'chat.completion',
+              created: Math.floor(Date.now() / 1000),
+              model: body.model,
+              choices: [
+                {
+                  index: 0,
+                  message: {
+                    role: 'assistant',
+                    content: null,
+                    tool_calls: [
+                      {
+                        id: 'call_image_generate_1',
+                        type: 'function',
+                        function: {
+                          name: 'image_generate',
+                          arguments: JSON.stringify({ prompt: 'cute duck' }),
+                        },
+                      },
+                    ],
+                  },
+                  finish_reason: 'tool_calls',
+                },
+              ],
+            }),
+          );
+          return;
+        }
+        res.writeHead(200, {
+          'content-type': 'text/event-stream',
+          'cache-control': 'no-cache',
+          connection: 'keep-alive',
+        });
+        res.write(sseToolCallStart(body.model));
+        res.write(sseToolCallArgs(body.model, JSON.stringify({ prompt: 'cute duck' })));
+        res.write(sseToolCallFinal(body.model));
+        res.write('data: [DONE]\n\n');
+        res.end();
+        return;
+      }
 
       if (!body.stream) {
         res.writeHead(200, { 'content-type': 'application/json' });

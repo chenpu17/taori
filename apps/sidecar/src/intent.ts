@@ -15,8 +15,12 @@
  */
 
 const NEGATIVE_PATTERNS = [
-  /已经/,
-  /已/,
+  /(?:不要|别|不必|不用|无需|先别|不要再|别再).{0,20}(?:生成|画|绘制|做|出).{0,20}(?:图片|图像|海报|插画|插图|封面|表情|图)/,
+  /\b(?:do\s+not|don't|dont|no\s+need\s+to|please\s+don't|please\s+do\s+not|stop)\s+(?:generate|draw|sketch|paint|render|create|make)\b/i,
+  /(?:支持|能否|可以|可不可以|会不会|是否).{0,20}(?:生成|画|绘制|做).{0,20}(?:图片|图像|海报|插画|图).{0,6}[?？吗]/,
+  /\b(?:can|could|do|does|is|are)\b.{0,30}\b(?:generate|draw|create|make)\b.{0,30}\b(?:image|picture|photo|illustration|poster)s?\b.{0,6}\?/i,
+  /已经.{0,8}(?:画|绘制|生成|做|出).{0,4}过/,
+  /已(?:画|绘制|生成|做|出).{0,4}过/,
   /上次/,
   /那张/,
   /那个/,
@@ -41,6 +45,8 @@ const ZH_IMPERATIVE_PATTERNS = [
   /(?:帮|替|给|请)(?:我|你|帮)?[\s\u4e00-\u9fff]{0,8}?(画|绘制|生成图)/,
   // Intent verbs anywhere ("生成一张图片"/"做一张海报"/"出一张图").
   /生成[一]?(?:张|幅|个)?(图片|图像|海报|插画|插图|封面|表情|图)/,
+  /^\s*(?:请|帮我|请你|请帮我|麻烦|给我|我要|我想|想要|需要|要求)?[\s\u4e00-\u9fff]{0,12}(?:生成|画|绘制|做|出)[\s\S]{0,80}(?:的)?(?:图片|图像|海报|插画|插图|封面|表情|图)/,
+  /(?:生成|画|绘制|做|出)[\s\S]{0,80}(?:的)?(?:图片|图像|海报|插画|插图|封面|表情|图)/,
   /做(?:一张|个|张)?(?:图|海报|封面|插画)/,
   /出一张(?:图|海报|封面)/,
   /(?:画|绘制)一(?:张|幅)/,
@@ -64,6 +70,19 @@ export interface ImageIntent {
   prompt: string;
 }
 
+export function detectImageCommand(rawText: string): ImageIntent {
+  const text = rawText ?? '';
+  if (!text.trim()) return { hit: false, prompt: '' };
+  for (const re of COMMAND_PATTERNS) {
+    const m = re.exec(text);
+    if (m) {
+      const prompt = text.slice(m.index + m[0].length).trim();
+      return { hit: true, prompt: prompt || text.trim() };
+    }
+  }
+  return { hit: false, prompt: text.trim() };
+}
+
 export function detectImageIntent(rawText: string): ImageIntent {
   const text = rawText ?? '';
   if (!text.trim()) return { hit: false, prompt: '' };
@@ -76,13 +95,10 @@ export function detectImageIntent(rawText: string): ImageIntent {
   let matched = false;
   let prompt = text.trim();
 
-  for (const re of COMMAND_PATTERNS) {
-    const m = re.exec(text);
-    if (m) {
-      matched = true;
-      prompt = text.slice(m.index + m[0].length).trim();
-      break;
-    }
+  const command = detectImageCommand(text);
+  if (command.hit) {
+    matched = true;
+    prompt = command.prompt;
   }
 
   if (!matched) {

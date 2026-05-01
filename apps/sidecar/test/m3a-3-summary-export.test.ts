@@ -338,6 +338,41 @@ describe('M3.A.3 — POST /v1/roundtable/:id/summarize', () => {
     expect(fresh.summary).toBeNull();
   });
 
+  it('allows overriding summarizer model on retry and persists the choice', async () => {
+    const { id, modelIds } = await seed(ctx, { seedMessages: true, status: 'round1' });
+
+    vi.spyOn(globalThis, 'fetch').mockImplementation(
+      async () =>
+        new Response(makeSseStream([JSON.stringify(VALID_SUMMARY_JSON)]), {
+          status: 200,
+          headers: { 'content-type': 'text/event-stream' },
+        }),
+    );
+
+    const res = await ctx.app.inject({
+      method: 'POST',
+      url: `/v1/roundtable/${id}/summarize`,
+      headers: {
+        authorization: `Bearer ${bearer}`,
+        'content-type': 'application/json',
+      },
+      payload: { model_id: modelIds[1] },
+    });
+    expect(res.statusCode).toBe(200);
+    expect(res.payload).toContain('"rt.summary_done"');
+
+    const fresh = ctx.rt.get(id)!;
+    expect(fresh.summarizer_model_id).toBe(modelIds[1]);
+    const sumCosts = ctx.costs
+      .listForRoundtable({
+        conversationId: fresh.conversation_id,
+        roundtableId: id,
+        messageIds: ctx.rtMsg.listByRoundtable(id).map((m) => m.id),
+      })
+      .filter((c) => c.source_type === 'summarizer');
+    expect(sumCosts.at(-1)?.model_id).toBe(modelIds[1]);
+  });
+
   it('precondition: 404 on missing id', async () => {
     const res = await ctx.app.inject({
       method: 'POST',
@@ -598,4 +633,3 @@ describe('M3.A.3 — GET /v1/roundtable/:id/export', () => {
     expect(res.statusCode).toBe(404);
   });
 });
-

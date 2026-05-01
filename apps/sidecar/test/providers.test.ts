@@ -95,6 +95,201 @@ describe('providers + models', () => {
     expect(body.error.classification).toBe('auth');
   });
 
+  it('Huawei MaaS provider test reports missing /models as config error', async () => {
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('not found', { status: 404 }));
+    const res = await app.inject({
+      method: 'POST',
+      url: '/v1/providers/test',
+      headers: authJson,
+      payload: {
+        type: 'huawei_maas',
+        base_url: 'https://api.modelarts-maas.com/openai/v1',
+        api_key: 'hw-test-key',
+      },
+    });
+    expect(res.statusCode).toBe(200);
+    const body = res.json();
+    expect(body.ok).toBe(false);
+    expect(body.error.classification).toBe('config_error');
+  });
+
+  it('Huawei MaaS discovery tries OpenAI-compatible then MaaS model-list URL and fails on auth errors', async () => {
+    const fetchSpy = vi
+      .spyOn(globalThis, 'fetch')
+      .mockResolvedValueOnce(new Response('method not allowed', { status: 405 }))
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ data: [{ id: 'qwen-image', name: 'Qwen Image' }] }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        }),
+      )
+      .mockResolvedValueOnce(new Response('unauthorized', { status: 401 }));
+
+    let res = await app.inject({
+      method: 'POST',
+      url: '/v1/providers',
+      headers: authJson,
+      payload: {
+        name: 'Huawei MaaS test',
+        type: 'huawei_maas',
+        base_url: 'https://api.modelarts-maas.com/openai/v1',
+        api_key: 'hw-test-key',
+      },
+    });
+    expect(res.statusCode).toBe(201);
+    const provider = res.json();
+
+    res = await app.inject({
+      method: 'GET',
+      url: `/v1/providers/${provider.id}/discover`,
+      headers: auth,
+    });
+    expect(res.statusCode).toBe(200);
+    const discovery = res.json();
+    expect(discovery.models.some((m: { model_name: string }) => m.model_name === 'qwen-image')).toBe(true);
+    expect(discovery.models).toHaveLength(1);
+    expect(fetchSpy).toHaveBeenNthCalledWith(
+      1,
+      'https://api.modelarts-maas.com/openai/v1/models',
+      expect.objectContaining({
+        method: 'GET',
+        headers: { Authorization: 'Bearer hw-test-key' },
+      }),
+    );
+    expect(fetchSpy).toHaveBeenNthCalledWith(
+      2,
+      'https://api.modelarts-maas.com/v2/models',
+      expect.objectContaining({
+        method: 'GET',
+        headers: { Authorization: 'Bearer hw-test-key' },
+      }),
+    );
+
+    res = await app.inject({
+      method: 'GET',
+      url: `/v1/providers/${provider.id}/discover`,
+      headers: auth,
+    });
+    expect(res.statusCode).toBe(502);
+    expect(res.json().code).toBe('provider_error');
+    expect(res.json().message).toMatch(/无权限|无效/);
+
+    res = await app.inject({
+      method: 'DELETE',
+      url: `/v1/providers/${provider.id}`,
+      headers: auth,
+    });
+    expect(res.statusCode).toBe(204);
+  });
+
+  it('Huawei MaaS discovery infers multimodal, image and video capabilities from model ids', async () => {
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          data: [
+            { id: 'qwen2.5-vl-72b', name: 'Qwen2.5 VL 72B' },
+            { id: 'qwen-image', name: 'Qwen Image' },
+            { id: 'Wan2.2-T2V-A14B', name: 'Wan2.2 T2V A14B' },
+            { id: 'Wan2.2-I2V-A14B', name: 'Wan2.2 I2V A14B' },
+          ],
+        }),
+        { status: 200, headers: { 'content-type': 'application/json' } },
+      ),
+    );
+
+    let res = await app.inject({
+      method: 'POST',
+      url: '/v1/providers',
+      headers: authJson,
+      payload: {
+        name: 'Huawei MaaS capabilities',
+        type: 'huawei_maas',
+        base_url: 'https://api.modelarts-maas.com/openai/v1',
+        api_key: 'hw-test-key',
+      },
+    });
+    expect(res.statusCode).toBe(201);
+    const provider = res.json();
+
+    res = await app.inject({
+      method: 'GET',
+      url: `/v1/providers/${provider.id}/discover`,
+      headers: auth,
+    });
+    expect(res.statusCode).toBe(200);
+    const models = res.json().models as Array<{ model_name: string; capability: string; modalities: string[]; supports_vision: boolean; supports_tools: boolean }>;
+    expect(models.find((m) => m.model_name === 'qwen2.5-vl-72b')).toMatchObject({
+      capability: 'multimodal',
+      supports_vision: true,
+      modalities: ['text', 'image'],
+      supports_tools: true,
+    });
+    expect(models.find((m) => m.model_name === 'qwen-image')).toMatchObject({
+      capability: 'image',
+      modalities: ['image'],
+    });
+    expect(models.find((m) => m.model_name === 'Wan2.2-T2V-A14B')).toMatchObject({
+      capability: 'video',
+      modalities: ['text', 'video'],
+    });
+    expect(models.find((m) => m.model_name === 'Wan2.2-I2V-A14B')).toMatchObject({
+      capability: 'video',
+      modalities: ['text', 'image', 'video'],
+    });
+
+    expect(models.find((m) => m.model_name === 'glm-5.1')).toBeUndefined();
+
+    res = await app.inject({
+      method: 'DELETE',
+      url: `/v1/providers/${provider.id}`,
+      headers: auth,
+    });
+    expect(res.statusCode).toBe(204);
+  });
+
+  it('Huawei MaaS discovery marks unknown chat models as tool-capable so GLM can use image tools', async () => {
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+      new Response(
+        JSON.stringify({ data: [{ id: 'glm-5.1', name: 'GLM 5.1' }] }),
+        { status: 200, headers: { 'content-type': 'application/json' } },
+      ),
+    );
+
+    let res = await app.inject({
+      method: 'POST',
+      url: '/v1/providers',
+      headers: authJson,
+      payload: {
+        name: 'Huawei GLM',
+        type: 'huawei_maas',
+        base_url: 'https://api.modelarts-maas.com/openai/v1',
+        api_key: 'hw-test-key',
+      },
+    });
+    expect(res.statusCode).toBe(201);
+    const provider = res.json();
+
+    res = await app.inject({
+      method: 'GET',
+      url: `/v1/providers/${provider.id}/discover`,
+      headers: auth,
+    });
+    expect(res.statusCode).toBe(200);
+    const models = res.json().models as Array<{ model_name: string; capability: string; supports_tools: boolean }>;
+    expect(models[0]).toMatchObject({
+      model_name: 'glm-5.1',
+      capability: 'chat',
+      supports_tools: true,
+    });
+
+    res = await app.inject({
+      method: 'DELETE',
+      url: `/v1/providers/${provider.id}`,
+      headers: auth,
+    });
+    expect(res.statusCode).toBe(204);
+  });
+
   it('full CRUD cycle: create provider with key → list → discover → create model → set default → delete', async () => {
     mockOpenRouterModels([
       {

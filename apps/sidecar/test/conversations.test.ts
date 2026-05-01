@@ -242,7 +242,7 @@ describe('models test endpoint (MC-4)', () => {
     fs.rmSync(dbPath, { force: true });
   });
 
-  it('POST /v1/models/:id/test returns ok=true with note when provider has no key', async () => {
+  it('POST /v1/models/:id/test returns ok=false with key_missing when provider has no key', async () => {
     const provider = await app.inject({
       method: 'POST',
       url: '/v1/providers',
@@ -270,9 +270,10 @@ describe('models test endpoint (MC-4)', () => {
       headers: auth,
     });
     expect(res.statusCode).toBe(200);
-    const body = res.json() as { ok: boolean; note?: string };
-    expect(body.ok).toBe(true);
+    const body = res.json() as { ok: boolean; note?: string; error?: { classification: string } };
+    expect(body.ok).toBe(false);
     expect(body.note).toBe('no_api_key_configured');
+    expect(body.error?.classification).toBe('key_missing');
   });
 
   it('POST /v1/models/:id/test on missing model returns 404', async () => {

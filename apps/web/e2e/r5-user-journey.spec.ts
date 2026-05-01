@@ -14,7 +14,7 @@
  *   4. Force the next /v1/chat to fail with rate_limit → assert the renderer
  *      surfaces the auto-fallback system note and switches the active model
  *      (M2.1 + R3.2 — failure as decision moment).
- *   5. Trigger image generation by typing "画一张" → image picker appears
+ *   5. Trigger image generation with "/image ..." → image picker appears
  *      → choose model → cost-confirm → continue → "Generated" assistant
  *      message lands (M2.4 image flow).
  *   6. Switch to a chat conversation, run a quick round-table in fast mode
@@ -214,7 +214,8 @@ test('R5 user journey: onboarding → chat → fallback → image → roundtable
   await page.unroute('**/v1/chat');
 
   // ---- Phase 5: image generation. Force tool result to success so we don't
-  // need a real DALL-E. Type the magic phrase that triggers intent_route.
+  // need a real DALL-E. Use the explicit image command to open the picker
+  // without relying on natural-language regex intent routing.
   await page.route('**/v1/tools/invoke', async (route) => {
     await route.continue({
       headers: {
@@ -229,7 +230,7 @@ test('R5 user journey: onboarding → chat → fallback → image → roundtable
   await page.getByTestId('sidebar-new').click();
   await expect(page.getByTestId('composer-form')).toBeVisible();
 
-  await page.getByTestId('composer-input').fill('画一张可爱的小猫');
+  await page.getByTestId('composer-input').fill('/image 画一张可爱的小猫');
   await page.getByTestId('composer-send').click();
 
   const picker = page.getByTestId('image-picker-dialog');

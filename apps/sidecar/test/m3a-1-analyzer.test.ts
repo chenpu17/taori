@@ -19,6 +19,9 @@ import {
   ProvidersRepo,
   ModelsRepo,
   MemoriesRepo,
+  ConversationsRepo,
+  MessagesRepo,
+  RoundtablesRepo,
 } from '../src/db/repos/index.js';
 import {
   pickAnalyzerModel,
@@ -324,6 +327,108 @@ describe('M3.A.1 — POST /v1/roundtable', () => {
     expect(got.roundtable.topic).toBe('whether to migrate to postgres');
     expect(got.roundtable.analyzer_fallback).toBe(true);
     expect(got.messages).toEqual([]);
+  });
+
+  it('does not reuse an existing chat conversation as the roundtable conversation', async () => {
+    const prov = ctx.providers.create({
+      name: 'P',
+      type: 'openai',
+      base_url: 'http://x',
+      api_key: 'k',
+    });
+    for (let i = 0; i < 3; i++) {
+      ctx.models.create({
+        provider_id: prov.id,
+        model_name: `gpt-${i}`,
+        capability: 'chat',
+        display_name: `Chat ${i}`,
+      });
+    }
+    const convs = new ConversationsRepo(ctx.db);
+    const origin = convs.create({ type: 'chat', title: 'origin chat' });
+
+    const res = await ctx.app.inject({
+      method: 'POST',
+      url: '/v1/roundtable',
+      headers: {
+        authorization: `Bearer ${bearer}`,
+        'content-type': 'application/json',
+      },
+      payload: {
+        conversation_id: origin.id,
+        topic: 'compare two launch plans',
+        mode: 'fast',
+      },
+    });
+
+    expect(res.statusCode).toBe(201);
+    const body = res.json() as {
+      id: string;
+      conversation_id: string;
+    };
+    expect(body.conversation_id).not.toBe(origin.id);
+    expect(convs.get(body.conversation_id)?.type).toBe('roundtable');
+
+    const gotRes = await ctx.app.inject({
+      method: 'GET',
+      url: `/v1/roundtable/${body.id}`,
+      headers: { authorization: `Bearer ${bearer}` },
+    });
+    const got = gotRes.json() as {
+      roundtable: { origin_conversation_id: string | null };
+    };
+    expect(got.roundtable.origin_conversation_id).toBe(origin.id);
+  });
+
+  it('roundtable loopback is idempotent per roundtable id', async () => {
+    const convs = new ConversationsRepo(ctx.db);
+    const roundtables = new RoundtablesRepo(ctx.db);
+    const messages = new MessagesRepo(ctx.db);
+    const origin = convs.create({ type: 'chat', title: 'origin chat' });
+    const rtConv = convs.create({ type: 'roundtable', title: 'rt' });
+    const rt = roundtables.insert({
+      id: 'rt_loopback_once',
+      conversation_id: rtConv.id,
+      topic: '产品路线选择',
+      mode: 'fast',
+      participants: [],
+      summarizer_model_id: null,
+      origin_conversation_id: origin.id,
+      analyzer_fallback: false,
+      status: 'analyzing',
+      estimated_cost_usd_low: null,
+      estimated_cost_usd_high: null,
+    });
+    roundtables.setSummary(rt.id, {
+      consensus: ['先做核心路径'],
+      divergence: [],
+      risks: [],
+      recommended_decision: '选择小范围灰度。',
+      next_steps: ['补齐验证指标'],
+    });
+    roundtables.setStatus(rt.id, 'completed');
+
+    const first = await ctx.app.inject({
+      method: 'POST',
+      url: `/v1/roundtable/${rt.id}/loopback`,
+      headers: { authorization: `Bearer ${bearer}` },
+    });
+    const second = await ctx.app.inject({
+      method: 'POST',
+      url: `/v1/roundtable/${rt.id}/loopback`,
+      headers: { authorization: `Bearer ${bearer}` },
+    });
+
+    expect(first.statusCode).toBe(200);
+    expect(second.statusCode).toBe(200);
+    expect(first.json()).toEqual(second.json());
+    const rows = messages.listByConversation(origin.id);
+    expect(rows).toHaveLength(2);
+    expect(rows[0]!.id).toBe('message_roundtable_topic_rt_loopback_once');
+    expect(rows[0]!.role).toBe('user');
+    expect(rows[0]!.content).toContain('发起圆桌讨论：产品路线选择');
+    expect(rows[1]!.id).toBe('message_roundtable_loopback_rt_loopback_once');
+    expect(rows[1]!.content).toContain('来自圆桌讨论');
   });
 
   it('GET unknown id → 404', async () => {

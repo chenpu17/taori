@@ -14,6 +14,7 @@ import { openDb } from '../src/db/index.js';
 import { ControlClient } from '../src/control/client.js';
 import { MemoryStore } from '../src/keystore.js';
 import { ProvidersRepo, ModelsRepo } from '../src/db/repos/index.js';
+import { memories } from '../src/db/schema.js';
 import type { FastifyInstance } from 'fastify';
 import os from 'node:os';
 import path from 'node:path';
@@ -230,9 +231,10 @@ describe('M2.1 failure_decision annotation', () => {
 describe('M2.1 /v1/memories endpoint', () => {
   let app: FastifyInstance;
   let dbPath: string;
+  let db: ReturnType<typeof openDb>;
 
   beforeEach(async () => {
-    ({ app, dbPath } = newApp());
+    ({ app, db, dbPath } = newApp());
     await app.ready();
   });
   afterEach(async () => {
@@ -256,6 +258,21 @@ describe('M2.1 /v1/memories endpoint', () => {
     });
     expect(get.statusCode).toBe(200);
     expect(JSON.parse(get.payload).data.value).toBe('true');
+  });
+
+  it('PUT updates one global memory row when scope_id is null', async () => {
+    for (const value of ['false', 'true']) {
+      const put = await app.inject({
+        method: 'PUT',
+        url: '/v1/memories',
+        headers: { authorization: `Bearer ${bearer}`, 'content-type': 'application/json' },
+        payload: { scope: 'global', key: 'auto_fallback_enabled', value },
+      });
+      expect(put.statusCode).toBe(200);
+    }
+
+    const rows = db.select().from(memories).all();
+    expect(rows.filter((row) => row.scope === 'global' && row.key === 'auto_fallback_enabled')).toHaveLength(1);
   });
 
   it('session value overrides global in /v1/memories/effective', async () => {

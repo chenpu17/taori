@@ -65,6 +65,11 @@ Scope: Taori 全系统
   - MCP 仅支持本地 stdio / 127.0.0.1 HTTP，远程 MCP 留给 v2
   - 工具失败统一进 `classifyToolError`，与 LLM 兜底共用 UI 体验
   - 注册新模块 `apps/sidecar/capability-bus`（M2 建立合同，灰盒下钻）
+- 2026-04-30 [C3]：实现 Prompt 模板与 Persona 预设：
+  - Sidecar 新增资源路由：`/v1/prompt-templates`、`/v1/personas`
+  - `/v1/chat` 扩展可选 `persona_id`，并在 sidecar 上游请求中注入 system prompt
+  - SQLite 新增 `prompt_templates`、`personas` 两张表；会话绑定复用 `memories(scope='session', key='active_persona_id')`
+  - Renderer 设置页新增模板/Persona 管理；聊天头部新增模板套用与 Persona 绑定入口
 - 2026-04-27 [评审 R3 微调]：通过第三轮评审，进入 M0 前的最后一批文字一致性修复：
   - `01-overview.md` 关键设计原则 1：Keychain 转写改为"通过 Sidecar↔Rust 控制通道"（不再写 Tauri 命令）
   - `02-tech-stack.md` 为什么业务跑在 Sidecar：去掉"API Key 不进入渲染进程"，改成与 05-security 一致的"短暂持有 / 不持久化 / 不日志 / 不外发"
@@ -135,6 +140,146 @@ M2.5（Model Center / Price Catalog / Volcengine Ark）已实现：
 - `apps/web/src/ModelCenter.tsx`：每行新增"编辑"按钮（testid `model-edit-{id}`）打开 `EditModelDialog`：可改 alias / display_name / capability / supports_vision/tools / 5 类价格 / 币种；切换 capability 时自动清理 stale `is_default_for`，并显示警告
 - 计费形态覆盖：chat/multimodal/embedding → 输入+输出/1M token；image → 每张；video → 每秒；asr/tts/其他 → 每次。复杂分级（按分辨率 / 时长档位）记入 v0.8 `pricing_meta` JSON
 - E2E：新增 `apps/web/e2e/m2.5-model-editor.spec.ts`（chat→image 改能力 + 设 per-image 价 + 验证 is_default_for 清空），Playwright 73/73 passing
+
+## 10.2 C3 完工记录（v0.8）
+
+C3（Prompt 模板 & Persona 预设）已实现：
+
+- `apps/sidecar`：新增 `src/routes/templates-personas.ts`；新增 repo `PromptTemplatesRepo` / `PersonasRepo`
+- `packages/shared`：新增 `PromptTemplate*` / `Persona*` schema 与 `ChatRequest.persona_id`
+- 数据：SQLite 新增 `prompt_templates` / `personas`，无破坏式迁移；会话 Persona 绑定复用 `memories`
+- `apps/web`：`Settings.tsx` 新增模板/Persona 管理；`App.tsx` 聊天头部新增模板选择器与 Persona 下拉；模板支持 `{{变量}}` 填空
+- 验证：sidecar `c3-templates-personas.test.ts` 通过；Playwright `c3-templates-personas.spec.ts` 通过
+
+## 10.3 C3 合同变化
+
+- `apps/sidecar`
+  - 新增 `/v1/prompt-templates`、`/v1/personas` 路由
+  - `/v1/chat` 新增可选字段 `persona_id`
+- `apps/web`
+  - 新增聊天阶段的模板套用与会话 Persona 绑定交互
+- `packages/shared`
+  - 新增模板/Persona contract
+- 数据
+  - 新增两张业务表；`memories` 新增约定键 `active_persona_id`
+
+## 10.4 D1 / D2 完工记录（v0.8）
+
+D1 / D2（成本看板 / 月度预算）已实现：
+
+- `apps/sidecar`
+  - 复用并扩展 `/v1/costs/breakdown`：`scope` 支持 `today / week / month / session`，`group_by` 支持 `model_feature / model / conversation / feature`
+  - `CostsRepo.breakdownBy()` 新增按模型 / 会话 / 特性聚合，并返回 bucket 级 `trend[]`
+  - `CostsRepo.breakdown()` 改为基于统一 window rows 聚合，保持 M2 session panel 向后兼容
+- `apps/web`
+  - 新增 `CostDashboard.tsx` 独立 overlay，看板支持 `今日 / 本周 / 本月` + `按模型 / 按会话 / 按特性`
+  - 顶栏新增 💸 入口；`CommandPalette` 新增 `/costs` 导航
+  - `Settings.tsx` 新增月预算设置区；状态栏 `cost-bar` 增加预算等级样式
+  - 超预算提示采用一次性 toast；超预算发送门控复用 `CostConfirmDialog(reason='budget')`
+  - 看板数据增加前端归一化兜底，旧 shape / 缺失 `trend` 时退化显示而不崩溃
+- 状态与存储
+  - 预算设置不新增业务表，复用 `memories(global, key)`：
+    - `monthly_budget_usd`
+    - `monthly_budget_alert_state`
+- 测试
+  - Sidecar：`m2-2-cost-l3-l4.test.ts` 覆盖 `week`、`group_by=model|conversation`
+  - Web：`d1-d2-cost-dashboard-budget.spec.ts` 覆盖成本看板与预算门控
+  - E2E 基础设施：Playwright global setup 改为直接启动当前 sidecar 源码，避免 `dist` 过期导致 renderer / sidecar 契约漂移
+
+## 10.5 D1 / D2 合同变化
+
+- `apps/sidecar`
+  - `/v1/costs/breakdown` 查询契约扩展：新增 `group_by`，并允许 `scope=week`
+  - 当 `group_by !== model_feature` 时，返回行增加 `key / label / conversation_* / feature? / trend[]`
+- `apps/web`
+  - 新增成本看板 overlay、顶栏入口、命令面板入口、预算 toast 与超预算确认门控
+  - `Settings` 增加月预算配置入口
+- 数据
+  - 无新表；新增两项全局 memory 约定键：`monthly_budget_usd`、`monthly_budget_alert_state`
+
+## 10.6 E1 完工记录（v0.8）
+
+E1（模型健康轻量面板）已实现：
+
+- `apps/sidecar`
+  - 新增 `GET /v1/models/health`，返回所有模型最近 24h 的健康行
+  - `CostsRepo.modelHealth24h()` 基于 `cost_records` 聚合：
+    - `calls_24h`
+    - `failures_24h`
+    - `avg_first_token_ms`
+    - `avg_duration_ms`
+    - `last_failure_at`
+    - `last_failure_classification`
+  - `chat.ts` 在 mock / upstream 两条流式路径统一产出 `first_token_ms`，并在落库时写入失败分类
+- `packages/shared`
+  - 新增 `ModelHealthRowSchema` / `ModelHealthRow`
+- 数据
+  - `cost_records` additive migration 新增：
+    - `classification`
+    - `first_token_ms`
+- `apps/web`
+  - `ModelCenter.tsx` 每行新增“健康/收起健康”展开按钮
+  - 展开面板展示 4 个核心指标卡片 + 最近失败 footer 文案
+  - 样式支持桌面与窄屏响应式
+- 测试
+  - Sidecar：`e1-model-health.test.ts`
+  - Web：`e1-model-health-panel.spec.ts`
+
+## 10.7 E1 合同变化
+
+- `apps/sidecar`
+  - 新增 `/v1/models/health`
+  - `cost_records` 观测字段扩展：`classification`、`first_token_ms`
+- `apps/web`
+  - `ModelCenter` 新增模型健康展开交互与指标展示
+- `packages/shared`
+  - 新增 `ModelHealthRow` contract
+- 数据
+  - 无新表；对 `cost_records` 做 additive migration，不影响旧数据可读性
+
+## 10.8 E2 完工记录（v0.8）
+
+E2（数据备份 / 恢复）已实现：
+
+- `packages/shared`
+  - 新增 `BackupPackage` 及完整子 schema：
+    - providers / models / conversations / messages / files / memories
+    - prompt templates / personas
+    - cost records / roundtables / roundtable messages
+    - import/export response 与 counts
+- `apps/sidecar`
+  - `src/routes/admin.ts` 新增：
+    - `GET /v1/admin/export-data`
+    - `POST /v1/admin/import-data`
+  - 备份格式版本固定为 `taori-backup-v1`
+  - Provider 仅导出 `had_api_key`，不导出真实 key / key ref
+  - 导出时尝试把本地文件字节编码为 `data_b64`
+  - 导入支持 `overwrite / skip / rename`
+  - 导入时维护 provider / model / conversation / message / file / memory / template / persona / cost / roundtable 的 ID remap，并修复跨表引用
+  - `clear-all-data` 清理范围扩展至 files / memories / prompt_templates / personas / roundtables / roundtable_messages，并联动文件目录与 keystore 引用清理
+- `apps/web`
+  - `Settings.tsx` Danger Zone 新增：
+    - 导出全部数据按钮
+    - 导入策略选择器
+    - 导入备份文件入口
+  - 导出在本地生成 JSON 下载
+  - 导入完成后整页刷新，确保 renderer 状态与 sidecar 恢复结果一致
+- 测试
+  - Sidecar：`e2-backup-restore.test.ts`
+  - Web：`e2-backup-restore.spec.ts`
+
+## 10.9 E2 合同变化
+
+- `apps/sidecar`
+  - 新增 `/v1/admin/export-data`
+  - 新增 `/v1/admin/import-data`
+  - `clear-all-data` 的清理语义扩展为“全业务数据 + 文件目录 + keystore 引用”
+- `apps/web`
+  - `Settings` Danger Zone 从“仅清空”扩展为“导出 / 导入 / 清空”
+- `packages/shared`
+  - 新增 `BackupConflictStrategy`、`BackupPackage`、`BackupImportResponse`、`BackupExportResponse` 等备份 contract
+- 数据
+  - 无新表；新增本地 JSON 备份格式 `taori-backup-v1`
 
 ## 11. 灰盒原则提醒
 

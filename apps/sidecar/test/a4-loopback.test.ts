@@ -169,11 +169,13 @@ describe('A4 — POST /v1/roundtable/:id/loopback', () => {
     const body = res.json() as { conversation_id: string; message_id: string };
     expect(body.conversation_id).toBe(originId);
     const written = ctx.msgs.listByConversation(body.conversation_id);
-    expect(written).toHaveLength(1);
-    expect(written[0]!.role).toBe('assistant');
-    expect(written[0]!.content).toContain('🎯 推荐决策');
-    expect(written[0]!.content).toContain('prisma + atlas');
-    expect(written[0]!.content).toContain('来自圆桌讨论');
+    expect(written).toHaveLength(2);
+    expect(written[0]!.role).toBe('user');
+    expect(written[0]!.content).toContain('发起圆桌讨论：选 ORM');
+    expect(written[1]!.role).toBe('assistant');
+    expect(written[1]!.content).toContain('🎯 推荐决策');
+    expect(written[1]!.content).toContain('prisma + atlas');
+    expect(written[1]!.content).toContain('来自圆桌讨论');
   });
 
   it('mints a fresh chat conversation when origin is null', async () => {
@@ -191,6 +193,9 @@ describe('A4 — POST /v1/roundtable/:id/loopback', () => {
     const created = ctx.convs.get(body.conversation_id);
     expect(created?.type).toBe('chat');
     expect(created?.title).toContain('圆桌结论');
+    const written = ctx.msgs.listByConversation(body.conversation_id);
+    expect(written.map((m) => m.role)).toEqual(['user', 'assistant']);
+    expect(written[0]!.content).toContain('发起圆桌讨论：选 ORM');
   });
 
   it('rejects when the roundtable is not completed', async () => {

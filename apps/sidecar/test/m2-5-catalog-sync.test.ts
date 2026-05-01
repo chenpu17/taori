@@ -194,6 +194,136 @@ describe('catalog sync (M2.5 F-PR)', () => {
     expect(refreshed.price_synced_at).toBeGreaterThan(firstSyncedAt);
   });
 
+  it('refreshes Ark version-suffixed capability metadata including tool support', async () => {
+    fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
+      const url = typeof input === 'string' ? input : (input as Request).url;
+      if (url.includes('/models')) {
+        return new Response(
+          JSON.stringify({
+            data: [
+              {
+                id: 'doubao-1-5-lite-32k-250115',
+                name: 'Doubao 1.5 Lite 32K',
+                object: 'model',
+                status: null,
+                created: 0,
+                version: '250115',
+              },
+              {
+                id: 'doubao-1-5-vision-pro-32k-250115',
+                name: 'Doubao 1.5 Vision Pro 32K',
+                object: 'model',
+                status: null,
+                created: 0,
+                version: '250115',
+              },
+              {
+                id: 'doubao-seed-1-6-thinking-250615',
+                name: 'Doubao Seed 1.6 Thinking',
+                object: 'model',
+                status: null,
+                created: 0,
+                version: '250615',
+              },
+            ],
+          }),
+          { status: 200, headers: { 'content-type': 'application/json' } },
+        );
+      }
+      throw new Error(`unexpected fetch ${url}`);
+    });
+
+    const provRes = await app.inject({
+      method: 'POST',
+      url: '/v1/providers',
+      headers: authJson,
+      payload: {
+        name: 'Ark',
+        type: 'volcengine_ark',
+        base_url: 'https://ark.cn-beijing.volces.com/api/v3',
+        api_key: 'ark-test-key',
+      },
+    });
+    expect([200, 201]).toContain(provRes.statusCode);
+    const provider = provRes.json();
+
+    const discover = await app.inject({
+      method: 'GET',
+      url: `/v1/providers/${provider.id}/discover`,
+      headers: auth,
+    });
+    expect(discover.statusCode).toBe(200);
+    const discovered = discover.json().models as Array<{
+      model_name: string;
+      capability: string;
+      supports_tools: boolean;
+      supports_vision: boolean;
+      price_input_per_1m: number | null;
+    }>;
+    expect(discovered.find((m) => m.model_name === 'doubao-1-5-lite-32k-250115')?.supports_tools).toBe(true);
+    expect(discovered.find((m) => m.model_name === 'doubao-1-5-lite-32k-250115')?.price_input_per_1m).toBeCloseTo(0.04, 5);
+    expect(discovered.find((m) => m.model_name === 'doubao-1-5-vision-pro-32k-250115')?.capability).toBe('multimodal');
+
+    for (const model_name of [
+      'doubao-1-5-lite-32k-250115',
+      'doubao-1-5-vision-pro-32k-250115',
+      'doubao-seed-1-6-thinking-250615',
+    ]) {
+      const createRes = await app.inject({
+        method: 'POST',
+        url: '/v1/models',
+        headers: authJson,
+        payload: {
+          provider_id: provider.id,
+          model_name,
+          display_name: model_name,
+          capability: 'chat',
+          supports_tools: false,
+          supports_vision: false,
+        },
+      });
+      expect([200, 201]).toContain(createRes.statusCode);
+    }
+
+    const deleteKey = await app.inject({
+      method: 'DELETE',
+      url: `/v1/providers/${provider.id}/key`,
+      headers: auth,
+    });
+    expect(deleteKey.statusCode).toBe(204);
+
+    const sync = await app.inject({
+      method: 'POST',
+      url: '/v1/catalog/sync',
+      headers: authJson,
+      payload: { provider_id: provider.id },
+    });
+    expect(sync.statusCode).toBe(200);
+    expect(sync.json().ok).toBe(true);
+
+    const after = await app.inject({ method: 'GET', url: '/v1/models', headers: auth });
+    const rows = after.json().models as Array<{
+      model_name: string;
+      capability: string;
+      supports_tools: boolean;
+      supports_vision: boolean;
+    }>;
+    const lite = rows.find((m) => m.model_name === 'doubao-1-5-lite-32k-250115');
+    const vision = rows.find((m) => m.model_name === 'doubao-1-5-vision-pro-32k-250115');
+    const thinking = rows.find((m) => m.model_name === 'doubao-seed-1-6-thinking-250615');
+
+    expect(lite?.capability).toBe('chat');
+    expect(lite?.supports_tools).toBe(true);
+    expect(lite?.supports_vision).toBe(false);
+
+    expect(vision?.capability).toBe('multimodal');
+    expect(vision?.supports_tools).toBe(true);
+    expect(vision?.supports_vision).toBe(true);
+
+    expect(thinking?.capability).toBe('chat');
+    expect(thinking?.supports_tools).toBe(false);
+  });
+
   it('reports per-provider errors without aborting other providers', async () => {
     // Two providers — one returns 401, the other is fine. Sync should
     // surface the auth error in the errors array but still process the

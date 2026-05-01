@@ -114,18 +114,19 @@ test('model-center: opens, lists provider chip + chat model row, can disable + d
   await expect(rows).toHaveCount(0);
 });
 
-test('model-center: provider chip "测试" probes the first model and shows ✓ for keyless provider', async ({
+test('model-center: provider chip "测试" reports key_missing for keyless provider', async ({
   page,
 }) => {
   const env = readSidecarEnv();
   await resetSidecar(env);
-  await seedDefaultModel(env); // no api key → /test returns ok with note
+  await seedDefaultModel(env); // no api key → /test reports key_missing
   await page.goto('/');
   await page.getByTestId('open-model-center').click();
   const testBtn = page.locator('[data-testid^="provider-chip-test-"]').first();
   await testBtn.click();
   const result = page.locator('[data-testid^="provider-chip-test-result-"]').first();
   await expect(result).toBeVisible();
-  await expect(result).toContainText('✓');
+  await expect(result).toContainText('✗');
   await expect(result).toContainText('no_api_key_configured');
+  await expect(result).toContainText('key_missing');
 });

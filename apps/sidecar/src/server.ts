@@ -29,6 +29,7 @@ import { registerAdminRoute } from './routes/admin.js';
 import { registerToolsRoute } from './routes/tools.js';
 import { registerRoundtableRoute } from './routes/roundtable.js';
 import { registerCatalogRoute } from './routes/catalog.js';
+import { registerTemplatesPersonasRoute } from './routes/templates-personas.js';
 import { scheduleCatalogSync } from './catalog/index.js';
 import { CapabilityBus } from './bus/index.js';
 import { createFileReadTool } from './bus/builtins/file_read.js';
@@ -158,6 +159,7 @@ export function buildServer(args: BuildServerArgs): FastifyInstance {
   registerMemoriesRoute(app, argsWithBus);
   registerConversationsRoute(app, argsWithBus);
   registerAdminRoute(app, argsWithBus);
+  registerTemplatesPersonasRoute(app, argsWithBus);
 
   registerToolsRoute(app, { bus });
   registerRoundtableRoute(app, argsWithBus);

@@ -32,6 +32,7 @@ import { createOpenAI } from '@ai-sdk/openai';
 import { streamText, tool } from 'ai';
 import { z } from 'zod';
 import { ChatRequestSchema, TaoriError, calculateCostUsd, isChatCapable } from '@taori/shared';
+import type { ErrorClassification } from '@taori/shared';
 import type { BuildServerArgs } from '../server.js';
 import {
   ConversationsRepo,
@@ -41,10 +42,11 @@ import {
   CostsRepo,
   MemoriesRepo,
   FilesRepo,
+  PersonasRepo,
   type MessageRow,
 } from '../db/repos/index.js';
 import { classifyProviderError } from '../providers/registry.js';
-import { detectImageIntent, isIntentDisabledUntilNow } from '../intent.js';
+import { detectImageCommand } from '../intent.js';
 import type { CapabilityBus } from '../bus/index.js';
 
 const TEST_HOOKS_ENABLED = process.env.NODE_ENV !== 'production'
@@ -65,6 +67,7 @@ export function registerChatRoute(
   const costsRepo = new CostsRepo(deps.db);
   const memoriesRepo = new MemoriesRepo(deps.db);
   const filesRepo = new FilesRepo(deps.db);
+  const personasRepo = new PersonasRepo(deps.db);
 
   app.post('/v1/chat', async (req, reply) => {
     const parsed = ChatRequestSchema.safeParse(req.body);
@@ -109,6 +112,41 @@ export function registerChatRoute(
     }
 
     const conversation = convRepo.ensure(body.conversation_id);
+    let resolvedPersonaPrompt: string | null = null;
+    if (body.persona_id) {
+      const persona = personasRepo.get(body.persona_id);
+      if (!persona) {
+        throw new TaoriError({
+          code: 'not_found',
+          message: `Persona ${body.persona_id} not found`,
+        });
+      }
+      memoriesRepo.set(
+        'session',
+        conversation.id,
+        'active_persona_id',
+        persona.id,
+      );
+      resolvedPersonaPrompt = persona.prompt;
+    } else {
+      const boundPersonaId = memoriesRepo.get(
+        'session',
+        conversation.id,
+        'active_persona_id',
+      );
+      if (boundPersonaId) {
+        const boundPersona = personasRepo.get(boundPersonaId);
+        if (boundPersona) {
+          resolvedPersonaPrompt = boundPersona.prompt;
+        } else {
+          memoriesRepo.delete(
+            'session',
+            conversation.id,
+            'active_persona_id',
+          );
+        }
+      }
+    }
     const model = modelsRepo.get(body.model_id);
     const provider = model?.provider_id ? providersRepo.get(model.provider_id) : null;
 
@@ -185,38 +223,30 @@ export function registerChatRoute(
     // Persist user turn + assistant placeholder atomically so a crash between
     // them can't leave an orphaned user message or a half-recorded turn.
     //
-    // M2.4 — image-intent fast path: if the user's text matches the intent
-    // regex AND the session-level escape memory is NOT active, we skip the
-    // assistant placeholder entirely. The renderer-side image picker will
-    // call /v1/tools/invoke later, and `image_generate.execute` will then
-    // insert the assistant message itself with parent_message_id linked to
-    // the user message we persist here. (See spec §2.2 step 3.)
+    // M2.4 — explicit image command route. Natural-language image requests
+    // must stay on the chat path so tool-capable models can decide whether to
+    // call `image_generate` themselves. Regex intent routing was removed here
+    // because it fired before the LLM and felt like a false "tool call".
     let intentRoute: { prompt: string; user_message_id: string } | null = null;
     if (lastUserMsg?.content) {
-      const intent = detectImageIntent(lastUserMsg.content);
-      if (intent.hit) {
-        const escape = memoriesRepo.getEffective(
-          conversation.id,
-          'intent_route_disabled_until',
-        );
-        const disabled = isIntentDisabledUntilNow(escape, Date.now());
-        if (!disabled) {
-          const userRow = deps.db.transaction((tx) => {
-            const txMsgRepo = new MessagesRepo(tx);
-            return txMsgRepo.insert({
-              conversation_id: conversation.id,
-              role: 'user',
-              content: lastUserMsg.content,
-              status: 'complete',
-              attachments:
-                attachments.length > 0 ? JSON.stringify(attachments) : null,
-            });
+      const command = detectImageCommand(lastUserMsg.content);
+      if (command.hit) {
+        const userRow = deps.db.transaction((tx) => {
+          const txMsgRepo = new MessagesRepo(tx);
+          return txMsgRepo.insert({
+            conversation_id: conversation.id,
+            role: 'user',
+            content: lastUserMsg.content,
+            status: 'complete',
+            attachments:
+              attachments.length > 0 ? JSON.stringify(attachments) : null,
           });
-          intentRoute = { prompt: intent.prompt, user_message_id: userRow.id };
-        }
+        });
+        intentRoute = { prompt: command.prompt, user_message_id: userRow.id };
       }
     }
 
+    let sourceUserMessageId: string | null = intentRoute?.user_message_id ?? null;
     const assistantMsg = intentRoute
       ? null
       : deps.db.transaction((tx) => {
@@ -225,13 +255,20 @@ export function registerChatRoute(
           // existing user message, the user row is already in the DB; a
           // second insert here would duplicate it in the history.
           if (lastUserMsg && !parsed.data.skip_user_persist) {
-            txMsgRepo.insert({
+            const userRow = txMsgRepo.insert({
               conversation_id: conversation.id,
               role: 'user',
               content: lastUserMsg.content,
               status: 'complete',
               attachments: attachments.length > 0 ? JSON.stringify(attachments) : null,
             });
+            sourceUserMessageId = userRow.id;
+          } else if (lastUserMsg) {
+            const existingUser = txMsgRepo
+              .listByConversation(conversation.id)
+              .filter((m) => m.role === 'user')
+              .at(-1);
+            sourceUserMessageId = existingUser?.id ?? null;
           }
           return txMsgRepo.insert({
             conversation_id: conversation.id,
@@ -279,7 +316,7 @@ export function registerChatRoute(
 
     reply.send(stream);
 
-    // M2.4 image-intent fast path: emit capability_route annotation, end.
+    // M2.4 explicit image-command path: emit capability_route annotation, end.
     if (intentRoute) {
       stream.write(
         `8:${JSON.stringify([
@@ -317,19 +354,23 @@ export function registerChatRoute(
       priceOutputPer1m: model?.price_output_per_1m ?? null,
       pricePerCall: model?.price_per_call ?? null,
       userText: lastUserMsg?.content ?? '',
-      messages: body.messages,
+      messages: resolvedPersonaPrompt
+        ? [{ role: 'system', content: resolvedPersonaPrompt }, ...body.messages]
+        : body.messages,
       attachments,
       log: req.log,
       forcedClassification: TEST_HOOKS_ENABLED
         ? readForcedClassification(req.headers[FORCE_CLASSIFICATION_HEADER])
         : null,
       capability: model?.capability ?? 'chat',
+      supportsTools: model?.supports_tools === true,
+      sourceUserMessageId,
       bus: deps.bus ?? null,
       // Pick an image candidate at request time (default → cheapest enabled).
       // If the chat model itself isn't chat-capable (e.g. an image-only model),
       // skip — there's no LLM to dispatch tool calls.
       imageModelId:
-        deps.bus && model && isChatCapable(model.capability)
+        deps.bus && model && isChatCapable(model.capability) && model.supports_tools
           ? (modelsRepo.defaultFor('image') ??
               modelsRepo.pickCheapestActive('image', ''))?.id ?? null
           : null,
@@ -394,10 +435,14 @@ interface ProduceCtx {
   forcedClassification: string | null;
   /** capability of the model — used to pick fallback within same family */
   capability: string;
+  /** Whether the selected chat model is expected to support tool calls. */
+  supportsTools: boolean;
+  /** Persisted user message that triggered this assistant turn. */
+  sourceUserMessageId: string | null;
   /**
    * M2.5 §F-CR — capability-bus reference and the image model the LLM should
    * route image_generate calls to. Both null = no image tool offered. The
-   * fast-path image-intent route runs BEFORE this and is mutually exclusive.
+   * explicit command route runs BEFORE this and is mutually exclusive.
    */
   bus: CapabilityBus | null;
   imageModelId: string | null;
@@ -465,10 +510,17 @@ function finalizeOnEnd(
 ): void {
   let collected = '';
   let lineBuffer = '';
-  let usage: { input: number; output: number; durationMs: number; calls: number } = {
+  let usage: {
+    input: number;
+    output: number;
+    durationMs: number;
+    firstTokenMs: number | null;
+    calls: number;
+  } = {
     input: 0,
     output: 0,
     durationMs: 0,
+    firstTokenMs: null,
     calls: 1,
   };
   let upstreamErrored = false;
@@ -496,6 +548,7 @@ function finalizeOnEnd(
             usage.input = (ann.input_tokens as number) ?? usage.input;
             usage.output = (ann.output_tokens as number) ?? usage.output;
             usage.durationMs = (ann.duration_ms as number) ?? usage.durationMs;
+            usage.firstTokenMs = (ann.first_token_ms as number | null) ?? usage.firstTokenMs;
           }
         }
       } catch {
@@ -553,6 +606,8 @@ function finalizeOnEnd(
         estimated_cost_usd: null,
         actual_cost_usd: actual,
         success,
+        classification: success ? null : ((upstreamClassification as ErrorClassification | null) ?? null),
+        first_token_ms: usage.firstTokenMs,
         duration_ms: usage.durationMs || null,
       });
     } catch (e) {
@@ -691,6 +746,17 @@ function buildUpstreamMessages(ctx: ProduceCtx): any {
   return out;
 }
 
+function withImageToolInstruction(messages: any[]): any[] {
+  return [
+    {
+      role: 'system',
+      content:
+        'If the user asks you to create, draw, render, or generate an image, call the image_generate tool. Do not claim you cannot generate images when the tool is available. If the user is asking about capability, or says not to generate an image, answer normally without calling the tool.',
+    },
+    ...messages,
+  ];
+}
+
 async function produceUpstreamStream(
   stream: PassThrough,
   signal: AbortSignal,
@@ -700,6 +766,7 @@ async function produceUpstreamStream(
   memoriesRepo: MemoriesRepo,
 ): Promise<void> {
   const startedAt = Date.now();
+  let firstTokenAt: number | null = null;
   const write = (line: string): boolean => stream.write(line);
 
   // Always announce the assistant message id first so the Renderer can wire
@@ -728,10 +795,8 @@ async function produceUpstreamStream(
     // M2.5 §F-CR — Inject `image_generate` as an LLM tool when:
     //  • the user has at least one enabled image-capability model;
     //  • the chat model itself supports text I/O (chat or multimodal).
-    // The fast-path image-intent route already took precedence above, so
-    // when we reach here either (a) the user's text didn't match the regex
-    // or (b) they had no image model. Case (a) is precisely where the LLM
-    // should be allowed to pick the tool itself.
+    // Natural-language requests reach this path unchanged; when image tools
+    // are available, the LLM decides whether to call `image_generate`.
     const tools = ctx.bus && ctx.imageModelId
       ? {
           image_generate: tool({
@@ -746,11 +811,12 @@ async function produceUpstreamStream(
             }),
             execute: async ({ prompt }) => {
               const result = await ctx.bus!.invoke(
-                'image_generate',
+                'builtin.image_generate',
                 { prompt, model_id: ctx.imageModelId! },
                 {
                   conversationId: ctx.conversationId,
-                  sourceMessageId: ctx.messageId,
+                  sourceMessageId: ctx.sourceUserMessageId,
+                  targetMessageId: ctx.messageId,
                 },
               );
               if (!result.ok) {
@@ -809,9 +875,10 @@ async function produceUpstreamStream(
         }
       : undefined;
 
+    const upstreamMessages = buildUpstreamMessages(ctx);
     const result = await streamText({
       model: provider.chat(cfg.modelName),
-      messages: buildUpstreamMessages(ctx),
+      messages: tools ? withImageToolInstruction(upstreamMessages) : upstreamMessages,
       abortSignal: signal,
       ...(tools && { tools, maxSteps: 3 }),
     });
@@ -819,6 +886,7 @@ async function produceUpstreamStream(
     let chunks = 0;
     for await (const delta of result.textStream) {
       if (signal.aborted) break;
+      if (firstTokenAt == null) firstTokenAt = Date.now();
       write(`0:${JSON.stringify(delta)}\n`);
       chunks++;
     }
@@ -876,6 +944,7 @@ async function produceUpstreamStream(
           input_tokens: promptTokens,
           output_tokens: completionTokens,
           actual_usd: actualUsd,
+          first_token_ms: firstTokenAt == null ? null : firstTokenAt - startedAt,
           duration_ms: Date.now() - startedAt,
         },
       ])}\n`,
@@ -976,6 +1045,7 @@ async function produceMockStream(
   memoriesRepo: MemoriesRepo,
 ): Promise<void> {
   const startedAt = Date.now();
+  let firstTokenAt: number | null = null;
   const write = (line: string): boolean => stream.write(line);
 
   // Lead annotation so the renderer knows which message this stream belongs to.
@@ -1015,6 +1085,7 @@ async function produceMockStream(
       stream.end();
       return;
     }
+    if (firstTokenAt == null) firstTokenAt = Date.now();
     write(`0:${JSON.stringify(chunk)}\n`);
     i++;
     await sleep(40);
@@ -1028,6 +1099,7 @@ async function produceMockStream(
         input_tokens: 12,
         output_tokens: text.length,
         actual_usd: 0.00009,
+        first_token_ms: firstTokenAt == null ? null : firstTokenAt - startedAt,
         duration_ms: Date.now() - startedAt,
       },
     ])}\n`,

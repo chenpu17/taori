@@ -78,6 +78,10 @@ test('Phase 3 user journey: chat → cost → reload → drop reject → error p
   });
   await page.reload();
   await expect(page.getByTestId('composer-form')).toBeVisible({ timeout: 10_000 });
+  await page.route('**/v1/chat', async (route) => {
+    const headers = { ...route.request().headers(), 'x-test-force-classification': 'rate_limit' };
+    await route.continue({ headers });
+  });
   await page.getByTestId('composer-input').fill('this should fail');
   await page.getByTestId('composer-send').click();
   await expect(page.getByTestId('chat-error')).toBeVisible({ timeout: 15_000 });

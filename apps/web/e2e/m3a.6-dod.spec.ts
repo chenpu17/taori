@@ -13,7 +13,8 @@
  *   5. round 1 done → user clicks 再来一轮 → round 2 streams
  *   6. user clicks 总结结束 → summary streams → conclusion card + total cost
  *   7. user clicks 导出 Markdown → file downloaded
- *   8. reload → panel restored
+ *   8. reload → loopback chat keeps messages visible, with an explicit entry
+ *      to reopen the roundtable process
  */
 import { test, expect } from '@playwright/test';
 import {
@@ -162,12 +163,19 @@ test('M3.A.6 DoD: 8-step user-view round-table happy path', async ({
   const download = await downloadPromise;
   expect(download.suggestedFilename()).toMatch(/^roundtable_.+\.md$/);
 
-  // --- Step 8: reload → panel restored on the same conversation.
+  // --- Step 8: reload → latest loopback chat keeps messages visible. The
+  //     roundtable process is still reachable through an explicit banner.
   await page.reload();
   await expect(page.getByTestId('chat-panel')).toBeVisible({ timeout: 10_000 });
   const firstConv = page.getByTestId('conv-item').first();
   await expect(firstConv).toBeVisible({ timeout: 10_000 });
   await firstConv.click();
+  const messages = page.getByTestId('messages');
+  await expect(messages).toBeVisible({ timeout: 15_000 });
+  await expect(messages).toContainText('发起圆桌讨论：如何选 SaaS 计费模型？');
+  await expect(messages).toContainText('来自圆桌讨论');
+  await expect(page.getByTestId('roundtable-associated-banner')).toBeVisible();
+  await page.getByTestId('roundtable-associated-open').click();
   await expect(page.getByTestId('roundtable-panel')).toBeVisible({
     timeout: 15_000,
   });

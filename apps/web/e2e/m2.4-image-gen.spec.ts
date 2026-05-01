@@ -2,18 +2,19 @@ import { test, expect } from '@playwright/test';
 import { readSidecarEnv, resetSidecar, authedFetch } from './_helpers';
 
 /**
- * M2.4 — intent → picker → image_generate flow.
+ * M2.4 — explicit command → picker → image_generate flow.
  *
  * We seed:
  *   - one chat-capable model (so onboarding completes / chat works)
  *   - one image-capable model (so the picker has a valid choice)
- * Then we type "画一张机器人", expect the picker dialog, click the
+ * Then we type "/image 画一张机器人", expect the picker dialog, click the
  * X-Test-Force-Image-Result=success path, and verify a new assistant
  * message lands.
  */
 
 let env: ReturnType<typeof readSidecarEnv>;
 let imageModelId: string;
+let chatModelId: string;
 
 test.beforeEach(async () => {
   env = readSidecarEnv();
@@ -29,7 +30,7 @@ test.beforeEach(async () => {
     }),
   });
   const provider = (await pr.json()) as { id: string };
-  await authedFetch(env, '/v1/models', {
+  const cm = await authedFetch(env, '/v1/models', {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({
@@ -40,6 +41,7 @@ test.beforeEach(async () => {
       is_default_for: 'chat',
     }),
   });
+  chatModelId = ((await cm.json()) as { id: string }).id;
   const im = await authedFetch(env, '/v1/models', {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
@@ -54,7 +56,53 @@ test.beforeEach(async () => {
   imageModelId = ((await im.json()) as { id: string }).id;
 });
 
-test('M2.4 image intent → picker opens → force=success → assistant message arrives', async ({ page }) => {
+test('M2.4 preflight explains explicit image command for non-tool chat model', async ({ page }) => {
+  await page.goto('/');
+  await expect(page.getByTestId('chat-panel')).toBeVisible({ timeout: 10_000 });
+
+  const image = page.getByTestId('preflight-image');
+  await expect(image).toBeVisible({ timeout: 10_000 });
+  await expect(image).toHaveAttribute('data-state', 'warn');
+  await expect(image).toContainText('/image');
+});
+
+test('M2.4 preflight explains tool-call image generation for tool-capable chat model', async ({ page }) => {
+  await authedFetch(env, `/v1/models/${chatModelId}`, {
+    method: 'PATCH',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ supports_tools: true }),
+  });
+
+  await page.goto('/');
+  await expect(page.getByTestId('chat-panel')).toBeVisible({ timeout: 10_000 });
+
+  const image = page.getByTestId('preflight-image');
+  await expect(image).toBeVisible({ timeout: 10_000 });
+  await expect(image).toHaveAttribute('data-state', 'ready');
+  await expect(image).toContainText('自主调用工具');
+});
+
+test('M2.4 preflight updates after editing model tool capability in Model Center', async ({ page }) => {
+  await page.goto('/');
+  await expect(page.getByTestId('chat-panel')).toBeVisible({ timeout: 10_000 });
+
+  const image = page.getByTestId('preflight-image');
+  await expect(image).toHaveAttribute('data-state', 'warn');
+
+  await page.getByTestId('preflight-open-model-center').click();
+  await expect(page.getByTestId('model-center')).toBeVisible();
+  await page.getByTestId(`model-edit-${chatModelId}`).click();
+  await expect(page.getByTestId('model-editor')).toBeVisible();
+  await page.getByTestId('model-editor-supports-tools').check();
+  await page.getByTestId('model-editor-save').click();
+  await expect(page.getByTestId('model-editor')).toHaveCount(0);
+  await page.getByTestId('model-center-close').click();
+
+  await expect(image).toHaveAttribute('data-state', 'ready', { timeout: 10_000 });
+  await expect(image).toContainText('自主调用工具');
+});
+
+test('M2.4 explicit image command → picker opens → force=success → assistant message arrives', async ({ page }) => {
   // Inject the test-force header on tool invokes (renderer-driven calls).
   await page.route('**/v1/tools/invoke', async (route) => {
     const headers = {
@@ -67,7 +115,7 @@ test('M2.4 image intent → picker opens → force=success → assistant message
   await page.goto('/');
   await expect(page.getByTestId('chat-panel')).toBeVisible({ timeout: 10_000 });
 
-  await page.getByTestId('composer-input').fill('画一张机器人');
+  await page.getByTestId('composer-input').fill('/image 画一张机器人');
   await page.getByTestId('composer-send').click();
 
   const dialog = page.getByTestId('image-picker-dialog');
@@ -90,24 +138,79 @@ test('M2.4 image intent → picker opens → force=success → assistant message
   await expect(assistant).toContainText(/Generated with|DALL-E/i, { timeout: 10_000 });
 });
 
-test('M2.4 escape button writes intent_route_disabled_until and closes picker', async ({ page }) => {
+test('M2.4 explicit /image command opens picker', async ({ page }) => {
+  await page.goto('/');
+  await expect(page.getByTestId('chat-panel')).toBeVisible({ timeout: 10_000 });
+
+  await page.getByTestId('composer-input').fill('/image a robot');
+  await page.getByTestId('composer-send').click();
+
+  const dialog = page.getByTestId('image-picker-dialog');
+  await expect(dialog).toBeVisible({ timeout: 10_000 });
+  await expect(dialog.getByTestId('image-picker-prompt')).toContainText('a robot');
+  await expect(dialog.getByTestId('image-memory-hint')).toContainText('仅本次不会写入偏好');
+  await expect(dialog.getByTestId(`image-model-radio-${imageModelId}`)).toBeChecked();
+});
+
+test('M2.4 model selectors distinguish same model names by provider', async ({ page }) => {
+  const pr = await authedFetch(env, '/v1/providers', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      name: 'Huawei MaaS',
+      type: 'huawei_maas',
+      base_url: 'https://huawei.example.com/openai/v1',
+      api_key: 'hw-test',
+    }),
+  });
+  const huawei = (await pr.json()) as { id: string };
+  await authedFetch(env, '/v1/models', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      provider_id: huawei.id,
+      model_name: 'gpt-4o',
+      capability: 'chat',
+      display_name: 'Chat 4o',
+    }),
+  });
+  await authedFetch(env, '/v1/models', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      provider_id: huawei.id,
+      model_name: 'dall-e-3-compatible',
+      capability: 'image',
+      display_name: 'DALL-E 3',
+      price_per_call: 0.03,
+    }),
+  });
+
+  await page.goto('/');
+  await expect(page.getByTestId('chat-panel')).toBeVisible({ timeout: 10_000 });
+
+  const activeOptions = page.getByTestId('active-model').locator('option');
+  await expect(activeOptions.filter({ hasText: 'Chat 4o · OAI' })).toHaveCount(1);
+  await expect(activeOptions.filter({ hasText: 'Chat 4o · Huawei MaaS' })).toHaveCount(1);
+
+  await page.getByTestId('composer-input').fill('/image a robot');
+  await page.getByTestId('composer-send').click();
+  const dialog = page.getByTestId('image-picker-dialog');
+  await expect(dialog).toBeVisible({ timeout: 10_000 });
+  const imageOptions = dialog.getByTestId('image-model-list').locator('label');
+  await expect(imageOptions.filter({ hasText: 'DALL-E 3 · OAI' })).toHaveCount(1);
+  await expect(imageOptions.filter({ hasText: 'DALL-E 3 · Huawei MaaS' })).toHaveCount(1);
+});
+
+test('M2.4 natural-language image request does not open picker for non-tool chat model', async ({ page }) => {
   await page.goto('/');
   await expect(page.getByTestId('chat-panel')).toBeVisible({ timeout: 10_000 });
 
   await page.getByTestId('composer-input').fill('画一张机器人');
   await page.getByTestId('composer-send').click();
 
-  const dialog = page.getByTestId('image-picker-dialog');
-  await expect(dialog).toBeVisible({ timeout: 10_000 });
-
-  await dialog.getByTestId('image-picker-escape').click();
-  await expect(dialog).toBeHidden();
-
-  // After escape, the next image-intent message must NOT open the picker
-  // (intent_route_disabled_until is set 30 min into the future).
-  await page.getByTestId('composer-input').fill('画一只猫');
-  await page.getByTestId('composer-send').click();
-  // Wait for the chat round-trip to settle — picker should never appear.
-  await page.waitForTimeout(2500);
+  // Natural-language requests stay on the chat path. Only explicit /image
+  // commands open the picker before the LLM round-trip.
+  await page.waitForTimeout(1500);
   await expect(page.getByTestId('image-picker-dialog')).toHaveCount(0);
 });

@@ -29,6 +29,12 @@ import { classifyProviderError } from '../providers/registry.js';
 export interface ToolContext {
   conversationId?: string | null;
   sourceMessageId?: string | null;
+  /**
+   * Optional assistant message that should receive tool output attachments.
+   * Used by LLM-side tool calls so generated images stay on the same answer
+   * after history reload; direct /tools invocations can omit it.
+   */
+  targetMessageId?: string | null;
   /** dev-only test hook — see routes/tools.ts and bus/builtins/image_generate.ts */
   testForce?: 'success' | 'quota' | 'content_filter' | 'billed_4xx' | null;
 }

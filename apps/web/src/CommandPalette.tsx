@@ -4,20 +4,20 @@ export interface Conversation {
   id: string;
   title: string | null;
   pinned?: boolean;
-  tags?: string;
+  tags?: string | null;
 }
 
 export interface Model {
   id: string;
   model_name: string;
   display_name: string;
-  provider_id?: string;
-  is_default_for?: string;
+  provider_id?: string | null;
+  is_default_for?: string | null;
 }
 
 export interface CmdResult {
   id: string;
-  category: 'conversation' | 'model' | 'settings' | 'help' | 'roundtable' | 'models-center';
+  category: 'conversation' | 'model' | 'settings' | 'help' | 'roundtable' | 'models-center' | 'costs';
   title: string;
   subtitle?: string;
   data?: any;
@@ -29,6 +29,8 @@ interface CommandPaletteProps {
   onSelectConv: (convId: string) => void;
   onSelectModel: (modelId: string) => void;
   onNavigate?: (path: string) => void;
+  onOpenHelp?: () => void;
+  onOpenRoundtable?: () => void;
   conversations: Conversation[];
   models: Model[];
 }
@@ -39,6 +41,8 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({
   onSelectConv,
   onSelectModel,
   onNavigate,
+  onOpenHelp,
+  onOpenRoundtable,
   conversations,
   models,
 }) => {
@@ -52,6 +56,7 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({
     if (!query.trim()) {
       // 空查询时显示固定命令 + 最近会话
       const fixed: CmdResult[] = [
+        { id: 'costs', category: 'costs', title: '打开成本看板' },
         { id: 'models-center', category: 'models-center', title: '打开模型中心' },
         { id: 'settings', category: 'settings', title: '打开设置' },
         { id: 'roundtable', category: 'roundtable', title: '启动新圆桌' },
@@ -98,6 +103,7 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({
 
     // 固定命令（如果不是空查询）
     const fixedCommands: CmdResult[] = [
+      { id: 'costs', category: 'costs', title: '打开成本看板' },
       { id: 'models-center', category: 'models-center', title: '打开模型中心' },
       { id: 'settings', category: 'settings', title: '打开设置' },
       { id: 'roundtable', category: 'roundtable', title: '启动新圆桌' },
@@ -159,12 +165,14 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({
       case 'settings':
         onNavigate?.('/settings');
         break;
+      case 'costs':
+        onNavigate?.('/costs');
+        break;
       case 'help':
-        // 触发 B3 帮助面板
-        (window as any).__showHelpCenter?.();
+        onOpenHelp?.();
         break;
       case 'roundtable':
-        (window as any).__showRoundtableAnalyzer?.();
+        onOpenRoundtable?.();
         break;
       case 'models-center':
         onNavigate?.('/models');

@@ -110,6 +110,8 @@ CREATE TABLE IF NOT EXISTS cost_records (
   estimated_cost_usd REAL,
   actual_cost_usd REAL,
   success INTEGER NOT NULL DEFAULT 1,
+  classification TEXT,
+  first_token_ms INTEGER,
   duration_ms INTEGER,
   created_at INTEGER NOT NULL
 );
@@ -127,6 +129,24 @@ CREATE TABLE IF NOT EXISTS memories (
   updated_at INTEGER NOT NULL
 );
 CREATE UNIQUE INDEX IF NOT EXISTS memories_scope_key_uniq ON memories(scope, scope_id, key);
+
+CREATE TABLE IF NOT EXISTS prompt_templates (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  description TEXT,
+  content TEXT NOT NULL,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS personas (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  description TEXT,
+  prompt TEXT NOT NULL,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+);
 
 CREATE TABLE IF NOT EXISTS roundtables (
   id TEXT PRIMARY KEY,
@@ -174,6 +194,26 @@ export function openDb(dbPath: string): Db {
   sqlite.pragma('journal_mode = WAL');
   sqlite.pragma('foreign_keys = ON');
   sqlite.exec(DDL);
+  // SQLite UNIQUE indexes treat NULL values as distinct. Keep one logical row
+  // per memory key before adding the NULL-safe expression index.
+  sqlite.exec(`
+DELETE FROM memories
+WHERE id IN (
+  SELECT id
+  FROM (
+    SELECT
+      id,
+      ROW_NUMBER() OVER (
+        PARTITION BY scope, COALESCE(scope_id, ''), key
+        ORDER BY updated_at DESC, created_at DESC, id DESC
+      ) AS rn
+    FROM memories
+  )
+  WHERE rn > 1
+);
+CREATE UNIQUE INDEX IF NOT EXISTS memories_scope_key_uniq_v2
+  ON memories(scope, COALESCE(scope_id, ''), key);
+`);
   // Idempotent additive migrations for columns added after initial release.
   // Older dev DBs created before §7.5.2 fault tracking lack `last_failure_at`.
   const cols = sqlite
@@ -215,6 +255,16 @@ export function openDb(dbPath: string): Db {
   }
   if (!convCols.some((c) => c.name === 'tags')) {
     sqlite.exec(`ALTER TABLE conversations ADD COLUMN tags TEXT`);
+  }
+  // E1 — additive observability columns on cost_records.
+  const costCols = sqlite
+    .prepare(`PRAGMA table_info(cost_records)`)
+    .all() as Array<{ name: string }>;
+  if (!costCols.some((c) => c.name === 'classification')) {
+    sqlite.exec(`ALTER TABLE cost_records ADD COLUMN classification TEXT`);
+  }
+  if (!costCols.some((c) => c.name === 'first_token_ms')) {
+    sqlite.exec(`ALTER TABLE cost_records ADD COLUMN first_token_ms INTEGER`);
   }
   return drizzle(sqlite, { schema });
 }

@@ -50,6 +50,11 @@ const PROVIDER_PRESETS: Partial<
     default_base_url: 'https://ark.cn-beijing.volces.com/api/v3',
     help: '一个 Key 解锁文本、多模态、文生图、文生视频。',
   },
+  huawei_maas: {
+    label: '华为云 MaaS（盘古 / DeepSeek / Kimi / Qwen）',
+    default_base_url: 'https://api.modelarts-maas.com/openai/v1',
+    help: '华为云 ModelArts MaaS，兼容 OpenAI Chat Completions。',
+  },
   custom: {
     label: '自定义（OpenAI 兼容）',
     default_base_url: '',
@@ -74,6 +79,7 @@ export function Onboarding({ onDone, onSkip }: OnboardingProps): JSX.Element {
       display_name: string;
       capability: import('@taori/shared').ModelCapability;
       supports_vision: boolean;
+      supports_tools: boolean;
       price_input_per_1m: number | null;
       price_output_per_1m: number | null;
       price_per_image: number | null;
@@ -127,6 +133,7 @@ export function Onboarding({ onDone, onSkip }: OnboardingProps): JSX.Element {
             display_name: m.display_name,
             capability: m.capability,
             supports_vision: m.supports_vision,
+            supports_tools: m.supports_tools ?? false,
             price_input_per_1m: m.price_input_per_1m,
             price_output_per_1m: m.price_output_per_1m,
             price_per_image: m.price_per_image ?? null,
@@ -142,8 +149,14 @@ export function Onboarding({ onDone, onSkip }: OnboardingProps): JSX.Element {
       // Then add up to 2 additional non-vision low-tier picks.
       const initial = new Set<string>();
       if (primary) initial.add(primary);
+      const firstVision = disc.models.find((m) => m.capability === 'multimodal');
+      if (firstVision) initial.add(firstVision.model_name);
+      const firstImage = disc.models.find((m) => m.capability === 'image');
+      if (firstImage) initial.add(firstImage.model_name);
+      const firstVideo = disc.models.find((m) => m.capability === 'video');
+      if (firstVideo) initial.add(firstVideo.model_name);
       for (const m of disc.models) {
-        if (initial.size >= 3) break;
+        if (initial.size >= 4) break;
         if (!initial.has(m.model_name)) initial.add(m.model_name);
       }
       setChosenSet(initial);
@@ -186,6 +199,7 @@ export function Onboarding({ onDone, onSkip }: OnboardingProps): JSX.Element {
           capability,
           display_name: candidate.display_name,
           supports_vision: candidate.supports_vision,
+          supports_tools: candidate.supports_tools,
           price_input_per_1m: candidate.price_input_per_1m,
           price_output_per_1m: candidate.price_output_per_1m,
           price_per_image: candidate.price_per_image,
@@ -338,6 +352,7 @@ export function Onboarding({ onDone, onSkip }: OnboardingProps): JSX.Element {
                     <span className="cand-cap">{capLabel[m.capability] ?? m.capability}</span>
                     <span className="cand-name">{m.display_name}</span>
                     {m.supports_vision && <span title="支持视觉"> 👁</span>}
+                    {m.supports_tools && <span title="支持工具调用"> 🧰</span>}
                     {tier && (
                       <span className={`price-badge tier-${tier}`}>
                         {PRICE_TIER_LABEL[tier]}

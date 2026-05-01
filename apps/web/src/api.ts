@@ -14,6 +14,7 @@ import type {
   ProviderTestRequest,
   ProviderTestResponse,
   Model,
+  ModelHealthRow,
   ModelCreate,
   ModelUpdate,
   ModelDiscoveryResponse,
@@ -22,6 +23,16 @@ import type {
   RoundtableMode,
   RoundtableMessage,
   Participant,
+  PromptTemplate,
+  PromptTemplateCreate,
+  PromptTemplateUpdate,
+  Persona,
+  PersonaCreate,
+  PersonaUpdate,
+  BackupConflictStrategy,
+  BackupExportResponse,
+  BackupImportResponse,
+  BackupPackage,
 } from '@taori/shared';
 
 async function json<T>(res: Response): Promise<T> {
@@ -102,6 +113,10 @@ export const api = {
 
   listModels: () =>
     authedFetch('/v1/models').then((r) => json<{ models: Model[] }>(r)),
+  modelsHealth: () =>
+    authedFetch('/v1/models/health').then((r) =>
+      json<{ rows: ModelHealthRow[] }>(r),
+    ),
   createModel: (input: ModelCreate) =>
     authedFetch('/v1/models', {
       method: 'POST',
@@ -148,7 +163,7 @@ export const api = {
   },
 
   costsBreakdown: (
-    scope: 'session' | 'today' | 'month',
+    scope: 'session' | 'today' | 'week' | 'month',
     conversationId?: string | null,
   ) => {
     const params = new URLSearchParams({ scope });
@@ -157,7 +172,8 @@ export const api = {
       json<{
         ok: boolean;
         data: {
-          scope: 'session' | 'today' | 'month';
+          scope: 'session' | 'today' | 'week' | 'month';
+          group_by: 'model_feature' | 'model' | 'conversation' | 'feature';
           rows: Array<{
             model_id: string | null;
             model_name_snapshot: string | null;
@@ -166,6 +182,41 @@ export const api = {
             count: number;
             success_count: number;
             billed_failure_count: number;
+          }>;
+        };
+      }>(r),
+    );
+  },
+
+  costsDashboardBreakdown: (
+    scope: 'today' | 'week' | 'month',
+    groupBy: 'model' | 'conversation' | 'feature',
+  ) => {
+    const params = new URLSearchParams({ scope, group_by: groupBy });
+    return authedFetch(`/v1/costs/breakdown?${params.toString()}`).then((r) =>
+      json<{
+        ok: boolean;
+        data: {
+          scope: 'today' | 'week' | 'month';
+          group_by: 'model' | 'conversation' | 'feature';
+          rows: Array<{
+            key: string;
+            label: string;
+            model_id: string | null;
+            model_name_snapshot: string | null;
+            conversation_id: string | null;
+            conversation_title: string | null;
+            feature: string | null;
+            sum_usd: number;
+            count: number;
+            success_count: number;
+            billed_failure_count: number;
+            trend: Array<{
+              bucket_start: number;
+              label: string;
+              sum_usd: number;
+              count: number;
+            }>;
           }>;
         };
       }>(r),
@@ -286,6 +337,20 @@ export const api = {
       }>(r),
     ),
   // M2.1 — three-tier scoped key/value (renderer-driven preferences).
+  getMemory: (
+    scope: 'global' | 'session' | 'user',
+    key: string,
+    scopeId?: string | null,
+  ) => {
+    const qs = new URLSearchParams({ scope, key });
+    if (scopeId) qs.set('scope_id', scopeId);
+    return authedFetch(`/v1/memories?${qs.toString()}`).then((r) =>
+      json<{
+        ok: boolean;
+        data: { scope: string; scope_id: string | null; key: string; value: string | null };
+      }>(r),
+    );
+  },
   getMemoryEffective: (key: string, conversationId?: string | null) => {
     const qs = new URLSearchParams({ key });
     if (conversationId) qs.set('conversation_id', conversationId);
@@ -306,6 +371,57 @@ export const api = {
     }).then((r) =>
       json<{ ok: boolean }>(r),
     ),
+  deleteMemory: (
+    scope: 'global' | 'session' | 'user',
+    key: string,
+    scopeId?: string | null,
+  ) => {
+    const qs = new URLSearchParams({ scope, key });
+    if (scopeId) qs.set('scope_id', scopeId);
+    return authedFetch(`/v1/memories?${qs.toString()}`, {
+      method: 'DELETE',
+    }).then((r) => json<{ ok: boolean }>(r));
+  },
+  listPromptTemplates: () =>
+    authedFetch('/v1/prompt-templates').then((r) =>
+      json<{ prompt_templates: PromptTemplate[] }>(r),
+    ),
+  createPromptTemplate: (input: PromptTemplateCreate) =>
+    authedFetch('/v1/prompt-templates', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(input),
+    }).then((r) => json<PromptTemplate>(r)),
+  updatePromptTemplate: (id: string, patch: PromptTemplateUpdate) =>
+    authedFetch(`/v1/prompt-templates/${id}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(patch),
+    }).then((r) => json<PromptTemplate>(r)),
+  deletePromptTemplate: (id: string) =>
+    authedFetch(`/v1/prompt-templates/${id}`, { method: 'DELETE' }).then((r) =>
+      json<void>(r),
+    ),
+  listPersonas: () =>
+    authedFetch('/v1/personas').then((r) =>
+      json<{ personas: Persona[] }>(r),
+    ),
+  createPersona: (input: PersonaCreate) =>
+    authedFetch('/v1/personas', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(input),
+    }).then((r) => json<Persona>(r)),
+  updatePersona: (id: string, patch: PersonaUpdate) =>
+    authedFetch(`/v1/personas/${id}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(patch),
+    }).then((r) => json<Persona>(r)),
+  deletePersona: (id: string) =>
+    authedFetch(`/v1/personas/${id}`, { method: 'DELETE' }).then((r) =>
+      json<void>(r),
+    ),
   clearAllData: () =>
     authedFetch('/v1/admin/clear-all-data', { method: 'POST' }).then((r) =>
       json<{
@@ -317,6 +433,16 @@ export const api = {
         };
       }>(r),
     ),
+  exportBackup: () =>
+    authedFetch('/v1/admin/export-data').then((r) =>
+      json<BackupExportResponse>(r),
+    ),
+  importBackup: (strategy: BackupConflictStrategy, backup: BackupPackage) =>
+    authedFetch('/v1/admin/import-data', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ strategy, backup }),
+    }).then((r) => json<BackupImportResponse>(r)),
   // M2.4 — capability tools.
   invokeTool: (
     name: string,
@@ -352,7 +478,14 @@ export const api = {
     ),
 
   // M3.A — roundtable APIs (M3.A.4 wires create + GET; M3.A.5 wires round/summarize/export).
-  createRoundtable: (input: { topic: string; mode?: RoundtableMode; conversation_id?: string; origin_conversation_id?: string }) =>
+  createRoundtable: (input: {
+    topic: string;
+    mode?: RoundtableMode;
+    conversation_id?: string;
+    origin_conversation_id?: string;
+    analyzer_model_id?: string;
+    summarizer_model_id?: string;
+  }) =>
     authedFetch('/v1/roundtable', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },

@@ -85,6 +85,8 @@ export const CreateRoundtableRequestSchema = z.object({
     .optional(),
   topic: z.string().trim().min(1).max(2000),
   mode: RoundtableModeSchema.optional(),
+  analyzer_model_id: z.string().regex(/^[A-Za-z0-9_-]+$/).optional(),
+  summarizer_model_id: z.string().regex(/^[A-Za-z0-9_-]+$/).optional(),
 });
 export type CreateRoundtableRequest = z.infer<
   typeof CreateRoundtableRequestSchema
@@ -235,6 +237,7 @@ export type RoundtableAnnotation =
       classification: string;
       message: string;
       fallback_text: string;
+      model_id?: string | null;
     };
 
 /** Memory keys reserved for roundtable preferences. */

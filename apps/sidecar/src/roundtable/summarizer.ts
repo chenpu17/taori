@@ -317,6 +317,7 @@ export async function runSummary(
         classification: 'unknown',
         message: '没有可用的总结模型 (summarizer_model_id is null)',
         fallback_text: fallbackText,
+        model_id: null,
       },
     ]);
     deps.rtRepo.setStatus(rt.id, revertStatusOnFail);
@@ -332,6 +333,7 @@ export async function runSummary(
         classification: 'unknown',
         message: 'summarizer 模型或 provider 不可用',
         fallback_text: fallbackText,
+        model_id: summarizerModelId,
       },
     ]);
     deps.rtRepo.setStatus(rt.id, revertStatusOnFail);
@@ -351,6 +353,7 @@ export async function runSummary(
         classification: 'unknown',
         message: 'summarizer 没有 API key',
         fallback_text: fallbackText,
+        model_id: model.id,
       },
     ]);
     deps.rtRepo.setStatus(rt.id, revertStatusOnFail);
@@ -403,6 +406,7 @@ export async function runSummary(
         classification: a1.classification ?? 'abort',
         message: a1.message ?? 'aborted',
         fallback_text: fallbackText,
+        model_id: model.id,
       },
     ]);
     deps.rtRepo.setStatus(rt.id, revertStatusOnFail);
@@ -445,6 +449,7 @@ export async function runSummary(
       classification: a2.classification ?? 'unknown',
       message: a2.message ?? '总结失败',
       fallback_text: fallbackText,
+      model_id: model.id,
     },
   ]);
   deps.rtRepo.setStatus(rt.id, revertStatusOnFail);

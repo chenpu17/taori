@@ -140,6 +140,60 @@ test('model selector: switching the active model updates send body', async ({
   expect(body.model_id).toBe(newModel?.id);
 });
 
+test('model selector: remembers global and per-conversation selections', async ({
+  page,
+}) => {
+  const env = readSidecarEnv();
+  const provs = await (await authedFetch(env, '/v1/providers')).json();
+  const providerId = (provs as { providers: { id: string }[] }).providers[0]!.id;
+  const r = await authedFetch(env, '/v1/models', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      provider_id: providerId,
+      model_name: 'mock-model-memory',
+      capability: 'chat',
+      display_name: 'Mock memory model',
+      price_input_per_1m: 1,
+      price_output_per_1m: 2,
+    }),
+  });
+  expect(r.ok).toBe(true);
+  const memoryModel = (await r.json()) as { id: string };
+
+  await page.goto('/');
+  const selector = page.getByTestId('active-model');
+  await expect(selector).toBeVisible();
+
+  // No active conversation yet: selecting a model writes the global chat-model
+  // preference, so it should survive a renderer reload.
+  await selector.selectOption(memoryModel.id);
+  await page.reload();
+  await expect(page.getByTestId('active-model')).toHaveValue(memoryModel.id);
+  await expect(page.getByTestId('model-memory-scope')).toHaveText('全局');
+
+  await sendMessage(page, 'conversation remembers its own model');
+  await expect(page.locator('.msg.assistant').last()).toContainText('[M0 mock]', {
+    timeout: 15_000,
+  });
+  const convItem = page.getByTestId('conv-item').first();
+  const defaultModel = ((await (await authedFetch(env, '/v1/models')).json()) as {
+    models: { id: string; model_name: string }[];
+  }).models.find((m) => m.model_name === 'mock-model');
+  expect(defaultModel?.id).toBeTruthy();
+
+  // Inside a conversation: selecting a model writes a session override.
+  await page.getByTestId('active-model').selectOption(defaultModel!.id);
+  await expect(page.getByTestId('model-memory-scope')).toHaveText('本会话');
+  await page.getByTestId('sidebar-new').click();
+  await expect(page.getByTestId('active-model')).toHaveValue(memoryModel.id);
+  await expect(page.getByTestId('model-memory-scope')).toHaveText('全局');
+
+  await convItem.locator('.conv-title').click();
+  await expect(page.getByTestId('active-model')).toHaveValue(defaultModel!.id);
+  await expect(page.getByTestId('model-memory-scope')).toHaveText('本会话');
+});
+
 test('msg-actions: copy + regenerate visible after streaming completes', async ({
   page,
 }) => {

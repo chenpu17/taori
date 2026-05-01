@@ -160,6 +160,17 @@ export const ModelReorderRequestSchema = z.object({
 });
 export type ModelReorderRequest = z.infer<typeof ModelReorderRequestSchema>;
 
+export const ModelHealthRowSchema = z.object({
+  model_id: z.string(),
+  calls_24h: z.number().int().nonnegative(),
+  failures_24h: z.number().int().nonnegative(),
+  avg_first_token_ms: z.number().nonnegative().nullable(),
+  avg_duration_ms: z.number().nonnegative().nullable(),
+  last_failure_at: z.number().int().nullable(),
+  last_failure_classification: ErrorClassificationSchema.nullable(),
+});
+export type ModelHealthRow = z.infer<typeof ModelHealthRowSchema>;
+
 /** Discovered model from a provider's listing endpoint (e.g. OpenRouter). */
 export const DiscoveredModelSchema = z.object({
   model_name: z.string(),
@@ -232,6 +243,296 @@ export const CatalogSyncResponseSchema = z.object({
 });
 export type CatalogSyncResponse = z.infer<typeof CatalogSyncResponseSchema>;
 
+export const PromptTemplateSchema = z.object({
+  id: z.string(),
+  name: z.string().min(1).max(120),
+  description: z.string().max(280).nullable(),
+  content: z.string().min(1).max(20_000),
+  created_at: z.number().int(),
+  updated_at: z.number().int(),
+});
+export type PromptTemplate = z.infer<typeof PromptTemplateSchema>;
+
+export const PromptTemplateCreateSchema = z.object({
+  name: z.string().min(1).max(120),
+  description: z.string().max(280).nullable().optional(),
+  content: z.string().min(1).max(20_000),
+});
+export type PromptTemplateCreate = z.infer<typeof PromptTemplateCreateSchema>;
+
+export const PromptTemplateUpdateSchema = z.object({
+  name: z.string().min(1).max(120).optional(),
+  description: z.string().max(280).nullable().optional(),
+  content: z.string().min(1).max(20_000).optional(),
+});
+export type PromptTemplateUpdate = z.infer<typeof PromptTemplateUpdateSchema>;
+
+export const PersonaSchema = z.object({
+  id: z.string(),
+  name: z.string().min(1).max(120),
+  description: z.string().max(280).nullable(),
+  prompt: z.string().min(8).max(4_000),
+  created_at: z.number().int(),
+  updated_at: z.number().int(),
+});
+export type Persona = z.infer<typeof PersonaSchema>;
+
+export const PersonaCreateSchema = z.object({
+  name: z.string().min(1).max(120),
+  description: z.string().max(280).nullable().optional(),
+  prompt: z.string().min(8).max(4_000),
+});
+export type PersonaCreate = z.infer<typeof PersonaCreateSchema>;
+
+export const PersonaUpdateSchema = z.object({
+  name: z.string().min(1).max(120).optional(),
+  description: z.string().max(280).nullable().optional(),
+  prompt: z.string().min(8).max(4_000).optional(),
+});
+export type PersonaUpdate = z.infer<typeof PersonaUpdateSchema>;
+
+export const BackupConflictStrategySchema = z.enum(['overwrite', 'skip', 'rename']);
+export type BackupConflictStrategy = z.infer<typeof BackupConflictStrategySchema>;
+
+export const BackupProviderRecordSchema = z.object({
+  id: z.string(),
+  name: z.string(),
+  type: ProviderTypeSchema,
+  base_url: z.string().url(),
+  enabled: z.boolean(),
+  created_at: z.number().int(),
+  updated_at: z.number().int(),
+  had_api_key: z.boolean(),
+});
+export type BackupProviderRecord = z.infer<typeof BackupProviderRecordSchema>;
+
+export const BackupModelRecordSchema = z.object({
+  id: z.string(),
+  alias: z.string().nullable(),
+  provider_id: z.string().nullable(),
+  model_name: z.string(),
+  capability: z.string(),
+  display_name: z.string(),
+  price_input_per_1m: z.number().nullable(),
+  price_output_per_1m: z.number().nullable(),
+  price_per_call: z.number().nullable(),
+  price_per_image: z.number().nullable(),
+  price_per_video_second: z.number().nullable(),
+  price_currency: z.string(),
+  price_synced_at: z.number().int().nullable(),
+  modalities: z.string().nullable(),
+  context_length: z.number().int().nullable(),
+  supports_vision: z.boolean(),
+  supports_tools: z.boolean(),
+  supports_json: z.boolean(),
+  is_default_for: z.string().nullable(),
+  fallback_order: z.number().int(),
+  user_rating: z.number().int().nullable(),
+  failure_count_24h: z.number().int(),
+  last_failure_at: z.number().int().nullable(),
+  demoted: z.boolean(),
+  disabled_until: z.number().int().nullable(),
+  enabled: z.boolean(),
+  created_at: z.number().int(),
+  updated_at: z.number().int(),
+});
+export type BackupModelRecord = z.infer<typeof BackupModelRecordSchema>;
+
+export const BackupConversationRecordSchema = z.object({
+  id: z.string(),
+  type: z.string(),
+  title: z.string().nullable(),
+  created_at: z.number().int(),
+  updated_at: z.number().int(),
+  archived: z.boolean(),
+  pinned: z.boolean(),
+  tags: z.string().nullable(),
+});
+export type BackupConversationRecord = z.infer<typeof BackupConversationRecordSchema>;
+
+export const BackupMessageRecordSchema = z.object({
+  id: z.string(),
+  conversation_id: z.string(),
+  role: z.string(),
+  content: z.string().nullable(),
+  model_id: z.string().nullable(),
+  parent_message_id: z.string().nullable(),
+  attachments: z.string().nullable(),
+  status: z.string(),
+  error: z.string().nullable(),
+  created_at: z.number().int(),
+});
+export type BackupMessageRecord = z.infer<typeof BackupMessageRecordSchema>;
+
+export const BackupFileRecordSchema = z.object({
+  id: z.string(),
+  conversation_id: z.string().nullable(),
+  message_id: z.string().nullable(),
+  original_path: z.string().nullable(),
+  mime_type: z.string(),
+  size_bytes: z.number().int(),
+  extracted_text: z.string().nullable(),
+  preview_data: z.string().nullable(),
+  created_at: z.number().int(),
+  data_b64: z.string().nullable(),
+});
+export type BackupFileRecord = z.infer<typeof BackupFileRecordSchema>;
+
+export const BackupMemoryRecordSchema = z.object({
+  id: z.string(),
+  scope: z.string(),
+  scope_id: z.string().nullable(),
+  key: z.string(),
+  value: z.string(),
+  created_at: z.number().int(),
+  updated_at: z.number().int(),
+});
+export type BackupMemoryRecord = z.infer<typeof BackupMemoryRecordSchema>;
+
+export const BackupPromptTemplateRecordSchema = z.object({
+  id: z.string(),
+  name: z.string(),
+  description: z.string().nullable(),
+  content: z.string(),
+  created_at: z.number().int(),
+  updated_at: z.number().int(),
+});
+export type BackupPromptTemplateRecord = z.infer<typeof BackupPromptTemplateRecordSchema>;
+
+export const BackupPersonaRecordSchema = z.object({
+  id: z.string(),
+  name: z.string(),
+  description: z.string().nullable(),
+  prompt: z.string(),
+  created_at: z.number().int(),
+  updated_at: z.number().int(),
+});
+export type BackupPersonaRecord = z.infer<typeof BackupPersonaRecordSchema>;
+
+export const BackupCostRecordSchema = z.object({
+  id: z.string(),
+  conversation_id: z.string().nullable(),
+  source_type: z.string(),
+  source_id: z.string().nullable(),
+  feature: z.string(),
+  model_id: z.string().nullable(),
+  model_name_snapshot: z.string(),
+  input_tokens: z.number().int().nullable(),
+  output_tokens: z.number().int().nullable(),
+  call_count: z.number().int(),
+  price_input_per_1m_snapshot: z.number().nullable(),
+  price_output_per_1m_snapshot: z.number().nullable(),
+  price_per_call_snapshot: z.number().nullable(),
+  estimated_cost_usd: z.number().nullable(),
+  actual_cost_usd: z.number().nullable(),
+  success: z.boolean(),
+  classification: z.string().nullable(),
+  first_token_ms: z.number().int().nullable(),
+  duration_ms: z.number().int().nullable(),
+  created_at: z.number().int(),
+});
+export type BackupCostRecord = z.infer<typeof BackupCostRecordSchema>;
+
+export const BackupRoundtableRecordSchema = z.object({
+  id: z.string(),
+  conversation_id: z.string(),
+  topic: z.string(),
+  mode: z.string(),
+  participants: z.string(),
+  summarizer_model_id: z.string().nullable(),
+  origin_conversation_id: z.string().nullable(),
+  analyzer_fallback: z.boolean(),
+  status: z.string(),
+  current_round: z.number().int(),
+  summary: z.string().nullable(),
+  estimated_cost_usd_low: z.number().nullable(),
+  estimated_cost_usd_high: z.number().nullable(),
+  created_at: z.number().int(),
+  updated_at: z.number().int(),
+  completed_at: z.number().int().nullable(),
+});
+export type BackupRoundtableRecord = z.infer<typeof BackupRoundtableRecordSchema>;
+
+export const BackupRoundtableMessageRecordSchema = z.object({
+  id: z.string(),
+  roundtable_id: z.string(),
+  round: z.number().int(),
+  participant_index: z.number().int(),
+  model_id: z.string().nullable(),
+  content: z.string(),
+  status: z.string(),
+  classification: z.string().nullable(),
+  error_message: z.string().nullable(),
+  visible_to_others: z.boolean(),
+  created_at: z.number().int(),
+  updated_at: z.number().int(),
+});
+export type BackupRoundtableMessageRecord = z.infer<typeof BackupRoundtableMessageRecordSchema>;
+
+export const BackupCountsSchema = z.object({
+  providers: z.number().int().nonnegative(),
+  models: z.number().int().nonnegative(),
+  conversations: z.number().int().nonnegative(),
+  messages: z.number().int().nonnegative(),
+  files: z.number().int().nonnegative(),
+  memories: z.number().int().nonnegative(),
+  prompt_templates: z.number().int().nonnegative(),
+  personas: z.number().int().nonnegative(),
+  cost_records: z.number().int().nonnegative(),
+  roundtables: z.number().int().nonnegative(),
+  roundtable_messages: z.number().int().nonnegative(),
+});
+export type BackupCounts = z.infer<typeof BackupCountsSchema>;
+
+export const BackupDataSchema = z.object({
+  providers: z.array(BackupProviderRecordSchema),
+  models: z.array(BackupModelRecordSchema),
+  conversations: z.array(BackupConversationRecordSchema),
+  messages: z.array(BackupMessageRecordSchema),
+  files: z.array(BackupFileRecordSchema),
+  memories: z.array(BackupMemoryRecordSchema),
+  prompt_templates: z.array(BackupPromptTemplateRecordSchema),
+  personas: z.array(BackupPersonaRecordSchema),
+  cost_records: z.array(BackupCostRecordSchema),
+  roundtables: z.array(BackupRoundtableRecordSchema),
+  roundtable_messages: z.array(BackupRoundtableMessageRecordSchema),
+});
+export type BackupData = z.infer<typeof BackupDataSchema>;
+
+export const BackupPackageSchema = z.object({
+  format_version: z.literal('taori-backup-v1'),
+  exported_at: z.number().int(),
+  app_version: z.string(),
+  counts: BackupCountsSchema,
+  warnings: z.array(z.string()),
+  data: BackupDataSchema,
+});
+export type BackupPackage = z.infer<typeof BackupPackageSchema>;
+
+export const BackupImportRequestSchema = z.object({
+  strategy: BackupConflictStrategySchema,
+  backup: BackupPackageSchema,
+});
+export type BackupImportRequest = z.infer<typeof BackupImportRequestSchema>;
+
+export const BackupImportResponseSchema = z.object({
+  ok: z.boolean(),
+  data: z.object({
+    strategy: BackupConflictStrategySchema,
+    imported: BackupCountsSchema,
+    skipped: BackupCountsSchema,
+    renamed: BackupCountsSchema,
+    warnings: z.array(z.string()),
+  }),
+});
+export type BackupImportResponse = z.infer<typeof BackupImportResponseSchema>;
+
+export const BackupExportResponseSchema = z.object({
+  ok: z.boolean(),
+  backup: BackupPackageSchema,
+});
+export type BackupExportResponse = z.infer<typeof BackupExportResponseSchema>;
+
 export const ChatMessageSchema = z.object({
   role: z.enum(['user', 'assistant', 'system']),
   content: z.string(),
@@ -239,10 +540,8 @@ export const ChatMessageSchema = z.object({
 
 export const ChatAttachmentSchema = z.object({
   // M1 §4 (FILE-1..3): images render inline for vision models; text/markdown
-  // is decoded sidecar-side and prepended to the user message as fenced text.
-  // PDF parsing is acknowledged as a deferred gap (FILE-2) — we accept the
-  // 'pdf' kind in the schema so the renderer can emit it, but the sidecar
-  // currently rejects it with a clear "暂不支持 PDF" error.
+  // and PDFs are decoded sidecar-side and prepended to the user message as
+  // fenced extracted text.
   kind: z.enum(['image', 'text', 'pdf']),
   mime: z.string(),
   // Cap each attachment at ~7.5MB decoded (~10MB base64). Defends the sidecar
@@ -256,6 +555,7 @@ export type ChatAttachment = z.infer<typeof ChatAttachmentSchema>;
 export const ChatRequestSchema = z.object({
   conversation_id: z.string().optional(),
   model_id: z.string(),
+  persona_id: z.string().optional(),
   messages: z.array(ChatMessageSchema).min(1),
   attachments: z.array(ChatAttachmentSchema).max(8, '最多同时上传 8 个附件').optional(),
   /**

@@ -20,6 +20,10 @@ import {
   testVolcengineArk,
   listVolcengineArkModels,
 } from './volcengine_ark.js';
+import {
+  testHuaweiMaas,
+  listHuaweiMaasModels,
+} from './huawei_maas.js';
 
 export interface ProviderTestResult {
   ok: boolean;
@@ -29,6 +33,38 @@ export interface ProviderTestResult {
 }
 
 const REQUEST_TIMEOUT_MS = 10_000;
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null;
+}
+
+function errorCandidates(err: unknown): unknown[] {
+  const candidates = [err];
+  if (!isRecord(err)) return candidates;
+
+  const lastError = err.lastError;
+  if (lastError) candidates.push(lastError);
+
+  const errors = err.errors;
+  if (Array.isArray(errors)) {
+    candidates.push(...errors.slice().reverse());
+  }
+
+  return candidates;
+}
+
+function statusFromError(err: unknown): number | undefined {
+  if (!isRecord(err)) return undefined;
+  const status = err.statusCode ?? err.status;
+  return typeof status === 'number' ? status : undefined;
+}
+
+function messageFromError(err: unknown): string | undefined {
+  if (err instanceof Error) return err.message;
+  if (!isRecord(err)) return undefined;
+  const message = err.message;
+  return typeof message === 'string' ? message : undefined;
+}
 
 async function timedFetch(
   url: string,
@@ -47,34 +83,46 @@ export function classifyProviderError(args: {
   status?: number;
   err?: unknown;
 }): { classification: ErrorClassification; message: string } {
-  if (args.err instanceof Error) {
-    if (args.err.name === 'AbortError') {
+  const candidates = errorCandidates(args.err);
+  const messages = candidates
+    .map(messageFromError)
+    .filter((message): message is string => Boolean(message));
+
+  for (const candidate of candidates) {
+    if (candidate instanceof Error && candidate.name === 'AbortError') {
       return { classification: 'network', message: 'Request timed out' };
     }
-    const cause = (args.err as { cause?: { code?: string } }).cause;
-    if (cause?.code) {
+    const cause = isRecord(candidate) ? candidate.cause : undefined;
+    const code = isRecord(cause) ? cause.code : undefined;
+    if (typeof code === 'string' && code.length > 0) {
       return {
         classification: 'network',
-        message: `Network error (${cause.code})`,
-      };
-    }
-    // Some upstreams (Anthropic, Bedrock, MS-hosted endpoints) signal a
-    // safety / content-policy block via a 4xx whose message contains
-    // "content_filter" / "content_policy" / "safety" markers. Detect those
-    // before falling through to status-only classification so the renderer
-    // can show the dedicated "内容被安全策略拦截" banner.
-    const message = args.err.message ?? '';
-    if (
-      /content[_\- ]?filter|content[_\- ]?policy|moderation|safety[_\- ]?block/i
-        .test(message)
-    ) {
-      return {
-        classification: 'content_filter',
-        message: 'Upstream blocked the response (content policy)',
+        message: `Network error (${code})`,
       };
     }
   }
-  const status = args.status;
+  const message = messages.join('\n');
+  // Some upstreams (Anthropic, Bedrock, MS-hosted endpoints) signal a
+  // safety / content-policy block via a 4xx whose message contains
+  // "content_filter" / "content_policy" / "safety" markers. Detect those
+  // before falling through to status-only classification so the renderer
+  // can show the dedicated "内容被安全策略拦截" banner.
+  if (
+    /content[_\- ]?filter|content[_\- ]?policy|moderation|safety[_\- ]?block/i
+      .test(message)
+  ) {
+    return {
+      classification: 'content_filter',
+      message: 'Upstream blocked the response (content policy)',
+    };
+  }
+  if (/quota|insufficient[_\- ]?quota|exceeded your current quota/i.test(message)) {
+    return { classification: 'quota', message: 'Quota / billing issue' };
+  }
+  if (/rate[_\- ]?limit|too many requests/i.test(message)) {
+    return { classification: 'rate_limit', message: 'Rate limit hit' };
+  }
+  const status = args.status ?? candidates.map(statusFromError).find((s) => s != null);
   if (status === 401 || status === 403) {
     return {
       classification: 'auth',
@@ -226,6 +274,7 @@ const OPENAI_RECOMMENDED: DiscoveredModel[] = [
     price_output_per_1m: 0.6,
     context_length: 128_000,
     supports_vision: true,
+    supports_tools: true,
   },
   {
     model_name: 'gpt-4o',
@@ -235,6 +284,7 @@ const OPENAI_RECOMMENDED: DiscoveredModel[] = [
     price_output_per_1m: 10,
     context_length: 128_000,
     supports_vision: true,
+    supports_tools: true,
   },
 ];
 
@@ -255,6 +305,9 @@ export function pickRecommendations(models: DiscoveredModel[]): {
   const preferChat = [
     'openai/gpt-4o-mini',
     'gpt-4o-mini',
+    'deepseek-v3.2',
+    'DeepSeek-V3',
+    'Kimi-K2',
     'anthropic/claude-3.5-haiku',
     'google/gemini-2.0-flash-001',
     'meta-llama/llama-3.3-70b-instruct',
@@ -262,6 +315,7 @@ export function pickRecommendations(models: DiscoveredModel[]): {
   const preferVision = [
     'openai/gpt-4o',
     'gpt-4o',
+    'qwen2.5-vl-72b',
     'anthropic/claude-3.5-sonnet',
     'google/gemini-2.0-flash-001',
   ];
@@ -291,6 +345,8 @@ export async function testProvider(args: {
       return testOpenAI(args.base_url, args.api_key);
     case 'volcengine_ark':
       return testVolcengineArk(args.base_url, args.api_key);
+    case 'huawei_maas':
+      return testHuaweiMaas(args.base_url, args.api_key);
     default:
       return testOpenAI(args.base_url, args.api_key);
   }
@@ -308,6 +364,8 @@ export async function listProviderModels(args: {
       return listOpenAIModels();
     case 'volcengine_ark':
       return listVolcengineArkModels(args.base_url, args.api_key);
+    case 'huawei_maas':
+      return listHuaweiMaasModels(args.base_url, args.api_key);
     default:
       return [];
   }
