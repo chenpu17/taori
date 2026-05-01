@@ -26,7 +26,7 @@ import { registerCostsRoute } from './routes/costs.js';
 import { registerMemoriesRoute } from './routes/memories.js';
 import { registerConversationsRoute } from './routes/conversations.js';
 import { registerAdminRoute } from './routes/admin.js';
-import { registerToolsRoute } from './routes/tools.js';
+import { registerToolsRoute, toolEnabledKey } from './routes/tools.js';
 import { registerRoundtableRoute } from './routes/roundtable.js';
 import { registerCatalogRoute } from './routes/catalog.js';
 import { registerTemplatesPersonasRoute } from './routes/templates-personas.js';
@@ -34,7 +34,9 @@ import { scheduleCatalogSync } from './catalog/index.js';
 import { CapabilityBus } from './bus/index.js';
 import { createFileReadTool } from './bus/builtins/file_read.js';
 import { createImageGenerateTool } from './bus/builtins/image_generate.js';
-import { CostsRepo, FilesRepo, ProvidersRepo, ModelsRepo, MessagesRepo, ConversationsRepo } from './db/repos/index.js';
+import { createWebFetchTool } from './bus/builtins/web_fetch.js';
+import { createWebSearchTool } from './bus/builtins/web_search.js';
+import { CostsRepo, FilesRepo, ProvidersRepo, ModelsRepo, MessagesRepo, ConversationsRepo, MemoriesRepo } from './db/repos/index.js';
 import path from 'node:path';
 
 export interface BuildServerArgs {
@@ -145,9 +147,12 @@ export function buildServer(args: BuildServerArgs): FastifyInstance {
   // route can attach `image_generate` as an LLM tool — M2.5 §F-CR / batch A2).
   const costs = new CostsRepo(args.db);
   const files = new FilesRepo(args.db);
+  const memories = new MemoriesRepo(args.db);
   const bus = args.bus ?? new CapabilityBus(costs);
   if (!args.bus) {
     bus.register(createFileReadTool(files));
+    bus.register(createWebSearchTool());
+    bus.register(createWebFetchTool());
     const filesDir = path.join(path.dirname(args.config.dbPath), 'files');
     bus.register(
       createImageGenerateTool({
@@ -161,6 +166,12 @@ export function buildServer(args: BuildServerArgs): FastifyInstance {
       }),
     );
   }
+  for (const tool of bus.list()) {
+    const persisted = memories.get('global', null, toolEnabledKey(tool.name));
+    if (persisted === 'true' || persisted === 'false') {
+      bus.setEnabled(tool.name, persisted === 'true');
+    }
+  }
 
   const argsWithBus = { ...args, bus };
   registerChatRoute(app, argsWithBus);
@@ -172,7 +183,7 @@ export function buildServer(args: BuildServerArgs): FastifyInstance {
   registerAdminRoute(app, argsWithBus);
   registerTemplatesPersonasRoute(app, argsWithBus);
 
-  registerToolsRoute(app, { bus });
+  registerToolsRoute(app, { bus, memories });
   registerRoundtableRoute(app, argsWithBus);
   registerCatalogRoute(app, { ...argsWithBus, keystore: args.keystore });
 

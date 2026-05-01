@@ -15,7 +15,7 @@
 
 import { useEffect, useRef, useState } from 'react';
 import { api } from './api.js';
-import type { BackupConflictStrategy, Persona, PromptTemplate } from '@taori/shared';
+import type { BackupConflictStrategy, Persona, PromptTemplate, Tool } from '@taori/shared';
 
 const MAX_BACKUP_IMPORT_BYTES = 25 * 1024 * 1024;
 
@@ -30,6 +30,8 @@ export function Settings({
   onChanged,
   onReopenOnboarding,
 }: SettingsProps): JSX.Element {
+  const [activeTab, setActiveTab] = useState<'general' | 'tools' | 'prompts'>('general');
+
   // Escape closes the modal — standard a11y expectation (WCAG 2.1.1).
   useEffect(() => {
     const handler = (e: KeyboardEvent): void => {
@@ -61,34 +63,61 @@ export function Settings({
           </button>
         </header>
 
-        <AutoFallbackSection />
-        <MonthlyBudgetSection />
-        <PromptTemplatesSection />
-        <PersonasSection />
+        <nav className="settings-nav" aria-label="设置分组">
+          {[
+            ['general', '通用'],
+            ['tools', '工具能力'],
+            ['prompts', '提示词与 Persona'],
+          ].map(([id, label]) => (
+            <button
+              key={id}
+              type="button"
+              className={activeTab === id ? 'active' : ''}
+              data-testid={`settings-tab-${id}`}
+              onClick={() => setActiveTab(id as typeof activeTab)}
+            >
+              {label}
+            </button>
+          ))}
+        </nav>
 
-        <section className="settings-section">
-          <div className="settings-section-head">
-            <h3>Provider 与模型</h3>
-          </div>
-          <p className="hint">
-            模型与 Provider 的管理已迁移至独立的 <strong>模型中心</strong>（顶部 🧬 图标）。
-            如需重新走一遍完整 Onboarding，可点击下方按钮。
-          </p>
-          <button
-            type="button"
-            onClick={onReopenOnboarding}
-            data-testid="settings-add-provider"
-          >
-            重新打开 Onboarding
-          </button>
-        </section>
+        {activeTab === 'general' && (
+          <>
+            <AutoFallbackSection />
+            <MonthlyBudgetSection />
+            <section className="settings-section">
+              <div className="settings-section-head">
+                <h3>Provider 与模型</h3>
+              </div>
+              <p className="hint">
+                模型与 Provider 的管理已迁移至独立的 <strong>模型中心</strong>（顶部 🧬 图标）。
+                如需重新走一遍完整 Onboarding，可点击下方按钮。
+              </p>
+              <button
+                type="button"
+                onClick={onReopenOnboarding}
+                data-testid="settings-add-provider"
+              >
+                重新打开 Onboarding
+              </button>
+            </section>
+            <DangerZone
+              onCleared={() => {
+                onChanged();
+                window.location.reload();
+              }}
+            />
+          </>
+        )}
 
-        <DangerZone
-          onCleared={() => {
-            onChanged();
-            window.location.reload();
-          }}
-        />
+        {activeTab === 'tools' && <ToolsSection />}
+
+        {activeTab === 'prompts' && (
+          <>
+            <PromptTemplatesSection />
+            <PersonasSection />
+          </>
+        )}
       </div>
     </div>
   );
@@ -100,6 +129,115 @@ function notifyPromptAssetsChanged(): void {
 
 function notifyBudgetSettingsChanged(): void {
   window.dispatchEvent(new Event('taori:budget-settings-changed'));
+}
+
+function ToolsSection(): JSX.Element {
+  const [tools, setTools] = useState<Tool[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  const load = async (): Promise<void> => {
+    setLoading(true);
+    setError(null);
+    try {
+      const res = await api.listTools();
+      setTools(res.data);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    void load();
+  }, []);
+
+  const toggle = async (tool: Tool): Promise<void> => {
+    setSaving(tool.name);
+    setError(null);
+    try {
+      const res = await api.setToolEnabled(tool.name, !tool.enabled);
+      setTools((prev) => prev.map((item) => (item.name === tool.name ? res.data : item)));
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setSaving(null);
+    }
+  };
+
+  return (
+    <section className="settings-section" data-testid="settings-tools">
+      <div className="settings-section-head">
+        <h3>内置工具能力</h3>
+      </div>
+      <p className="hint">
+        工具只会暴露给支持 tool/function calling 的聊天模型。图像生成会自动调用已配置的图像模型；图像理解不是独立工具，
+        而是根据附件自动切换到支持视觉的聊天模型。
+      </p>
+      {loading ? (
+        <p className="hint">加载工具列表…</p>
+      ) : (
+        <div className="settings-tool-list">
+          {tools.map((tool) => (
+            <article className="settings-tool-card" key={tool.name} data-testid={`settings-tool-${tool.name}`}>
+              <div>
+                <div className="settings-tool-title">
+                  <strong>{toolLabel(tool.name)}</strong>
+                  <code>{tool.name}</code>
+                </div>
+                <p>{toolDescription(tool)}</p>
+                <div className="settings-tool-meta">
+                  <span>能力：{capabilityLabel(tool.capability)}</span>
+                  <span>来源：{tool.source === 'builtin' ? '内置' : 'MCP'}</span>
+                </div>
+              </div>
+              <button
+                type="button"
+                className={tool.enabled ? 'tool-toggle enabled' : 'tool-toggle'}
+                disabled={saving === tool.name}
+                data-testid={`tool-toggle-${tool.name}`}
+                onClick={() => void toggle(tool)}
+              >
+                {saving === tool.name ? '保存中…' : tool.enabled ? '已启用' : '已关闭'}
+              </button>
+            </article>
+          ))}
+        </div>
+      )}
+      {error && <p className="err" data-testid="settings-tools-error">{error}</p>}
+    </section>
+  );
+}
+
+function toolLabel(name: string): string {
+  const labels: Record<string, string> = {
+    'builtin.file_read': '文件读取',
+    'builtin.web_search': '网页搜索',
+    'builtin.web_fetch': '网页抓取',
+    'builtin.image_generate': '图像生成',
+  };
+  return labels[name] ?? name;
+}
+
+function toolDescription(tool: Tool): string {
+  if (tool.name === 'builtin.web_search') return '搜索公开网页，适合最新信息、外部资料和跨站点调研。';
+  if (tool.name === 'builtin.web_fetch') return '读取指定公开 URL，并转换为可读文本；默认阻止 localhost、内网地址和敏感端口。';
+  if (tool.name === 'builtin.image_generate') return '当聊天模型判断需要生成图片时，自动转交给默认或最便宜的图像模型处理。';
+  if (tool.name === 'builtin.file_read') return '读取已上传文件的文本内容；不接受任意本地路径。';
+  return tool.description;
+}
+
+function capabilityLabel(capability: Tool['capability']): string {
+  const labels: Record<Tool['capability'], string> = {
+    image: '图像',
+    file: '文件',
+    web: '网页',
+    code: '代码',
+    mcp: 'MCP',
+  };
+  return labels[capability];
 }
 
 function MonthlyBudgetSection(): JSX.Element {

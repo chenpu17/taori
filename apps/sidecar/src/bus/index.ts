@@ -97,6 +97,20 @@ export class CapabilityBus {
     return this.tools.get(name);
   }
 
+  setEnabled(name: string, enabled: boolean): Tool | null {
+    const tool = this.tools.get(name);
+    if (!tool) return null;
+    tool.enabled = enabled;
+    return {
+      name: tool.name,
+      description: tool.description,
+      capability: tool.capability,
+      source: tool.source,
+      source_id: tool.source_id,
+      enabled: tool.enabled,
+    };
+  }
+
   async invoke(
     name: string,
     rawInput: unknown,

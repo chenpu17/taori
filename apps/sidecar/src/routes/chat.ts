@@ -746,12 +746,20 @@ function buildUpstreamMessages(ctx: ProduceCtx): any {
   return out;
 }
 
-function withImageToolInstruction(messages: any[]): any[] {
+function withCapabilityToolInstruction(messages: any[], flags: { image: boolean; web: boolean }): any[] {
+  const parts = [
+    flags.image
+      ? 'If the user asks you to create, draw, render, or generate an image, call the image_generate tool. Do not claim you cannot generate images when the tool is available. If the user is asking about capability, or says not to generate an image, answer normally without calling the tool.'
+      : null,
+    flags.web
+      ? 'If the user needs current, recent, external, or URL-specific information, use web_search to find sources and web_fetch to read specific URLs. Cite the URLs you used in the answer. Do not use web tools for private/local URLs or when the user explicitly asks you not to browse.'
+      : null,
+  ].filter(Boolean);
+  if (parts.length === 0) return messages;
   return [
     {
       role: 'system',
-      content:
-        'If the user asks you to create, draw, render, or generate an image, call the image_generate tool. Do not claim you cannot generate images when the tool is available. If the user is asking about capability, or says not to generate an image, answer normally without calling the tool.',
+      content: parts.join('\n'),
     },
     ...messages,
   ];
@@ -797,9 +805,15 @@ async function produceUpstreamStream(
     //  • the chat model itself supports text I/O (chat or multimodal).
     // Natural-language requests reach this path unchanged; when image tools
     // are available, the LLM decides whether to call `image_generate`.
-    const tools = ctx.bus && ctx.imageModelId
+    const imageToolEnabled = Boolean(
+      ctx.supportsTools && ctx.bus && ctx.imageModelId && ctx.bus.get('builtin.image_generate')?.enabled,
+    );
+    const webSearchEnabled = Boolean(ctx.supportsTools && ctx.bus?.get('builtin.web_search')?.enabled);
+    const webFetchEnabled = Boolean(ctx.supportsTools && ctx.bus?.get('builtin.web_fetch')?.enabled);
+    const tools = ctx.bus && (imageToolEnabled || webSearchEnabled || webFetchEnabled)
       ? {
-          image_generate: tool({
+          ...(imageToolEnabled && {
+            image_generate: tool({
             description:
               'Generate an image from a text prompt. Use this when the user asks for a picture, drawing, illustration, poster, or any visual artifact. The result is automatically attached to the conversation; do NOT include the image bytes in your reply — instead briefly tell the user the image is ready.',
             parameters: z.object({
@@ -871,6 +885,50 @@ async function produceUpstreamStream(
                 height: out.height,
               };
             },
+            }),
+          }),
+          ...(webSearchEnabled && {
+            web_search: tool({
+              description:
+                'Search the public web for current or external information. Returns a short list of result titles, URLs, and snippets.',
+              parameters: z.object({
+                query: z.string().min(1).max(500).describe('Search query'),
+                num_results: z.number().int().min(1).max(10).optional().describe('Number of results, default 5'),
+              }),
+              execute: async ({ query, num_results }) => {
+                const result = await ctx.bus!.invoke(
+                  'builtin.web_search',
+                  { query, num_results },
+                  { conversationId: ctx.conversationId, sourceMessageId: ctx.sourceUserMessageId },
+                );
+                if (!result.ok) {
+                  return { ok: false, error: result.error?.message ?? 'web_search failed' };
+                }
+                return result.output;
+              },
+            }),
+          }),
+          ...(webFetchEnabled && {
+            web_fetch: tool({
+              description:
+                'Fetch a public URL and return readable page content. Blocks localhost, private-network addresses, and sensitive ports.',
+              parameters: z.object({
+                url: z.string().min(1).max(4096).describe('Fully-formed http(s) URL to fetch'),
+                format: z.enum(['markdown', 'text', 'html']).optional().describe('Output format, default markdown'),
+                max_chars: z.number().int().min(500).max(50_000).optional().describe('Maximum content characters, default 12000'),
+              }),
+              execute: async ({ url, format, max_chars }) => {
+                const result = await ctx.bus!.invoke(
+                  'builtin.web_fetch',
+                  { url, format, max_chars },
+                  { conversationId: ctx.conversationId, sourceMessageId: ctx.sourceUserMessageId },
+                );
+                if (!result.ok) {
+                  return { ok: false, error: result.error?.message ?? 'web_fetch failed' };
+                }
+                return result.output;
+              },
+            }),
           }),
         }
       : undefined;
@@ -878,7 +936,12 @@ async function produceUpstreamStream(
     const upstreamMessages = buildUpstreamMessages(ctx);
     const result = await streamText({
       model: provider.chat(cfg.modelName),
-      messages: tools ? withImageToolInstruction(upstreamMessages) : upstreamMessages,
+      messages: tools
+        ? withCapabilityToolInstruction(upstreamMessages, {
+            image: imageToolEnabled,
+            web: webSearchEnabled || webFetchEnabled,
+          })
+        : upstreamMessages,
       abortSignal: signal,
       ...(tools && { tools, maxSteps: 3 }),
     });

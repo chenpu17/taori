@@ -33,6 +33,7 @@ import type {
   BackupExportResponse,
   BackupImportResponse,
   BackupPackage,
+  Tool,
 } from '@taori/shared';
 
 async function json<T>(res: Response): Promise<T> {
@@ -444,6 +445,16 @@ export const api = {
       body: JSON.stringify({ strategy, backup }),
     }).then((r) => json<BackupImportResponse>(r)),
   // M2.4 — capability tools.
+  listTools: () =>
+    authedFetch('/v1/tools').then((r) =>
+      json<{ ok: boolean; data: Tool[] }>(r),
+    ),
+  setToolEnabled: (name: string, enabled: boolean) =>
+    authedFetch(`/v1/tools/${encodeURIComponent(name)}/enabled`, {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ enabled }),
+    }).then((r) => json<{ ok: boolean; data: Tool }>(r)),
   invokeTool: (
     name: string,
     input: unknown,

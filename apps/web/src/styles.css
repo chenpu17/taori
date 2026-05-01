@@ -1152,6 +1152,31 @@ header h1::before {
   transition: background var(--dur-1), color var(--dur-1);
 }
 .settings-close:hover { background: var(--surface-2); color: var(--fg); }
+.settings-nav {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  padding: 4px;
+  margin: 0 0 18px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-lg);
+  background: var(--surface-2);
+}
+.settings-nav button {
+  border: none;
+  border-radius: 10px;
+  background: transparent;
+  color: var(--muted);
+  padding: 8px 12px;
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+}
+.settings-nav button.active {
+  background: var(--surface);
+  color: var(--fg);
+  box-shadow: var(--shadow-1);
+}
 
 .settings-section { margin-top: 20px; }
 .settings-section h3 {
@@ -1234,6 +1259,60 @@ header h1::before {
   font-size: 12px;
   line-height: 1.6;
   color: var(--muted);
+}
+.settings-tool-list {
+  display: grid;
+  gap: 10px;
+}
+.settings-tool-card {
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+  align-items: flex-start;
+  border: 1px solid var(--border);
+  border-radius: var(--r-lg);
+  background: linear-gradient(135deg, var(--surface), var(--surface-elev));
+  padding: 14px;
+}
+.settings-tool-title {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+.settings-tool-title code {
+  color: var(--muted);
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 2px 7px;
+  font-size: 11px;
+}
+.settings-tool-card p {
+  margin: 8px 0;
+  color: var(--muted);
+  line-height: 1.55;
+}
+.settings-tool-meta {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  color: var(--muted-2);
+  font-size: 12px;
+}
+.tool-toggle {
+  flex: 0 0 auto;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 7px 12px;
+  background: var(--surface-2);
+  color: var(--fg);
+  cursor: pointer;
+}
+.tool-toggle.enabled {
+  border-color: rgba(22, 163, 74, 0.35);
+  background: rgba(22, 163, 74, 0.12);
+  color: var(--ok);
 }
 .dialog-backdrop {
   position: fixed;
@@ -3863,6 +3942,10 @@ header h1::before {
   .cost-dashboard__header,
   .help-selfcheck__head {
     align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .settings-tool-card {
     flex-direction: column;
   }
 

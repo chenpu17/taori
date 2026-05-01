@@ -78,6 +78,30 @@ test('settings: reopen onboarding closes settings and shows wizard', async ({
   await expect(page.getByTestId('onboarding')).toBeVisible();
 });
 
+test('settings: tools tab lists builtin tools and persists toggles', async ({ page }) => {
+  const env = readSidecarEnv();
+  await resetSidecar(env);
+  await seedDefaultModel(env);
+  await page.goto('/');
+  await page.getByTestId('open-settings').click();
+  await page.getByTestId('settings-tab-tools').click();
+  await expect(page.getByTestId('settings-tools')).toBeVisible();
+  await expect(page.getByTestId('settings-tool-builtin.web_search')).toContainText('网页搜索');
+  await expect(page.getByTestId('settings-tool-builtin.web_fetch')).toContainText('网页抓取');
+  await expect(page.getByTestId('settings-tool-builtin.image_generate')).toContainText('图像生成');
+  await expect(page.getByTestId('settings-tools')).toContainText('图像理解不是独立工具');
+
+  const toggle = page.getByTestId('tool-toggle-builtin.web_fetch');
+  await expect(toggle).toContainText('已启用');
+  await toggle.click();
+  await expect(toggle).toContainText('已关闭');
+  await page.getByTestId('settings-close').click();
+
+  await page.getByTestId('open-settings').click();
+  await page.getByTestId('settings-tab-tools').click();
+  await expect(page.getByTestId('tool-toggle-builtin.web_fetch')).toContainText('已关闭');
+});
+
 // ----------------------------------------------------------------------------
 // Model Center smoke — replaces the model CRUD scenarios that used to live in
 // Settings. Comprehensive Model Center coverage is in m2.5-modelcenter.spec.ts.
