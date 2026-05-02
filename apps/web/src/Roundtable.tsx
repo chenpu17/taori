@@ -22,7 +22,8 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import type { ReactElement } from 'react';
 import { api } from './api.js';
 import { formatUsd, ROUNDTABLE_DEFAULTS, ROUNDTABLE_MEMORY_KEYS } from '@taori/shared';
-import type { Participant, RoundtableMode } from '@taori/shared';
+import type { Participant, Provider, RoundtableMode } from '@taori/shared';
+import { modelDisplayWithProvider, type ModelDisplayLike } from './modelDisplay.js';
 
 interface RoundtableLaunchResult {
   id: string;
@@ -34,6 +35,7 @@ export interface RoundtableLaunchDialogProps {
   initialTopic: string;
   /** When provided, the final summary is written back to this chat conversation. */
   conversationId: string | null;
+  providers: Provider[];
   onLaunched: (result: RoundtableLaunchResult) => void;
   onCancel: () => void;
 }
@@ -92,7 +94,7 @@ const DEFAULT_PREFS: ConfirmPrefs = {
 export function RoundtableLaunchDialog(
   props: RoundtableLaunchDialogProps,
 ): ReactElement {
-  const { initialTopic, conversationId, onLaunched, onCancel } = props;
+  const { initialTopic, conversationId, providers, onLaunched, onCancel } = props;
 
   const [topic, setTopic] = useState(initialTopic);
   const [mode, setMode] = useState<RoundtableMode>('auto');
@@ -108,9 +110,7 @@ export function RoundtableLaunchDialog(
   const [originalParticipants, setOriginalParticipants] = useState<
     Participant[]
   >([]);
-  const [chatModels, setChatModels] = useState<
-    Array<{ id: string; display_name: string; demoted?: boolean }>
-  >([]);
+  const [chatModels, setChatModels] = useState<Array<ModelDisplayLike & { demoted?: boolean }>>([]);
   const [editError, setEditError] = useState<string | null>(null);
   // Tracks whether the component is still mounted; if a parent unmounts the
   // dialog during analysis (rare edge case), avoid setState-after-unmount.
@@ -138,6 +138,9 @@ export function RoundtableLaunchDialog(
             )
             .map((m) => ({
               id: m.id,
+              alias: m.alias,
+              provider_id: m.provider_id,
+              model_name: m.model_name,
               display_name: m.display_name,
               demoted: !!m.demoted,
             })),
@@ -249,6 +252,9 @@ export function RoundtableLaunchDialog(
               )
               .map((m) => ({
                 id: m.id,
+                alias: m.alias,
+                provider_id: m.provider_id,
+                model_name: m.model_name,
                 display_name: m.display_name,
                 demoted: !!m.demoted,
               })),
@@ -375,7 +381,7 @@ export function RoundtableLaunchDialog(
                 <option value="">自动选择低成本 chat 模型</option>
                 {chatModels.map((m) => (
                   <option key={m.id} value={m.id}>
-                    {m.display_name}
+                    {modelDisplayWithProvider(m, providers)}
                     {m.demoted ? '（降权）' : ''}
                   </option>
                 ))}
@@ -391,7 +397,7 @@ export function RoundtableLaunchDialog(
                 <option value="">自动沿用分析器推荐</option>
                 {chatModels.map((m) => (
                   <option key={m.id} value={m.id}>
-                    {m.display_name}
+                    {modelDisplayWithProvider(m, providers)}
                     {m.demoted ? '（降权）' : ''}
                   </option>
                 ))}
@@ -456,6 +462,7 @@ export function RoundtableLaunchDialog(
             editedParticipants={editedParticipants}
             originalParticipants={originalParticipants}
             chatModels={chatModels}
+            providers={providers}
             editError={editError}
             onEditedChange={setEditedParticipants}
             onRestore={() => {
@@ -479,6 +486,7 @@ function PreviewSection({
   editedParticipants,
   originalParticipants,
   chatModels,
+  providers,
   editError,
   onEditedChange,
   onRestore,
@@ -520,7 +528,8 @@ function PreviewSection({
   onSkipConvChange: (v: boolean) => void;
   editedParticipants: Participant[];
   originalParticipants: Participant[];
-  chatModels: Array<{ id: string; display_name: string; demoted?: boolean }>;
+  chatModels: Array<ModelDisplayLike & { demoted?: boolean }>;
+  providers: Provider[];
   editError: string | null;
   onEditedChange: (next: Participant[]) => void;
   onRestore: () => void;
@@ -629,7 +638,7 @@ function PreviewSection({
                 >
                   {chatModels.map((m) => (
                     <option key={m.id} value={m.id}>
-                      {m.display_name}
+                      {modelDisplayWithProvider(m, providers)}
                       {m.demoted ? '（降权）' : ''}
                     </option>
                   ))}

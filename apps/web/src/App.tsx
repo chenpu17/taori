@@ -16,6 +16,7 @@ import { RoundtablePanel } from './RoundtablePanel.js';
 import { priceTier, PRICE_TIER_LABEL, formatUsd, estimateInputTokens, estimateCostUsd } from '@taori/shared';
 import type { Model, Persona, PromptTemplate, Provider } from '@taori/shared';
 import { renderMarkdown } from './markdown.js';
+import { modelDisplayWithProvider } from './modelDisplay.js';
 
 const STARTER_PROMPTS: Array<{ icon: string; title: string; desc: string; text: string }> = [
   {
@@ -64,17 +65,6 @@ interface ConversationSummary {
 const DISCOVERABLE_COST_TIP_THRESHOLD_USD = 0.01;
 const ACTIVE_CHAT_MODEL_MEMORY_KEY = 'active_chat_model_id';
 type MemoryScopeLabel = 'default' | 'global' | 'session';
-
-function providerDisplayName(providers: Provider[], providerId: string | null): string {
-  if (!providerId) return '本地';
-  const provider = providers.find((p) => p.id === providerId);
-  if (!provider) return '未知供应商';
-  return provider.name || provider.type;
-}
-
-function modelDisplayWithProvider(model: Model, providers: Provider[]): string {
-  return `${model.display_name} · ${providerDisplayName(providers, model.provider_id)}`;
-}
 
 function formatTokenCount(value: number | null): string {
   return value == null ? '—' : value.toLocaleString();
@@ -761,6 +751,7 @@ function Workspace({
         onOpenRoundtable={() => setRoundtableLaunchSeq((n) => n + 1)}
         conversations={conversations.map(c => ({ id: c.id, title: c.title, pinned: c.pinned, tags: c.tags }))}
         models={chatModels}
+        providers={providers}
       />
     </div>
   );
@@ -1988,7 +1979,7 @@ function ChatPanel({
       );
       if (visionPick && visionPick.id !== model.id) {
         onModelChange(visionPick.id);
-        setDropError(`已自动切换至视觉模型：${visionPick.display_name}`);
+        setDropError(`已自动切换至视觉模型：${modelDisplayWithProvider(visionPick, providers)}`);
       } else {
         setDropError('当前模型不支持图片输入；请先配置或切换到带 👁 的视觉模型。');
       }
@@ -2001,7 +1992,7 @@ function ChatPanel({
         : '请理解这张图片，描述其中的主体、风格和可能的用途。',
     );
     window.requestAnimationFrame(() => composerRef.current?.focus());
-  }, [chatModels, model, onModelChange, setInput]);
+  }, [chatModels, model, onModelChange, providers, setInput]);
 
   // Wire the forward-ref so openImagePicker can auto-fire submit when the
   // session-memory shortcut applies (spec §7 step 7).
@@ -2373,7 +2364,7 @@ function ChatPanel({
     autoFallbackTriggeredMsgs.current.add(lastFailureMsgId);
     autoFallbackUsedInThread.current = true;
     autoFallbackUsedConvs.current.add(conv);
-    const note = `已自动切换到「${target.display_name}」并重试。`;
+    const note = `已自动切换到「${modelDisplayWithProvider(target, providers)}」并重试。`;
     // Inject a system note so the user sees what happened (M2 §1.4).
     setMessages((prev) => [
       ...prev,
@@ -2405,6 +2396,7 @@ function ChatPanel({
     isLoading,
     chatModels,
     changeModelAndClearFailure,
+    providers,
     regenerateWithCurrentConversation,
     setMessages,
   ]);
@@ -2730,6 +2722,7 @@ function ChatPanel({
       {activeRoundtableId ? (
         <RoundtablePanel
           roundtableId={activeRoundtableId}
+          providers={providers}
           onExit={() => setActiveRoundtableId(null)}
           onFollowUp={(topic) => {
             setActiveRoundtableId(null);
@@ -2939,6 +2932,7 @@ function ChatPanel({
                 <FailureDecisionCard
                   decision={failureByMsg[m.id]!}
                   chatModels={chatModels}
+                  providers={providers}
                   onRetry={() => {
                     clearFailureDecisionState();
                     regenerateWithCurrentConversation({ model_id: model.id });
@@ -2996,6 +2990,7 @@ function ChatPanel({
               <FailureDecisionCard
                 decision={failureByMsg[lastFailureMsgId]!}
                 chatModels={chatModels}
+                providers={providers}
                 onRetry={() => {
                   clearFailureDecisionState();
                   regenerateWithCurrentConversation({ model_id: model.id });
@@ -3147,7 +3142,7 @@ function ChatPanel({
               if (visionPick && visionPick.id !== model.id) {
                 onModelChange(visionPick.id);
                 setDropError(
-                  `已自动切换至视觉模型：${visionPick.display_name}`,
+                  `已自动切换至视觉模型：${modelDisplayWithProvider(visionPick, providers)}`,
                 );
               }
             }
@@ -3237,6 +3232,7 @@ function ChatPanel({
           estimate={pendingConfirm.estimate}
           reason={pendingConfirm.reason}
           model={pendingConfirm.model ?? model}
+          providers={providers}
           conversationId={conversationId}
           hasCheaperPeer={findKnownCheaperPeer(chatModels, pendingConfirm.model ?? model) != null}
           budget={pendingConfirm.budget}
@@ -3296,6 +3292,7 @@ function ChatPanel({
         <RoundtableLaunchDialog
           initialTopic={roundtableDialog.initialTopic}
           conversationId={conversationId}
+          providers={providers}
           onCancel={() => setRoundtableDialog(null)}
           onLaunched={(result) => {
             setRoundtableDialog(null);
@@ -3593,6 +3590,7 @@ function CostConfirmDialog({
   estimate,
   reason,
   model,
+  providers,
   conversationId,
   hasCheaperPeer,
   budget,
@@ -3604,6 +3602,7 @@ function CostConfirmDialog({
   estimate: number;
   reason: 'threshold' | 'image' | 'budget';
   model: Model;
+  providers: Provider[];
   conversationId: string | null;
   hasCheaperPeer: boolean;
   budget?: {
@@ -3630,6 +3629,7 @@ function CostConfirmDialog({
   const nextStepLabel = hasCheaperPeer
     ? '可以继续、取消，或切换到已知价格更低的同能力模型。'
     : '可以继续或取消；当前没有已知价格更低的同能力模型。';
+  const modelLabel = modelDisplayWithProvider(model, providers);
 
   const persist = useCallback(async () => {
     if (skipModel) {
@@ -3679,14 +3679,14 @@ function CostConfirmDialog({
         </h3>
         <p className="hint">
           {reason === 'image'
-            ? `图像模型「${model.display_name}」每次调用都会按设置确认。`
+            ? `图像模型「${modelLabel}」每次调用都会按设置确认。`
             : reason === 'budget'
-              ? `本月已消费 ${formatUsd(budget?.month_spent_usd ?? 0)}。继续使用模型「${model.display_name}」前请再次确认。`
-              : `模型「${model.display_name}」此次预估超过阈值，请确认是否继续。`}
+              ? `本月已消费 ${formatUsd(budget?.month_spent_usd ?? 0)}。继续使用模型「${modelLabel}」前请再次确认。`
+              : `模型「${modelLabel}」此次预估超过阈值，请确认是否继续。`}
         </p>
         <div className="decision-rationale" data-testid="cost-confirm-rationale">
           <div><strong>触发原因</strong><span>{reasonLabel}</span></div>
-          <div><strong>当前模型</strong><span>{model.display_name}</span></div>
+          <div><strong>当前模型</strong><span>{modelLabel}</span></div>
           <div><strong>偏好范围</strong><span>{scopeLabel}</span></div>
           <div><strong>下一步</strong><span>{nextStepLabel}</span></div>
         </div>
@@ -4335,12 +4335,14 @@ const FAILURE_CLASS_HINT: Record<FailureClassification, string> = {
 function FailureDecisionCard({
   decision,
   chatModels,
+  providers,
   onRetry,
   onSwitch,
   onOpenSettings,
 }: {
   decision: FailureDecision;
   chatModels: Model[];
+  providers: Provider[];
   onRetry: () => void;
   onSwitch: (targetId: string) => void;
   onOpenSettings: () => void;
@@ -4353,8 +4355,14 @@ function FailureDecisionCard({
     : null;
   const showSwitch =
     decision.classification !== 'content_filter' && recommended != null;
+  const currentLabel = current
+    ? modelDisplayWithProvider(current, providers)
+    : decision.current_model_id ?? '当前模型';
+  const recommendedLabel = recommended
+    ? modelDisplayWithProvider(recommended, providers)
+    : null;
   const routeText = showSwitch
-    ? `建议切换到「${recommended!.display_name}」后重试。`
+    ? `建议切换到「${recommendedLabel ?? recommended!.display_name}」后重试。`
     : decision.classification === 'content_filter'
       ? '这是内容策略问题，系统不会推荐换模型绕过。'
       : '当前没有可用推荐模型，先按分类提示处理。';
@@ -4377,7 +4385,7 @@ function FailureDecisionCard({
       <div className="decision-rationale fdc-rationale" data-testid="fdc-rationale">
         <div>
           <strong>失败来源</strong>
-          <span>{current?.display_name ?? decision.current_model_id ?? '当前模型'}</span>
+          <span>{currentLabel}</span>
         </div>
         <div>
           <strong>系统判断</strong>
@@ -4407,9 +4415,9 @@ function FailureDecisionCard({
             type="button"
             onClick={() => onSwitch(recommended!.id)}
             data-testid="fdc-switch"
-            title={`切换到 ${recommended!.display_name}`}
+            title={`切换到 ${recommendedLabel ?? recommended!.display_name}`}
           >
-            ⇄ 切换到「{recommended!.display_name}」并重试
+            ⇄ 切换到「{recommendedLabel ?? recommended!.display_name}」并重试
           </button>
         )}
         <button

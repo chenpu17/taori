@@ -61,6 +61,12 @@ test('A5 launch dialog shows mode-comparison cards with populated values', async
 
   const dlg = page.getByTestId('roundtable-launch-dialog');
   await expect(dlg).toBeVisible();
+  await expect(dlg.getByTestId('roundtable-analyzer-model-select')).toContainText(
+    'Chat 0 · OAI',
+  );
+  await expect(dlg.getByTestId('roundtable-summarizer-model-select')).toContainText(
+    'Chat 0 · OAI',
+  );
   await dlg.getByTestId('roundtable-launch-start').click();
 
   await expect(dlg.getByTestId('roundtable-preview')).toBeVisible({

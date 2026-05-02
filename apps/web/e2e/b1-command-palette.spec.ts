@@ -65,6 +65,7 @@ test('B1: Command palette ⌘K / Ctrl+K search, navigate, keyboard', async ({ pa
   await page.waitForTimeout(300);
   const modelResults = page.locator('[data-testid="cmd-result"][data-category="model"]');
   await expect(modelResults.first()).toBeVisible();
+  await expect(modelResults.first()).toContainText('TestModel · test-prov');
   console.log('✓ Model search returned results');
 
   // --- 5. Test fixed commands (settings, help, roundtable)

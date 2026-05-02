@@ -1,4 +1,5 @@
 import React, { useState, useRef, useEffect } from 'react';
+import { modelDisplayWithProvider } from './modelDisplay.js';
 
 export interface Conversation {
   id: string;
@@ -11,8 +12,15 @@ export interface Model {
   id: string;
   model_name: string;
   display_name: string;
+  alias?: string | null;
   provider_id?: string | null;
   is_default_for?: string | null;
+}
+
+export interface Provider {
+  id: string;
+  name: string;
+  type: string;
 }
 
 export interface CmdResult {
@@ -33,6 +41,7 @@ interface CommandPaletteProps {
   onOpenRoundtable?: () => void;
   conversations: Conversation[];
   models: Model[];
+  providers: Provider[];
 }
 
 export const CommandPalette: React.FC<CommandPaletteProps> = ({
@@ -45,6 +54,7 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({
   onOpenRoundtable,
   conversations,
   models,
+  providers,
 }) => {
   const [query, setQuery] = useState('');
   const [selectedIdx, setSelectedIdx] = useState(0);
@@ -90,12 +100,13 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({
 
     // 搜索模型
     models.forEach(m => {
-      const text = `${m.display_name} ${m.model_name} ${m.provider_id || ''}`.toLowerCase();
+      const label = modelDisplayWithProvider(m, providers);
+      const text = `${label} ${m.model_name} ${m.provider_id || ''}`.toLowerCase();
       if (text.includes(q)) {
         hits.push({
           id: m.id,
           category: 'model',
-          title: m.display_name,
+          title: label,
           subtitle: `${m.model_name}${m.is_default_for ? ' (默认)' : ''}`,
         });
       }
@@ -121,7 +132,7 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({
 
     setResults([...hits.slice(0, 15), ...fixedCommands]);
     setSelectedIdx(0);
-  }, [query, conversations, models]);
+  }, [query, conversations, models, providers]);
 
   // 按键处理
   useEffect(() => {

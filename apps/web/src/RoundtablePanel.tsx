@@ -21,11 +21,13 @@ import { api } from './api.js';
 import { authedFetch } from './sidecar.js';
 import { streamRoundtableAnnotations } from './roundtableStream.js';
 import type {
+  Provider,
   Roundtable,
   RoundtableMessage,
   RoundtableAnnotation,
   RoundtableSummary,
 } from '@taori/shared';
+import { modelDisplayWithProvider, type ModelDisplayLike } from './modelDisplay.js';
 
 interface ColumnState {
   /** Per-round → finished/streaming content for this participant. */
@@ -72,6 +74,7 @@ function applyMessages(
 
 export interface RoundtablePanelProps {
   roundtableId: string;
+  providers: Provider[];
   /** Called when user cancels / archives — parent should re-render the
    *  conversation surface (M3.A.5 just navigates away from the panel). */
   onExit: () => void;
@@ -85,7 +88,7 @@ export interface RoundtablePanelProps {
 }
 
 export function RoundtablePanel(props: RoundtablePanelProps): ReactElement {
-  const { roundtableId, onExit, onFollowUp, onLoopback } = props;
+  const { roundtableId, providers, onExit, onFollowUp, onLoopback } = props;
   const [rt, setRt] = useState<Roundtable | null>(null);
   const [, setMessages] = useState<RoundtableMessage[]>([]);
   const [cols, setCols] = useState<ColumnState[]>([]);
@@ -98,7 +101,7 @@ export function RoundtablePanel(props: RoundtablePanelProps): ReactElement {
     model_id?: string | null;
   } | null>(null);
   const [summaryModelOptions, setSummaryModelOptions] = useState<
-    Array<{ id: string; display_name: string; demoted?: boolean }>
+    Array<ModelDisplayLike & { demoted?: boolean }>
   >([]);
   const [selectedSummaryModelId, setSelectedSummaryModelId] = useState('');
   const [actionBusy, setActionBusy] = useState(false);
@@ -166,6 +169,9 @@ export function RoundtablePanel(props: RoundtablePanelProps): ReactElement {
           )
           .map((m) => ({
             id: m.id,
+            alias: m.alias,
+            provider_id: m.provider_id,
+            model_name: m.model_name,
             display_name: m.display_name,
             demoted: !!m.demoted,
           }));
@@ -456,20 +462,27 @@ export function RoundtablePanel(props: RoundtablePanelProps): ReactElement {
       </header>
 
       <div className="roundtable-grid" data-testid="roundtable-grid">
-        {rt.participants.map((p, i) => (
-          <ParticipantColumn
-            key={`${p.model_id}-${i}`}
-            participant={p}
-            column={cols[i] ?? emptyColumn()}
-            roundsToShow={[1, ...(rt.mode === 'deep' ? [2] : [])]}
-            participantIndex={i}
-            disableRetry={actionBusy}
-            roundtableId={rt.id}
-            onRetry={(round, modelId) =>
-              void retryParticipant(round, i, modelId)
-            }
-          />
-        ))}
+        {rt.participants.map((p, i) => {
+          const model = summaryModelOptions.find((m) => m.id === p.model_id);
+          return (
+            <ParticipantColumn
+              key={`${p.model_id}-${i}`}
+              participant={p}
+              providers={providers}
+              modelLabel={
+                model ? modelDisplayWithProvider(model, providers) : p.display_name
+              }
+              column={cols[i] ?? emptyColumn()}
+              roundsToShow={[1, ...(rt.mode === 'deep' ? [2] : [])]}
+              participantIndex={i}
+              disableRetry={actionBusy}
+              roundtableId={rt.id}
+              onRetry={(round, modelId) =>
+                void retryParticipant(round, i, modelId)
+              }
+            />
+          );
+        })}
       </div>
 
       <div className="roundtable-actions" data-testid="roundtable-actions">
@@ -586,7 +599,7 @@ export function RoundtablePanel(props: RoundtablePanelProps): ReactElement {
                 >
                   {summaryModelOptions.map((m) => (
                     <option key={m.id} value={m.id}>
-                      {m.display_name}
+                      {modelDisplayWithProvider(m, providers)}
                       {m.id === (summaryError.model_id ?? rt.summarizer_model_id)
                         ? '（当前）'
                         : ''}
@@ -646,6 +659,8 @@ function derivePhase(
 
 function ParticipantColumn({
   participant,
+  providers,
+  modelLabel,
   column,
   roundsToShow,
   participantIndex,
@@ -654,6 +669,8 @@ function ParticipantColumn({
   onRetry,
 }: {
   participant: { display_name: string; role_label: string };
+  providers: Provider[];
+  modelLabel: string;
   column: ColumnState;
   roundsToShow: number[];
   participantIndex: number;
@@ -693,7 +710,7 @@ function ParticipantColumn({
     >
       <div className="roundtable-column-head">
         <strong>{participant.role_label}</strong>
-        <span className="hint">{participant.display_name}</span>
+        <span className="hint">{modelLabel}</span>
       </div>
       {roundsToShow.map((round) => {
         const status = column.status.get(round) ?? 'pending';
@@ -793,7 +810,15 @@ function ParticipantColumn({
                                 }
                               >
                                 <span className="cand-name">
-                                  {c.display_name}
+                                  {modelDisplayWithProvider(
+                                    {
+                                      id: c.model_id,
+                                      provider_id: c.provider_id,
+                                      model_name: c.model_name,
+                                      display_name: c.display_name,
+                                    },
+                                    providers,
+                                  )}
                                 </span>
                                 {tag ? (
                                   <span
