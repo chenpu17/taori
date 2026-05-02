@@ -307,10 +307,13 @@ export function registerChatRoute(
 
     const abortController = new AbortController();
     let aborted = false;
+    let forceFinalize: (() => void) | null = null;
     reply.raw.on('close', () => {
       if (!stream.writableEnded) {
         aborted = true;
         abortController.abort();
+        if (!stream.writableEnded) stream.end();
+        forceFinalize?.();
       }
     });
 
@@ -392,7 +395,7 @@ export function registerChatRoute(
         // HTTP response before our on('data') listener can collect them
         // (the assistant message would then be persisted with the leading
         // tokens missing).
-        finalizeOnEnd(stream, () => aborted, ctx, msgRepo, costsRepo, modelsRepo);
+        forceFinalize = finalizeOnEnd(stream, () => aborted, ctx, msgRepo, costsRepo, modelsRepo);
         void produceUpstreamStream(stream, abortController.signal, ctx, {
           baseURL: provider.base_url,
           apiKey,
@@ -406,14 +409,14 @@ export function registerChatRoute(
       // their real provider is responding. Emit a clear key_missing error
       // so they know to re-enter the API key in Model Center.
       if (assistantMsg) {
-        finalizeOnEnd(stream, () => aborted, ctx, msgRepo, costsRepo, modelsRepo);
+        forceFinalize = finalizeOnEnd(stream, () => aborted, ctx, msgRepo, costsRepo, modelsRepo);
         void produceKeyMissingStream(stream, ctx, modelsRepo, memoriesRepo);
         return;
       }
     }
 
     // Fallback: M0 mock stream (no provider key configured at all).
-    finalizeOnEnd(stream, () => aborted, ctx, msgRepo, costsRepo, modelsRepo);
+    forceFinalize = finalizeOnEnd(stream, () => aborted, ctx, msgRepo, costsRepo, modelsRepo);
     void produceMockStream(stream, () => aborted, ctx, modelsRepo, memoriesRepo);
   });
 }
@@ -507,7 +510,7 @@ function finalizeOnEnd(
   msgRepo: MessagesRepo,
   costsRepo: CostsRepo,
   modelsRepo: ModelsRepo,
-): void {
+): () => void {
   let collected = '';
   let lineBuffer = '';
   let usage: {
@@ -620,7 +623,10 @@ function finalizeOnEnd(
       );
     }
   };
-  stream.on('end', () => {
+  let finalized = false;
+  const finalize = (): void => {
+    if (finalized) return;
+    finalized = true;
     if (lineBuffer) parseLine(lineBuffer);
     const aborted = isAborted();
     const status: MessageRow['status'] = upstreamErrored
@@ -628,7 +634,11 @@ function finalizeOnEnd(
       : aborted
         ? 'incomplete'
         : 'complete';
-    msgRepo.finalize(ctx.messageId, { content: collected, status });
+    const persistedContent =
+      status === 'incomplete' && collected.trim().length === 0
+        ? '（本次回答在生成完成前被中断，未收到可保存的内容。请重试或继续提问。）'
+        : collected;
+    msgRepo.finalize(ctx.messageId, { content: persistedContent, status });
     writeCost(!aborted && !upstreamErrored);
     // Per spec §7.5.2: track quota/rate_limit/network as failures so models
     // demote (≥3) and disable (≥5). Successful runs reset the rolling
@@ -644,8 +654,15 @@ function finalizeOnEnd(
         ctx.log.warn({ err: e }, 'model.failure_track_failed');
       }
     }
-  });
+  };
+  // `finish` is the reliable signal for our persistence path: it fires when
+  // the server-side writable stream ends, even if the HTTP client already
+  // disconnected and the readable `end` event is no longer observed.
+  stream.on('finish', finalize);
+  stream.on('end', finalize);
   stream.on('error', (err) => {
+    if (finalized) return;
+    finalized = true;
     if (lineBuffer) parseLine(lineBuffer);
     msgRepo.finalize(ctx.messageId, {
       content: collected,
@@ -654,6 +671,7 @@ function finalizeOnEnd(
     });
     writeCost(false);
   });
+  return finalize;
 }
 
 /**
@@ -955,8 +973,8 @@ async function produceUpstreamStream(
     }
 
     const usage = await result.usage.catch(() => undefined);
-    const promptTokens = usage?.promptTokens ?? 0;
-    const completionTokens = usage?.completionTokens ?? 0;
+    const promptTokens = typeof usage?.promptTokens === 'number' ? usage.promptTokens : null;
+    const completionTokens = typeof usage?.completionTokens === 'number' ? usage.completionTokens : null;
     // M2.5 §F-CB — compute the per-call cost server-side using the price
     // snapshot we already captured on ctx, so the renderer can render a
     // CostBadge without doing the math twice. Falls back to null when no
@@ -967,8 +985,8 @@ async function produceUpstreamStream(
         priceInputPer1m: ctx.priceInputPer1m,
         priceOutputPer1m: ctx.priceOutputPer1m,
         pricePerCall: ctx.pricePerCall,
-        inputTokens: promptTokens,
-        outputTokens: completionTokens,
+        inputTokens: promptTokens ?? 0,
+        outputTokens: completionTokens ?? 0,
       });
       actualUsd = c ?? null;
     } catch {
@@ -993,7 +1011,10 @@ async function produceUpstreamStream(
         )}\n`,
       );
       write(
-        `d:${JSON.stringify({ finishReason: 'error', usage: { promptTokens, completionTokens } })}\n`,
+        `d:${JSON.stringify({
+          finishReason: 'error',
+          usage: { promptTokens: promptTokens ?? 0, completionTokens: completionTokens ?? 0 },
+        })}\n`,
       );
       ctx.log.warn({ chunks }, 'chat.upstream_content_filter');
       return;
@@ -1023,7 +1044,7 @@ async function produceUpstreamStream(
     write(
       `d:${JSON.stringify({
         finishReason: signal.aborted ? 'abort' : 'stop',
-        usage: { promptTokens, completionTokens },
+        usage: { promptTokens: promptTokens ?? 0, completionTokens: completionTokens ?? 0 },
       })}\n`,
     );
     ctx.log.info({ chunks, durationMs: Date.now() - startedAt }, 'chat.upstream_done');

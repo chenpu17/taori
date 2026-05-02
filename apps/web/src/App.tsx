@@ -76,6 +76,10 @@ function modelDisplayWithProvider(model: Model, providers: Provider[]): string {
   return `${model.display_name} · ${providerDisplayName(providers, model.provider_id)}`;
 }
 
+function formatTokenCount(value: number | null): string {
+  return value == null ? '—' : value.toLocaleString();
+}
+
 function currentBudgetMonthKey(now = new Date()): string {
   return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
 }
@@ -1126,7 +1130,7 @@ function ChatPanel({
   // be notified.
   const announcedConvIdRef = useRef<string | null>(null);
   const [costByMsg, setCostByMsg] = useState<
-    Record<string, { input_tokens: number; output_tokens: number; actual_usd: number | null }>
+    Record<string, { input_tokens: number | null; output_tokens: number | null; actual_usd: number | null }>
   >({});
   // M2.5 §F-CR — when the LLM calls the `image_generate` tool inside a chat
   // turn, the sidecar streams a `tool_image_result` annotation we use to
@@ -1310,6 +1314,7 @@ function ChatPanel({
       const decoder = new TextDecoder();
       let buf = '';
       let pendingMsgId: string | null = null;
+      let observedConversationId: string | null = null;
       try {
         for (;;) {
           const { value, done } = await reader.read();
@@ -1339,6 +1344,7 @@ function ChatPanel({
                   // here would re-render mid-stream and break the
                   // failure-decision card flow (M2 §1.4).
                   conversationIdRef.current = ann.conversation_id;
+                  observedConversationId = ann.conversation_id;
                 }
                 if (ann?.type === 'failure_decision' && pendingMsgId) {
                   const decision: FailureDecision = {
@@ -1380,6 +1386,17 @@ function ChatPanel({
         }
       } catch {
         /* stream cancelled */
+      } finally {
+        // If the user aborts a first-turn stream before useChat.onFinish runs,
+        // the parent still needs the server-created conversation id so the
+        // sidebar selection and subsequent actions point at the persisted row.
+        if (
+          observedConversationId &&
+          announcedConvIdRef.current !== observedConversationId
+        ) {
+          announcedConvIdRef.current = observedConversationId;
+          onConversationCreated(observedConversationId);
+        }
       }
     })();
     return new Response(a, {
@@ -1387,7 +1404,7 @@ function ChatPanel({
       statusText: res.statusText,
       headers: res.headers,
     });
-  }, []);
+  }, [onConversationCreated]);
 
   const composerRef = useRef<HTMLTextAreaElement | null>(null);
   const messagesRef = useRef<HTMLDivElement | null>(null);
@@ -1583,8 +1600,8 @@ function ChatPanel({
           setCostByMsg((prev) => ({
             ...prev,
             [a.message_id as string]: {
-              input_tokens: Number(a.input_tokens ?? 0),
-              output_tokens: Number(a.output_tokens ?? 0),
+              input_tokens: typeof a.input_tokens === 'number' ? (a.input_tokens as number) : null,
+              output_tokens: typeof a.output_tokens === 'number' ? (a.output_tokens as number) : null,
               actual_usd:
                 typeof a.actual_usd === 'number' ? (a.actual_usd as number) : null,
             },
@@ -2278,8 +2295,8 @@ function ChatPanel({
               : {
                   ...prev,
                   [id]: {
-                    input_tokens: Number(a.input_tokens ?? 0),
-                    output_tokens: Number(a.output_tokens ?? 0),
+                    input_tokens: typeof a.input_tokens === 'number' ? (a.input_tokens as number) : null,
+                    output_tokens: typeof a.output_tokens === 'number' ? (a.output_tokens as number) : null,
                     actual_usd:
                       typeof a.actual_usd === 'number' ? (a.actual_usd as number) : null,
                   },
@@ -2542,7 +2559,17 @@ function ChatPanel({
   const onStopClick = useCallback((): void => {
     stop();
     setWasStoppedRecently(true);
-  }, [stop]);
+    const refreshStoppedConversation = (): void => {
+      const conv = conversationIdRef.current;
+      if (!conv) return;
+      void loadConversationMessages(conv).catch((e) =>
+        console.warn('[stop] history refresh failed:', e),
+      );
+      onConversationUpdated();
+    };
+    window.setTimeout(refreshStoppedConversation, 250);
+    window.setTimeout(refreshStoppedConversation, 1000);
+  }, [loadConversationMessages, onConversationUpdated, stop]);
   const onContinueClick = useCallback(async (): Promise<void> => {
     if (continueBusy || isLoading) return;
     setContinueBusy(true);
@@ -2838,8 +2865,13 @@ function ChatPanel({
               )}
               {m.role === 'assistant' && cost && (
                 <div className="msg-cost" data-testid="msg-cost">
-                  {cost.input_tokens} in · {cost.output_tokens} out ·{' '}
+                  {formatTokenCount(cost.input_tokens)} in · {formatTokenCount(cost.output_tokens)} out ·{' '}
                   {cost.actual_usd != null ? formatUsd(cost.actual_usd) : '—'}
+                  {(cost.input_tokens == null || cost.output_tokens == null) && (
+                    <span className="msg-cost-note" title="当前供应商没有返回 token usage，费用只能显示可用部分。">
+                      token 未返回
+                    </span>
+                  )}
                 </div>
               )}
               {!isLoading && m.content && editingMsgId !== m.id && (
