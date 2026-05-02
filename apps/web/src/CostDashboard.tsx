@@ -49,10 +49,38 @@ interface DashboardApiRow {
   }>;
 }
 
+interface CallLogRow {
+  id: string;
+  created_at: number;
+  conversation_id: string | null;
+  conversation_title: string | null;
+  source_type: string;
+  feature: string;
+  model_id: string | null;
+  model_name_snapshot: string;
+  provider_name: string | null;
+  provider_type: string | null;
+  input_tokens: number | null;
+  output_tokens: number | null;
+  actual_cost_usd: number | null;
+  success: boolean;
+  classification: string | null;
+  first_token_ms: number | null;
+  duration_ms: number | null;
+}
+
 const GROUP_LABELS: Record<CostGroupBy, string> = {
   model: '按模型',
   conversation: '按会话',
   feature: '按特性',
+};
+
+const SOURCE_LABELS: Record<string, string> = {
+  message: '聊天',
+  roundtable_message: '圆桌',
+  topic_analyzer: '圆桌规划',
+  summarizer: '圆桌总结',
+  tool_call: '工具',
 };
 
 function normalizeDashboardRow(row: DashboardApiRow, groupBy: CostGroupBy): DashboardRow {
@@ -152,6 +180,7 @@ export function CostDashboard({ onClose }: CostDashboardProps): JSX.Element {
   const [scope, setScope] = useState<CostScope>('today');
   const [groupBy, setGroupBy] = useState<CostGroupBy>('model');
   const [rows, setRows] = useState<DashboardRow[] | null>(null);
+  const [callLogs, setCallLogs] = useState<CallLogRow[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [refreshing, setRefreshing] = useState(false);
   const [lastUpdatedAt, setLastUpdatedAt] = useState<number | null>(null);
@@ -168,12 +197,17 @@ export function CostDashboard({ onClose }: CostDashboardProps): JSX.Element {
   const refresh = useCallback(async (reset: boolean): Promise<void> => {
     const seq = ++refreshSeq.current;
     if (reset) setRows(null);
+    if (reset) setCallLogs(null);
     setRefreshing(true);
     setError(null);
     try {
-      const res = await api.costsDashboardBreakdown(scope, groupBy);
+      const [res, logs] = await Promise.all([
+        api.costsDashboardBreakdown(scope, groupBy),
+        api.costsCallLogs(50),
+      ]);
       if (seq !== refreshSeq.current) return;
       setRows((res.data.rows ?? []).map((row) => normalizeDashboardRow(row, groupBy)));
+      setCallLogs(logs.data.rows ?? []);
       setLastUpdatedAt(Date.now());
     } catch (e) {
       if (seq !== refreshSeq.current) return;
@@ -319,6 +353,46 @@ export function CostDashboard({ onClose }: CostDashboardProps): JSX.Element {
               </li>
             ))}
           </ol>
+        )}
+      </div>
+
+      <div className="cost-dashboard__calls" data-testid="cost-call-log">
+        <div className="cost-dashboard__calls-head">
+          <h3>最近模型 / 工具调用</h3>
+          <span>按实际 Sidecar 出口记录，便于核对外部消费。</span>
+        </div>
+        {callLogs == null && <div className="hint">调用日志加载中…</div>}
+        {callLogs != null && callLogs.length === 0 && (
+          <div className="hint" data-testid="cost-call-log-empty">暂无调用日志。</div>
+        )}
+        {callLogs != null && callLogs.length > 0 && (
+          <div className="cost-call-log-list">
+            {callLogs.slice(0, 12).map((row) => (
+              <article
+                key={row.id}
+                className="cost-call-log-row"
+                data-testid="cost-call-log-row"
+              >
+                <div className="cost-call-log-main">
+                  <strong>
+                    {row.model_name_snapshot || row.model_id || '未知模型 / 工具'}
+                    {row.provider_name ? ` · ${row.provider_name}` : ''}
+                  </strong>
+                  <span>
+                    {SOURCE_LABELS[row.source_type] ?? row.source_type} · {row.feature}
+                    {row.conversation_title ? ` · ${row.conversation_title}` : ''}
+                  </span>
+                </div>
+                <div className="cost-call-log-meta">
+                  <span className={row.success ? 'ok' : 'fail'}>
+                    {row.success ? '成功' : `失败${row.classification ? `:${row.classification}` : ''}`}
+                  </span>
+                  <span>{row.actual_cost_usd == null ? '费用未知' : formatUsd(row.actual_cost_usd)}</span>
+                  <span>{new Date(row.created_at).toLocaleTimeString()}</span>
+                </div>
+              </article>
+            ))}
+          </div>
         )}
       </div>
     </section>

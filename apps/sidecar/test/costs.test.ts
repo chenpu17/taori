@@ -102,5 +102,19 @@ describe('costs M1.3', () => {
     expect(rtBody.data.current_conversation_calls).toBe(1);
     expect(rtBody.data.current_conversation_usd).toBeGreaterThan(0);
     expect(rtBody.data.today_usd).toBeGreaterThan(0);
+
+    const logs = await app.inject({
+      method: 'GET',
+      url: '/v1/costs/calls?limit=10',
+      headers: { authorization: `Bearer ${bearer}` },
+    });
+    expect(logs.statusCode).toBe(200);
+    const logsBody = logs.json() as {
+      data: { rows: Array<{ model_id: string | null; model_name_snapshot: string; provider_name: string | null; source_type: string }> };
+    };
+    expect(logsBody.data.rows[0]?.model_id).toBe(model.id);
+    expect(logsBody.data.rows[0]?.model_name_snapshot).toBe('mock-model');
+    expect(logsBody.data.rows[0]?.provider_name).toBe('Mock');
+    expect(logsBody.data.rows[0]?.source_type).toBe('message');
   });
 });

@@ -15,7 +15,7 @@ import { buildServer } from '../src/server.js';
 import { openDb } from '../src/db/index.js';
 import { ControlClient } from '../src/control/client.js';
 import { MemoryStore } from '../src/keystore.js';
-import { ProvidersRepo, ModelsRepo, ConversationsRepo, MessagesRepo, FilesRepo } from '../src/db/repos/index.js';
+import { ProvidersRepo, ModelsRepo, ConversationsRepo, MessagesRepo, FilesRepo, MemoriesRepo } from '../src/db/repos/index.js';
 import { cost_records, messages as messagesTable, files as filesTable } from '../src/db/schema.js';
 import { detectImageCommand, detectImageIntent, isIntentDisabledUntilNow } from '../src/intent.js';
 import type { FastifyInstance } from 'fastify';
@@ -494,6 +494,96 @@ describe('M2.4 — image_generate via /v1/tools/invoke', () => {
       expect(imageCalls).toBe(1);
       expect(res.payload).toContain('"type":"tool_image_result"');
       expect(res.payload).not.toContain('"type":"capability_route"');
+    } finally {
+      fetchSpy.mockRestore();
+    }
+  });
+
+  it('honors the global image_model_default preference for LLM tool calls', async () => {
+    const models = new ModelsRepo(db);
+    const providers = new ProvidersRepo(db);
+    const memories = new MemoriesRepo(db);
+    const huawei = providers.create({
+      name: 'Huawei MaaS',
+      type: 'huawei_maas',
+      base_url: 'https://huawei.example.com/openai/v1',
+      api_key: 'hw-test-key',
+    });
+    await keystore.write(huawei.api_key_ref!, 'hw-test-key');
+    const packy = providers.create({
+      name: 'PackyAPI',
+      type: 'openai',
+      base_url: 'https://www.packyapi.test/v1',
+      api_key: 'packy-test-key',
+    });
+    await keystore.write(packy.api_key_ref!, 'packy-test-key');
+    const huaweiChat = models.create({
+      provider_id: huawei.id,
+      model_name: 'glm-5.1',
+      capability: 'chat',
+      display_name: 'GLM 5.1',
+      supports_tools: true,
+    });
+    const packyImage = models.create({
+      provider_id: packy.id,
+      model_name: 'gpt-image-2',
+      capability: 'image',
+      display_name: 'GPT Image 2',
+      price_per_image: null,
+    });
+    memories.set('global', null, 'image_model_default', packyImage.id);
+
+    const toolCallBody =
+      `data: ${JSON.stringify({ id: '1', object: 'chat.completion.chunk', created: 1, model: 'glm-5.1', choices: [{ index: 0, delta: { role: 'assistant', tool_calls: [{ index: 0, id: 'call_img_1', type: 'function', function: { name: 'image_generate', arguments: '' } }] }, finish_reason: null }] })}\n\n` +
+      `data: ${JSON.stringify({ id: '1', object: 'chat.completion.chunk', created: 1, model: 'glm-5.1', choices: [{ index: 0, delta: { tool_calls: [{ index: 0, function: { arguments: '{"prompt":"green icon"}' } }] }, finish_reason: null }] })}\n\n` +
+      `data: ${JSON.stringify({ id: '1', object: 'chat.completion.chunk', created: 1, model: 'glm-5.1', choices: [{ index: 0, delta: {}, finish_reason: 'tool_calls' }], usage: { prompt_tokens: 5, completion_tokens: 1, total_tokens: 6 } })}\n\n` +
+      `data: [DONE]\n\n`;
+    const finalTextBody =
+      `data: ${JSON.stringify({ id: '1', object: 'chat.completion.chunk', created: 1, model: 'glm-5.1', choices: [{ index: 0, delta: { role: 'assistant', content: 'ok' }, finish_reason: null }] })}\n\n` +
+      `data: ${JSON.stringify({ id: '1', object: 'chat.completion.chunk', created: 1, model: 'glm-5.1', choices: [{ index: 0, delta: {}, finish_reason: 'stop' }], usage: { prompt_tokens: 5, completion_tokens: 1, total_tokens: 6 } })}\n\n` +
+      `data: [DONE]\n\n`;
+    let chatCalls = 0;
+    let imageCalls = 0;
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async (url, init) => {
+      const rawBody = typeof init?.body === 'string' ? init.body : String(init?.body ?? '{}');
+      const body = JSON.parse(rawBody) as { model?: string; prompt?: string; tools?: Array<{ function?: { name?: string } }> };
+      if (String(url) === 'https://www.packyapi.test/v1/images/generations') {
+        imageCalls++;
+        expect(body.model).toBe('gpt-image-2');
+        expect(body.prompt).toBe('green icon');
+        return new Response(JSON.stringify({ data: [{ b64_json: Buffer.from('packy-png').toString('base64') }] }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        });
+      }
+      expect(String(url)).toBe('https://huawei.example.com/openai/v1/chat/completions');
+      chatCalls++;
+      return new Response(chatCalls === 1 ? toolCallBody : finalTextBody, {
+        status: 200,
+        headers: { 'content-type': 'text/event-stream' },
+      });
+    });
+
+    try {
+      const res = await app.inject({
+        method: 'POST',
+        url: '/v1/chat',
+        headers: { authorization: `Bearer ${bearer}`, 'content-type': 'application/json' },
+        payload: {
+          model_id: huaweiChat.id,
+          messages: [{ role: 'user', content: '生成绿色图标' }],
+        },
+      });
+      expect(res.statusCode).toBe(200);
+      expect(chatCalls).toBe(2);
+      expect(imageCalls).toBe(1);
+      const imageCost = db
+        .select()
+        .from(cost_records)
+        .all()
+        .find((r) => r.feature === 'image' && r.model_id === packyImage.id);
+      expect(imageCost?.model_name_snapshot).toBe('gpt-image-2');
+      expect(res.payload).toContain('"type":"tool_image_result"');
     } finally {
       fetchSpy.mockRestore();
     }

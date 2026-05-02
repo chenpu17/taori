@@ -7,7 +7,7 @@
  * concerns are layered on by the route handlers.
  */
 
-import { eq, and, isNotNull, asc, sql } from 'drizzle-orm';
+import { eq, and, isNotNull, asc, desc, sql } from 'drizzle-orm';
 import { type Db } from '../index.js';
 import {
   providers,
@@ -1091,6 +1091,28 @@ export interface CostRecord extends CostInsert {
   created_at: number;
 }
 
+export interface CostCallLogRow {
+  id: string;
+  created_at: number;
+  conversation_id: string | null;
+  conversation_title: string | null;
+  source_type: CostInsert['source_type'];
+  source_id: string | null;
+  feature: CostInsert['feature'];
+  model_id: string | null;
+  model_name_snapshot: string;
+  provider_id: string | null;
+  provider_name: string | null;
+  provider_type: string | null;
+  input_tokens: number | null;
+  output_tokens: number | null;
+  actual_cost_usd: number | null;
+  success: boolean;
+  classification: ErrorClassification | null;
+  first_token_ms: number | null;
+  duration_ms: number | null;
+}
+
 export class CostsRepo {
   constructor(private db: Db) {}
 
@@ -1296,6 +1318,39 @@ export class CostsRepo {
       today_usd: today.total_usd,
       month_usd: month.total_usd,
     };
+  }
+
+  callLogs(limit = 100): CostCallLogRow[] {
+    const safeLimit = Math.max(1, Math.min(200, Math.floor(limit)));
+    return this.db
+      .select({
+        id: cost_records.id,
+        created_at: cost_records.created_at,
+        conversation_id: cost_records.conversation_id,
+        conversation_title: conversations.title,
+        source_type: cost_records.source_type,
+        source_id: cost_records.source_id,
+        feature: cost_records.feature,
+        model_id: cost_records.model_id,
+        model_name_snapshot: cost_records.model_name_snapshot,
+        provider_id: providers.id,
+        provider_name: providers.name,
+        provider_type: providers.type,
+        input_tokens: cost_records.input_tokens,
+        output_tokens: cost_records.output_tokens,
+        actual_cost_usd: cost_records.actual_cost_usd,
+        success: cost_records.success,
+        classification: cost_records.classification,
+        first_token_ms: cost_records.first_token_ms,
+        duration_ms: cost_records.duration_ms,
+      })
+      .from(cost_records)
+      .leftJoin(models, eq(cost_records.model_id, models.id))
+      .leftJoin(providers, eq(models.provider_id, providers.id))
+      .leftJoin(conversations, eq(cost_records.conversation_id, conversations.id))
+      .orderBy(desc(cost_records.created_at))
+      .limit(safeLimit)
+      .all() as CostCallLogRow[];
   }
 
   modelHealth24h(): Map<string, ModelHealthRow> {

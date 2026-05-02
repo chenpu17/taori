@@ -1947,6 +1947,74 @@ header h1::before {
   background: var(--surface);
   padding: 10px 14px;
 }
+.cost-dashboard__calls {
+  margin-top: 14px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-lg);
+  background: color-mix(in srgb, var(--surface-2) 55%, var(--surface));
+  padding: 14px;
+}
+.cost-dashboard__calls-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 12px;
+  margin-bottom: 10px;
+}
+.cost-dashboard__calls-head h3 {
+  margin: 0;
+  font-size: 14px;
+}
+.cost-dashboard__calls-head span {
+  color: var(--muted);
+  font-size: 12px;
+}
+.cost-call-log-list {
+  display: grid;
+  gap: 8px;
+}
+.cost-call-log-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 12px;
+  align-items: center;
+  border: 1px solid color-mix(in srgb, var(--border) 75%, transparent);
+  border-radius: 14px;
+  background: var(--surface);
+  padding: 10px 12px;
+}
+.cost-call-log-main {
+  min-width: 0;
+}
+.cost-call-log-main strong,
+.cost-call-log-main span {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.cost-call-log-main strong {
+  font-size: 13px;
+}
+.cost-call-log-main span {
+  margin-top: 3px;
+  color: var(--muted);
+  font-size: 11px;
+}
+.cost-call-log-meta {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--muted);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+.cost-call-log-meta .ok {
+  color: var(--ok);
+}
+.cost-call-log-meta .fail {
+  color: var(--danger);
+}
 .cost-dashboard__list {
   list-style: none;
   padding: 0;

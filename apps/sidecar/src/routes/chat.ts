@@ -369,13 +369,13 @@ export function registerChatRoute(
       supportsTools: model?.supports_tools === true,
       sourceUserMessageId,
       bus: deps.bus ?? null,
-      // Pick an image candidate at request time (default → cheapest enabled).
+      // Pick the same image candidate the user sees in the renderer:
+      // session preference → global preference → image default → sorted pool.
       // If the chat model itself isn't chat-capable (e.g. an image-only model),
       // skip — there's no LLM to dispatch tool calls.
       imageModelId:
         deps.bus && model && isChatCapable(model.capability) && model.supports_tools
-          ? (modelsRepo.defaultFor('image') ??
-              modelsRepo.pickCheapestActive('image', ''))?.id ?? null
+          ? pickImageToolModelId(modelsRepo, memoriesRepo, conversation.id)
           : null,
       filesRepo,
     };
@@ -462,6 +462,38 @@ function readForcedClassification(raw: unknown): string | null {
   if (typeof raw !== 'string') return null;
   const v = raw.trim().toLowerCase();
   return VALID_FORCED_CLASSIFICATIONS.has(v) ? v : null;
+}
+
+function pickImageToolModelId(
+  modelsRepo: ModelsRepo,
+  memoriesRepo: MemoriesRepo,
+  conversationId: string,
+): string | null {
+  const now = Date.now();
+  const candidates = modelsRepo
+    .list()
+    .filter(
+      (m) =>
+        m.capability === 'image' &&
+        m.enabled &&
+        !m.demoted &&
+        !!m.provider_id &&
+        !(m.disabled_until && m.disabled_until > now),
+    )
+    .sort(
+      (a, b) =>
+        (a.price_per_call ?? a.price_per_image ?? 0) -
+          (b.price_per_call ?? b.price_per_image ?? 0) ||
+        a.fallback_order - b.fallback_order,
+    );
+  const candidateIds = new Set(candidates.map((m) => m.id));
+  const sessionModelId = memoriesRepo.get('session', conversationId, 'image_model');
+  if (sessionModelId && candidateIds.has(sessionModelId)) return sessionModelId;
+  const globalModelId = memoriesRepo.get('global', null, 'image_model_default');
+  if (globalModelId && candidateIds.has(globalModelId)) return globalModelId;
+  const defaultModel = modelsRepo.defaultFor('image');
+  if (defaultModel && candidateIds.has(defaultModel.id)) return defaultModel.id;
+  return candidates[0]?.id ?? null;
 }
 
 /**

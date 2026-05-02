@@ -24,6 +24,10 @@ const BreakdownQuery = z.object({
   group_by: z.enum(['model_feature', 'model', 'conversation', 'feature']).optional(),
 });
 
+const CallLogsQuery = z.object({
+  limit: z.coerce.number().int().min(1).max(200).optional(),
+});
+
 export function registerCostsRoute(app: FastifyInstance, deps: BuildServerArgs): void {
   const repo = new CostsRepo(deps.db);
 
@@ -34,6 +38,18 @@ export function registerCostsRoute(app: FastifyInstance, deps: BuildServerArgs):
     return {
       ok: true,
       data: { ...data, currency_display: 'USD' },
+    };
+  });
+
+  app.get('/v1/costs/calls', async (req, reply) => {
+    const parsed = CallLogsQuery.safeParse(req.query);
+    if (!parsed.success) {
+      reply.code(400);
+      return { ok: false, error: parsed.error.errors[0]?.message ?? 'invalid query' };
+    }
+    return {
+      ok: true,
+      data: { rows: repo.callLogs(parsed.data.limit ?? 100) },
     };
   });
 

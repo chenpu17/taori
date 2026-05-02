@@ -169,6 +169,7 @@ D1 / D2（成本看板 / 月度预算）已实现：
 
 - `apps/sidecar`
   - 复用并扩展 `/v1/costs/breakdown`：`scope` 支持 `today / week / month / session`，`group_by` 支持 `model_feature / model / conversation / feature`
+  - 新增 `/v1/costs/calls`：按时间倒序返回最近模型 / 工具调用流水，包含 provider、model、source、feature、成功状态、费用与耗时，用于核对真实外部消费
   - `CostsRepo.breakdownBy()` 新增按模型 / 会话 / 特性聚合，并返回 bucket 级 `trend[]`
   - `CostsRepo.breakdown()` 改为基于统一 window rows 聚合，保持 M2 session panel 向后兼容
 - `apps/web`
@@ -191,6 +192,7 @@ D1 / D2（成本看板 / 月度预算）已实现：
 - `apps/sidecar`
   - `/v1/costs/breakdown` 查询契约扩展：新增 `group_by`，并允许 `scope=week`
   - 当 `group_by !== model_feature` 时，返回行增加 `key / label / conversation_* / feature? / trend[]`
+  - 新增 `/v1/costs/calls?limit=` 查询契约：返回最近调用日志，默认 100 条，上限 200 条
 - `apps/web`
   - 新增成本看板 overlay、顶栏入口、命令面板入口、预算 toast 与超预算确认门控
   - `Settings` 增加月预算配置入口

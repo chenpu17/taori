@@ -518,9 +518,44 @@
 }
 ```
 
-### `GET /v1/costs/records`
+### `GET /v1/costs/calls`
 
-明细查询，支持分页。
+最近调用流水，用于核对真实外部模型 / 工具消费。默认 100 条，`limit` 上限 200。
+
+**Query:**
+- `limit?: number`
+
+**Response 200:**
+```json
+{
+  "ok": true,
+  "data": {
+    "rows": [
+      {
+        "id": "cost_xxx",
+        "created_at": 1714200000000,
+        "conversation_id": "conv_xxx",
+        "conversation_title": "生成图标",
+        "source_type": "tool_call",
+        "source_id": "msg_xxx",
+        "feature": "image",
+        "model_id": "mdl_xxx",
+        "model_name_snapshot": "gpt-image-2",
+        "provider_id": "prov_xxx",
+        "provider_name": "PackyAPI",
+        "provider_type": "openai",
+        "input_tokens": null,
+        "output_tokens": null,
+        "actual_cost_usd": null,
+        "success": true,
+        "classification": null,
+        "first_token_ms": null,
+        "duration_ms": 4200
+      }
+    ]
+  }
+}
+```
 
 ---
 

@@ -224,6 +224,36 @@ export const api = {
     );
   },
 
+  costsCallLogs: (limit = 50) =>
+    authedFetch(`/v1/costs/calls?limit=${encodeURIComponent(String(limit))}`).then((r) =>
+      json<{
+        ok: boolean;
+        data: {
+          rows: Array<{
+            id: string;
+            created_at: number;
+            conversation_id: string | null;
+            conversation_title: string | null;
+            source_type: 'message' | 'roundtable_message' | 'topic_analyzer' | 'summarizer' | 'tool_call';
+            source_id: string | null;
+            feature: 'chat' | 'roundtable' | 'image' | 'tool_call';
+            model_id: string | null;
+            model_name_snapshot: string;
+            provider_id: string | null;
+            provider_name: string | null;
+            provider_type: string | null;
+            input_tokens: number | null;
+            output_tokens: number | null;
+            actual_cost_usd: number | null;
+            success: boolean;
+            classification: string | null;
+            first_token_ms: number | null;
+            duration_ms: number | null;
+          }>;
+        };
+      }>(r),
+    ),
+
   listConversations: (q?: string) => {
     const qs = q && q.trim().length > 0 ? `?q=${encodeURIComponent(q.trim())}` : '';
     return authedFetch(`/v1/conversations${qs}`).then((r) =>
