@@ -18,7 +18,8 @@
     "test": "pnpm -r --parallel test",
     "test:sidecar": "pnpm --filter @taori/sidecar test",
     "test:e2e": "pnpm --filter @taori/web test:e2e",
-    "typecheck": "pnpm -r --parallel typecheck"
+    "typecheck": "pnpm -r --parallel typecheck",
+    "verify:real": "node ./scripts/verify-real-journey.mjs"
   },
   "devDependencies": {
     "typescript": "5.6.3"
