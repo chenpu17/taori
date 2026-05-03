@@ -319,6 +319,9 @@ async function wipeAllData(deps: BuildServerArgs): Promise<{
 export function registerAdminRoute(app: FastifyInstance, deps: BuildServerArgs): void {
   app.post('/v1/admin/clear-all-data', async () => {
     const cleared = await wipeAllData(deps);
+    for (const tool of deps.bus?.list() ?? []) {
+      deps.bus?.setEnabled(tool.name, true);
+    }
     return {
       ok: true,
       data: {

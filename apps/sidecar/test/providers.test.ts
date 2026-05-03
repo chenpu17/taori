@@ -187,6 +187,7 @@ describe('providers + models', () => {
       new Response(
         JSON.stringify({
           data: [
+            { id: 'deepseek-v3.2', name: 'DeepSeek V3.2' },
             { id: 'qwen2.5-vl-72b', name: 'Qwen2.5 VL 72B' },
             { id: 'qwen-image', name: 'Qwen Image' },
             { id: 'Wan2.2-T2V-A14B', name: 'Wan2.2 T2V A14B' },
@@ -222,6 +223,10 @@ describe('providers + models', () => {
       capability: 'multimodal',
       supports_vision: true,
       modalities: ['text', 'image'],
+      supports_tools: false,
+    });
+    expect(models.find((m) => m.model_name === 'deepseek-v3.2')).toMatchObject({
+      capability: 'chat',
       supports_tools: true,
     });
     expect(models.find((m) => m.model_name === 'qwen-image')).toMatchObject({
@@ -247,10 +252,15 @@ describe('providers + models', () => {
     expect(res.statusCode).toBe(204);
   });
 
-  it('Huawei MaaS discovery marks unknown chat models as tool-capable so GLM can use image tools', async () => {
+  it('Huawei MaaS discovery keeps unknown chat models non-tool-capable unless metadata says so', async () => {
     vi.spyOn(globalThis, 'fetch').mockResolvedValue(
       new Response(
-        JSON.stringify({ data: [{ id: 'glm-5.1', name: 'GLM 5.1' }] }),
+        JSON.stringify({
+          data: [
+            { id: 'glm-5.1', name: 'GLM 5.1' },
+            { id: 'glm-tools', name: 'GLM Tools', supports_tools: true },
+          ],
+        }),
         { status: 200, headers: { 'content-type': 'application/json' } },
       ),
     );
@@ -276,8 +286,13 @@ describe('providers + models', () => {
     });
     expect(res.statusCode).toBe(200);
     const models = res.json().models as Array<{ model_name: string; capability: string; supports_tools: boolean }>;
-    expect(models[0]).toMatchObject({
+    expect(models.find((m) => m.model_name === 'glm-5.1')).toMatchObject({
       model_name: 'glm-5.1',
+      capability: 'chat',
+      supports_tools: false,
+    });
+    expect(models.find((m) => m.model_name === 'glm-tools')).toMatchObject({
+      model_name: 'glm-tools',
       capability: 'chat',
       supports_tools: true,
     });

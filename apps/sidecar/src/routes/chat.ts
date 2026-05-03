@@ -31,7 +31,7 @@ import { PassThrough } from 'node:stream';
 import { createOpenAI } from '@ai-sdk/openai';
 import { streamText, tool } from 'ai';
 import { z } from 'zod';
-import { ChatRequestSchema, TaoriError, calculateCostUsd, isChatCapable } from '@taori/shared';
+import { ChatRequestSchema, TaoriError, calculateCostUsd, isChatCapable, makeId } from '@taori/shared';
 import type { ErrorClassification } from '@taori/shared';
 import type { BuildServerArgs } from '../server.js';
 import {
@@ -43,11 +43,17 @@ import {
   MemoriesRepo,
   FilesRepo,
   PersonasRepo,
+  RunEventsRepo,
   type MessageRow,
+  type RunEventInsert,
 } from '../db/repos/index.js';
-import { classifyProviderError } from '../providers/registry.js';
-import { detectImageCommand } from '../intent.js';
+import {
+  classifyProviderError,
+  isToolPayloadUnsupportedError,
+} from '../providers/registry.js';
+import { detectImageCommand, detectImageIntent } from '../intent.js';
 import type { CapabilityBus } from '../bus/index.js';
+import { readSessionToolEnabled } from './tools.js';
 
 const TEST_HOOKS_ENABLED = process.env.NODE_ENV !== 'production'
   && process.env.TAORI_DISABLE_TEST_HOOKS !== '1';
@@ -68,6 +74,7 @@ export function registerChatRoute(
   const memoriesRepo = new MemoriesRepo(deps.db);
   const filesRepo = new FilesRepo(deps.db);
   const personasRepo = new PersonasRepo(deps.db);
+  const runEventsRepo = new RunEventsRepo(deps.db);
 
   app.post('/v1/chat', async (req, reply) => {
     const parsed = ChatRequestSchema.safeParse(req.body);
@@ -112,7 +119,7 @@ export function registerChatRoute(
     }
 
     const conversation = convRepo.ensure(body.conversation_id);
-    let resolvedPersonaPrompt: string | null = null;
+    let resolvedPersona: { id: string; name: string; prompt: string } | null = null;
     if (body.persona_id) {
       const persona = personasRepo.get(body.persona_id);
       if (!persona) {
@@ -127,7 +134,7 @@ export function registerChatRoute(
         'active_persona_id',
         persona.id,
       );
-      resolvedPersonaPrompt = persona.prompt;
+      resolvedPersona = { id: persona.id, name: persona.name, prompt: persona.prompt };
     } else {
       const boundPersonaId = memoriesRepo.get(
         'session',
@@ -137,7 +144,11 @@ export function registerChatRoute(
       if (boundPersonaId) {
         const boundPersona = personasRepo.get(boundPersonaId);
         if (boundPersona) {
-          resolvedPersonaPrompt = boundPersona.prompt;
+          resolvedPersona = {
+            id: boundPersona.id,
+            name: boundPersona.name,
+            prompt: boundPersona.prompt,
+          };
         } else {
           memoriesRepo.delete(
             'session',
@@ -223,14 +234,23 @@ export function registerChatRoute(
     // Persist user turn + assistant placeholder atomically so a crash between
     // them can't leave an orphaned user message or a half-recorded turn.
     //
-    // M2.4 — explicit image command route. Natural-language image requests
-    // must stay on the chat path so tool-capable models can decide whether to
-    // call `image_generate` themselves. Regex intent routing was removed here
-    // because it fired before the LLM and felt like a false "tool call".
+    // M2.4 — image route. For tool-capable chat models, natural-language image
+    // requests stay on the chat path so the model can decide whether to call
+    // `image_generate`. If the selected chat model cannot use tools, route
+    // clear image-generation intents to the explicit picker instead of letting
+    // the model answer with "I cannot generate images" or code snippets.
     let intentRoute: { prompt: string; user_message_id: string } | null = null;
     if (lastUserMsg?.content) {
       const command = detectImageCommand(lastUserMsg.content);
-      if (command.hit) {
+      const imageIntent =
+        command.hit
+          ? command
+          : hasImage
+            ? { hit: false, prompt: '' }
+          : model?.supports_tools === true
+            ? { hit: false, prompt: '' }
+            : detectImageIntent(lastUserMsg.content);
+      if (imageIntent.hit) {
         const userRow = deps.db.transaction((tx) => {
           const txMsgRepo = new MessagesRepo(tx);
           return txMsgRepo.insert({
@@ -242,7 +262,7 @@ export function registerChatRoute(
               attachments.length > 0 ? JSON.stringify(attachments) : null,
           });
         });
-        intentRoute = { prompt: command.prompt, user_message_id: userRow.id };
+        intentRoute = { prompt: imageIntent.prompt, user_message_id: userRow.id };
       }
     }
 
@@ -321,6 +341,30 @@ export function registerChatRoute(
 
     // M2.4 explicit image-command path: emit capability_route annotation, end.
     if (intentRoute) {
+      const runId = makeId('run');
+      appendRunEvent(req.log, runEventsRepo, {
+        run_id: runId,
+        conversation_id: conversation.id,
+        message_id: null,
+        kind: 'turn.started',
+        status: 'started',
+        label: '用户回合开始',
+        summary: lastUserMsg?.content?.slice(0, 120) ?? null,
+        payload: { route: 'capability', capability: 'image' },
+      });
+      appendRunEvent(req.log, runEventsRepo, {
+        run_id: runId,
+        conversation_id: conversation.id,
+        message_id: null,
+        kind: 'capability.routed',
+        status: 'completed',
+        label: '路由到图像生成',
+        summary: intentRoute.prompt.slice(0, 180),
+        payload: {
+          capability: 'image',
+          user_message_id: intentRoute.user_message_id,
+        },
+      });
       stream.write(
         `8:${JSON.stringify([
           { type: 'meta', conversation_id: conversation.id, message_id: null, model_id: null },
@@ -343,11 +387,22 @@ export function registerChatRoute(
           usage: { promptTokens: 0, completionTokens: 0 },
         })}\n`,
       );
+      appendRunEvent(req.log, runEventsRepo, {
+        run_id: runId,
+        conversation_id: conversation.id,
+        message_id: null,
+        kind: 'turn.completed',
+        status: 'completed',
+        label: '用户回合完成',
+        summary: '已等待用户选择图像生成模型',
+      });
       stream.end();
       return;
     }
 
+    const runId = makeId('run');
     const ctx: ProduceCtx = {
+      runId,
       conversationId: conversation.id,
       messageId: assistantMsg!.id,
       modelId: body.model_id,
@@ -357,10 +412,22 @@ export function registerChatRoute(
       priceOutputPer1m: model?.price_output_per_1m ?? null,
       pricePerCall: model?.price_per_call ?? null,
       userText: lastUserMsg?.content ?? '',
-      messages: resolvedPersonaPrompt
-        ? [{ role: 'system', content: resolvedPersonaPrompt }, ...body.messages]
+      messages: resolvedPersona
+        ? [{ role: 'system', content: resolvedPersona.prompt }, ...body.messages]
         : body.messages,
       attachments,
+      personaName: resolvedPersona?.name ?? null,
+      toolPolicy: deps.bus
+        ? deps.bus.list().reduce<Record<string, boolean>>((acc, toolItem) => {
+            const sessionEnabled = readSessionToolEnabled(
+              memoriesRepo,
+              conversation.id,
+              toolItem.name,
+            );
+            acc[toolItem.name] = toolItem.enabled && sessionEnabled !== false;
+            return acc;
+          }, {})
+        : {},
       log: req.log,
       forcedClassification: TEST_HOOKS_ENABLED
         ? readForcedClassification(req.headers[FORCE_CLASSIFICATION_HEADER])
@@ -378,7 +445,23 @@ export function registerChatRoute(
           ? pickImageToolModelId(modelsRepo, memoriesRepo, conversation.id)
           : null,
       filesRepo,
+      runEventsRepo,
     };
+    appendRunEvent(req.log, runEventsRepo, {
+      run_id: runId,
+      conversation_id: conversation.id,
+      message_id: assistantMsg!.id,
+      kind: 'turn.started',
+      status: 'started',
+      label: '用户回合开始',
+      summary: lastUserMsg?.content?.slice(0, 120) ?? null,
+      payload: {
+        model_id: model?.id ?? body.model_id,
+        source_user_message_id: sourceUserMessageId,
+        attachment_count: attachments.length,
+        persona: resolvedPersona?.name ?? null,
+      },
+    });
 
     if (model && provider && provider.api_key_ref) {
       // Real upstream call — fetch key from keystore right before the call so
@@ -422,6 +505,7 @@ export function registerChatRoute(
 }
 
 interface ProduceCtx {
+  runId: string;
   conversationId: string;
   messageId: string;
   modelId: string;
@@ -433,6 +517,8 @@ interface ProduceCtx {
   userText: string;
   messages: { role: 'user' | 'assistant' | 'system'; content: string }[];
   attachments: { kind: 'image' | 'text' | 'pdf'; mime: string; data_b64: string; name?: string }[];
+  personaName: string | null;
+  toolPolicy: Record<string, boolean>;
   log: { info: (...a: unknown[]) => void; warn: (...a: unknown[]) => void; error: (...a: unknown[]) => void };
   /** dev-only test hook: force classification on upstream call (M2 §6.1) */
   forcedClassification: string | null;
@@ -450,6 +536,34 @@ interface ProduceCtx {
   bus: CapabilityBus | null;
   imageModelId: string | null;
   filesRepo: FilesRepo | null;
+  runEventsRepo: RunEventsRepo;
+}
+
+function appendRunEvent(
+  log: ProduceCtx['log'],
+  repo: RunEventsRepo,
+  input: RunEventInsert,
+): void {
+  try {
+    repo.append(input);
+  } catch (e) {
+    log.warn({ err: e, runId: input.run_id, kind: input.kind }, 'run_event.write_failed');
+  }
+}
+
+function recordRunEvent(ctx: ProduceCtx, input: Omit<RunEventInsert, 'run_id' | 'conversation_id' | 'message_id'> & {
+  message_id?: string | null;
+}): void {
+  appendRunEvent(ctx.log, ctx.runEventsRepo, {
+    run_id: ctx.runId,
+    conversation_id: ctx.conversationId,
+    message_id: input.message_id ?? ctx.messageId,
+    kind: input.kind,
+    status: input.status,
+    label: input.label,
+    summary: input.summary,
+    payload: input.payload,
+  });
 }
 
 /**
@@ -507,6 +621,7 @@ function buildFailureDecision(
   ctx: ProduceCtx,
   modelsRepo: ModelsRepo,
   memoriesRepo: MemoriesRepo,
+  detail?: string,
 ): Record<string, unknown> {
   let recommendedId: string | null = null;
   if (classification !== 'content_filter' && ctx.modelDbId) {
@@ -532,6 +647,7 @@ function buildFailureDecision(
     current_model_id: ctx.modelDbId,
     recommended_model_id: recommendedId,
     auto_fallback_enabled: autoFallback,
+    ...(detail ? { detail } : {}),
   };
 }
 
@@ -613,7 +729,7 @@ function finalizeOnEnd(
     lineBuffer = lines.pop() ?? '';
     for (const line of lines) parseLine(line);
   });
-  const writeCost = (success: boolean): void => {
+  const writeCost = (success: boolean): number | null => {
     const actual = success
       ? calculateCostUsd({
           inputTokens: usage.input,
@@ -645,6 +761,21 @@ function finalizeOnEnd(
         first_token_ms: usage.firstTokenMs,
         duration_ms: usage.durationMs || null,
       });
+      recordRunEvent(ctx, {
+        kind: 'cost.recorded',
+        status: 'completed',
+        label: '成本记录',
+        summary: actual != null ? `$${actual.toFixed(6)}` : '未配置价格',
+        payload: {
+          success,
+          input_tokens: usage.input || null,
+          output_tokens: usage.output || null,
+          actual_usd: actual,
+          classification: success ? null : upstreamClassification,
+          first_token_ms: usage.firstTokenMs,
+          duration_ms: usage.durationMs || null,
+        },
+      });
     } catch (e) {
       // Cost tracking is non-critical observability — never let it crash
       // the request path or the stream-end handler. The message itself is
@@ -654,6 +785,7 @@ function finalizeOnEnd(
         'cost.write_failed',
       );
     }
+    return actual;
   };
   let finalized = false;
   const finalize = (): void => {
@@ -672,6 +804,28 @@ function finalizeOnEnd(
         : collected;
     msgRepo.finalize(ctx.messageId, { content: persistedContent, status });
     writeCost(!aborted && !upstreamErrored);
+    recordRunEvent(ctx, {
+      kind: upstreamErrored
+        ? 'turn.failed'
+        : aborted
+          ? 'turn.cancelled'
+          : 'turn.completed',
+      status: upstreamErrored ? 'failed' : aborted ? 'cancelled' : 'completed',
+      label: upstreamErrored
+        ? '用户回合失败'
+        : aborted
+          ? '用户回合已停止'
+          : '用户回合完成',
+      summary:
+        status === 'complete'
+          ? `${collected.length} 字符`
+          : upstreamClassification ?? status,
+      payload: {
+        assistant_message_id: ctx.messageId,
+        message_status: status,
+        output_chars: collected.length,
+      },
+    });
     // Per spec §7.5.2: track quota/rate_limit/network as failures so models
     // demote (≥3) and disable (≥5). Successful runs reset the rolling
     // counter. content_filter / unknown (auth) do NOT count.
@@ -702,6 +856,16 @@ function finalizeOnEnd(
       error: err instanceof Error ? err.message : String(err),
     });
     writeCost(false);
+    recordRunEvent(ctx, {
+      kind: 'turn.failed',
+      status: 'failed',
+      label: '用户回合失败',
+      summary: err instanceof Error ? err.message : String(err),
+      payload: {
+        assistant_message_id: ctx.messageId,
+        output_chars: collected.length,
+      },
+    });
   });
   return finalize;
 }
@@ -740,7 +904,11 @@ function buildUpstreamMessages(ctx: ProduceCtx): any {
   const imageParts: any[] = [];
   for (const a of ctx.attachments) {
     if (a.kind === 'image') {
-      imageParts.push({ type: 'image', image: `data:${a.mime};base64,${a.data_b64}` });
+      imageParts.push({
+        type: 'image',
+        image: Buffer.from(a.data_b64, 'base64'),
+        mimeType: a.mime,
+      });
     } else if (a.kind === 'text' || a.kind === 'pdf') {
       let decoded = '';
       try {
@@ -799,10 +967,10 @@ function buildUpstreamMessages(ctx: ProduceCtx): any {
 function withCapabilityToolInstruction(messages: any[], flags: { image: boolean; web: boolean }): any[] {
   const parts = [
     flags.image
-      ? 'If the user asks you to create, draw, render, or generate an image, call the image_generate tool. Do not claim you cannot generate images when the tool is available. If the user is asking about capability, or says not to generate an image, answer normally without calling the tool.'
+      ? 'If the user asks you to create, draw, render, or generate an image, call the image_generate tool. When the user explicitly asks to call image_generate, call it immediately with the user-provided prompt instead of asking follow-up questions. Do not claim you cannot generate images when the tool is available. If the user is asking about capability, or says not to generate an image, answer normally without calling the tool.\n如果用户要求生成/绘制/制作图片，或明确说“调用 image_generate 工具”，请立即调用 image_generate，并把用户描述整理成图片提示词；不要先追问补充信息，除非用户只是在询问能力或明确说不要生成。'
       : null,
     flags.web
-      ? 'If the user needs current, recent, external, or URL-specific information, use web_search to find sources and web_fetch to read specific URLs. Cite the URLs you used in the answer. Do not use web tools for private/local URLs or when the user explicitly asks you not to browse.'
+      ? 'If the user needs current, recent, external, or URL-specific information, use web_search to find sources and web_fetch to read specific URLs. If the user explicitly asks to use web_search or web_fetch, call the requested tool. Cite the URLs you used in the answer. Do not use web tools for private/local URLs or when the user explicitly asks you not to browse.\n如果用户明确要求使用 web_search 或 web_fetch，请调用对应工具；如果问题需要最新、外部或 URL 指定信息，也应使用网页工具并在回答中引用使用过的 URL。'
       : null,
   ].filter(Boolean);
   if (parts.length === 0) return messages;
@@ -815,6 +983,71 @@ function withCapabilityToolInstruction(messages: any[], flags: { image: boolean;
   ];
 }
 
+function isToolEnabledForConversation(ctx: ProduceCtx, name: string): boolean {
+  return ctx.toolPolicy[name] === true;
+}
+
+function canExposeToolToModel(ctx: ProduceCtx, name: string): boolean {
+  if (!ctx.supportsTools || !ctx.bus || !isToolEnabledForConversation(ctx, name)) {
+    return false;
+  }
+  if (ctx.bus.get(name)?.enabled !== true) {
+    return false;
+  }
+  if (name === 'builtin.image_generate') {
+    return Boolean(ctx.imageModelId);
+  }
+  if (name === 'builtin.web_search' || name === 'builtin.web_fetch') {
+    return true;
+  }
+  return false;
+}
+
+function getVisibleToolNames(ctx: ProduceCtx): string[] {
+  return Object.keys(ctx.toolPolicy).filter((name) => canExposeToolToModel(ctx, name));
+}
+
+function buildContextSnapshot(ctx: ProduceCtx): Record<string, unknown> {
+  const activeToolNames = getVisibleToolNames(ctx);
+  const activeToolNameSet = new Set(activeToolNames);
+  const disabledToolNames = Object.keys(ctx.toolPolicy).filter((name) => !activeToolNameSet.has(name));
+  const attachmentCount = ctx.attachments.length;
+  return {
+    type: 'context_snapshot',
+    message_id: ctx.messageId,
+    conversation_id: ctx.conversationId,
+    model_id: ctx.modelDbId,
+    active_tool_names: activeToolNames,
+    disabled_tool_names: disabledToolNames,
+    context_sources: [
+      {
+        type: 'model',
+        label: ctx.modelNameSnapshot,
+        scope: 'request',
+        active: true,
+      },
+      {
+        type: 'persona',
+        label: ctx.personaName ?? '未绑定 Persona',
+        scope: ctx.personaName ? 'session' : 'default',
+        active: Boolean(ctx.personaName),
+      },
+      {
+        type: 'attachment',
+        label: attachmentCount > 0 ? `${attachmentCount} 个附件` : '无附件',
+        scope: 'request',
+        active: attachmentCount > 0,
+      },
+      {
+        type: 'tool_policy',
+        label: `${activeToolNames.length}/${activeToolNames.length + disabledToolNames.length} 个工具可用`,
+        scope: 'session',
+        active: activeToolNames.length > 0,
+      },
+    ],
+  };
+}
+
 async function produceUpstreamStream(
   stream: PassThrough,
   signal: AbortSignal,
@@ -825,7 +1058,54 @@ async function produceUpstreamStream(
 ): Promise<void> {
   const startedAt = Date.now();
   let firstTokenAt: number | null = null;
+  let toolsWereSent = false;
   const write = (line: string): boolean => stream.write(line);
+  const emitToolTrace = (
+    payload: {
+      event: 'start' | 'finish';
+      call_id: string;
+      tool: string;
+      label: string;
+      input?: string;
+      ok?: boolean;
+      output?: string;
+      duration_ms?: number;
+    },
+  ): void => {
+    write(
+      `8:${JSON.stringify([
+        {
+          type: 'tool_trace',
+          message_id: ctx.messageId,
+          ...payload,
+        },
+      ])}\n`,
+    );
+    recordRunEvent(ctx, {
+      kind:
+        payload.event === 'start'
+          ? 'tool.started'
+          : payload.ok === false
+            ? 'tool.failed'
+            : 'tool.completed',
+      status:
+        payload.event === 'start'
+          ? 'started'
+          : payload.ok === false
+            ? 'failed'
+            : 'completed',
+      label: payload.label,
+      summary: payload.event === 'start' ? payload.input ?? null : payload.output ?? null,
+      payload: {
+        call_id: payload.call_id,
+        tool: payload.tool,
+        input: payload.input ?? null,
+        output: payload.output ?? null,
+        ok: payload.ok ?? null,
+        duration_ms: payload.duration_ms ?? null,
+      },
+    });
+  };
 
   // Always announce the assistant message id first so the Renderer can wire
   // up follow-up calls (cancel, attach files, etc.) before any text arrives.
@@ -834,8 +1114,28 @@ async function produceUpstreamStream(
       { type: 'meta', conversation_id: ctx.conversationId, message_id: ctx.messageId, model_id: ctx.modelId },
     ])}\n`,
   );
+  const contextSnapshot = buildContextSnapshot(ctx);
+  write(`8:${JSON.stringify([contextSnapshot])}\n`);
+  recordRunEvent(ctx, {
+    kind: 'context.snapshot',
+    status: 'completed',
+    label: '上下文快照',
+    summary: `${Array.isArray(contextSnapshot.active_tool_names) ? contextSnapshot.active_tool_names.length : 0} 个工具可见`,
+    payload: contextSnapshot,
+  });
 
   try {
+    recordRunEvent(ctx, {
+      kind: 'model.started',
+      status: 'started',
+      label: '模型调用开始',
+      summary: ctx.modelNameSnapshot,
+      payload: {
+        model_id: ctx.modelDbId,
+        model_name: ctx.modelNameSnapshot,
+        supports_tools: ctx.supportsTools,
+      },
+    });
     // dev-only test hook: short-circuit to a synthesized provider error.
     // Lets E2E exercise the failure_decision path without flaky network mocks.
     if (ctx.forcedClassification) {
@@ -856,10 +1156,14 @@ async function produceUpstreamStream(
     // Natural-language requests reach this path unchanged; when image tools
     // are available, the LLM decides whether to call `image_generate`.
     const imageToolEnabled = Boolean(
-      ctx.supportsTools && ctx.bus && ctx.imageModelId && ctx.bus.get('builtin.image_generate')?.enabled,
+      canExposeToolToModel(ctx, 'builtin.image_generate'),
     );
-    const webSearchEnabled = Boolean(ctx.supportsTools && ctx.bus?.get('builtin.web_search')?.enabled);
-    const webFetchEnabled = Boolean(ctx.supportsTools && ctx.bus?.get('builtin.web_fetch')?.enabled);
+    const webSearchEnabled = Boolean(
+      canExposeToolToModel(ctx, 'builtin.web_search'),
+    );
+    const webFetchEnabled = Boolean(
+      canExposeToolToModel(ctx, 'builtin.web_fetch'),
+    );
     const tools = ctx.bus && (imageToolEnabled || webSearchEnabled || webFetchEnabled)
       ? {
           ...(imageToolEnabled && {
@@ -874,6 +1178,15 @@ async function produceUpstreamStream(
                 .describe('Detailed English prompt describing the image to generate'),
             }),
             execute: async ({ prompt }) => {
+              const callId = `${ctx.messageId}:image_generate:${Date.now()}`;
+              const toolStartedAt = Date.now();
+              emitToolTrace({
+                event: 'start',
+                call_id: callId,
+                tool: 'builtin.image_generate',
+                label: '生成图片',
+                input: prompt.slice(0, 180),
+              });
               const result = await ctx.bus!.invoke(
                 'builtin.image_generate',
                 { prompt, model_id: ctx.imageModelId! },
@@ -884,6 +1197,15 @@ async function produceUpstreamStream(
                 },
               );
               if (!result.ok) {
+                emitToolTrace({
+                  event: 'finish',
+                  call_id: callId,
+                  tool: 'builtin.image_generate',
+                  label: '生成图片',
+                  ok: false,
+                  output: result.error?.message ?? 'image_generate failed',
+                  duration_ms: Date.now() - toolStartedAt,
+                });
                 return {
                   ok: false,
                   error: result.error?.message ?? 'image_generate failed',
@@ -928,6 +1250,15 @@ async function produceUpstreamStream(
                   },
                 ])}\n`,
               );
+              emitToolTrace({
+                event: 'finish',
+                call_id: callId,
+                tool: 'builtin.image_generate',
+                label: '生成图片',
+                ok: true,
+                output: `已生成图片 ${out.width}×${out.height}`,
+                duration_ms: Date.now() - toolStartedAt,
+              });
               return {
                 ok: true,
                 file_id: out.file_id,
@@ -946,14 +1277,42 @@ async function produceUpstreamStream(
                 num_results: z.number().int().min(1).max(10).optional().describe('Number of results, default 5'),
               }),
               execute: async ({ query, num_results }) => {
+                const callId = `${ctx.messageId}:web_search:${Date.now()}`;
+                const toolStartedAt = Date.now();
+                emitToolTrace({
+                  event: 'start',
+                  call_id: callId,
+                  tool: 'builtin.web_search',
+                  label: '搜索网页',
+                  input: query.slice(0, 180),
+                });
                 const result = await ctx.bus!.invoke(
                   'builtin.web_search',
                   { query, num_results },
                   { conversationId: ctx.conversationId, sourceMessageId: ctx.sourceUserMessageId },
                 );
                 if (!result.ok) {
+                  emitToolTrace({
+                    event: 'finish',
+                    call_id: callId,
+                    tool: 'builtin.web_search',
+                    label: '搜索网页',
+                    ok: false,
+                    output: result.error?.message ?? 'web_search failed',
+                    duration_ms: Date.now() - toolStartedAt,
+                  });
                   return { ok: false, error: result.error?.message ?? 'web_search failed' };
                 }
+                const output = result.output as { results?: unknown[] };
+                emitToolTrace({
+                  event: 'finish',
+                  call_id: callId,
+                  tool: 'builtin.web_search',
+                  label: '搜索网页',
+                  ok: true,
+                  output: `返回 ${Array.isArray(output.results) ? output.results.length : 0} 条结果`,
+                  duration_ms: Date.now() - toolStartedAt,
+                });
                 return result.output;
               },
             }),
@@ -968,20 +1327,51 @@ async function produceUpstreamStream(
                 max_chars: z.number().int().min(500).max(50_000).optional().describe('Maximum content characters, default 12000'),
               }),
               execute: async ({ url, format, max_chars }) => {
+                const callId = `${ctx.messageId}:web_fetch:${Date.now()}`;
+                const toolStartedAt = Date.now();
+                emitToolTrace({
+                  event: 'start',
+                  call_id: callId,
+                  tool: 'builtin.web_fetch',
+                  label: '抓取网页',
+                  input: url.slice(0, 180),
+                });
                 const result = await ctx.bus!.invoke(
                   'builtin.web_fetch',
                   { url, format, max_chars },
                   { conversationId: ctx.conversationId, sourceMessageId: ctx.sourceUserMessageId },
                 );
                 if (!result.ok) {
+                  emitToolTrace({
+                    event: 'finish',
+                    call_id: callId,
+                    tool: 'builtin.web_fetch',
+                    label: '抓取网页',
+                    ok: false,
+                    output: result.error?.message ?? 'web_fetch failed',
+                    duration_ms: Date.now() - toolStartedAt,
+                  });
                   return { ok: false, error: result.error?.message ?? 'web_fetch failed' };
                 }
+                const output = result.output as { content?: string; title?: string };
+                emitToolTrace({
+                  event: 'finish',
+                  call_id: callId,
+                  tool: 'builtin.web_fetch',
+                  label: '抓取网页',
+                  ok: true,
+                  output: output.title
+                    ? `${output.title} · ${(output.content ?? '').length} 字符`
+                    : `返回 ${(output.content ?? '').length} 字符`,
+                  duration_ms: Date.now() - toolStartedAt,
+                });
                 return result.output;
               },
             }),
           }),
         }
       : undefined;
+    toolsWereSent = tools != null;
 
     const upstreamMessages = buildUpstreamMessages(ctx);
     const result = await streamText({
@@ -1049,6 +1439,13 @@ async function produceUpstreamStream(
         })}\n`,
       );
       ctx.log.warn({ chunks }, 'chat.upstream_content_filter');
+      recordRunEvent(ctx, {
+        kind: 'model.failed',
+        status: 'failed',
+        label: '模型调用失败',
+        summary: '内容被供应商安全策略拦截',
+        payload: { classification: 'content_filter', finish_reason: finishReason },
+      });
       return;
     }
 
@@ -1065,6 +1462,19 @@ async function produceUpstreamStream(
         },
       ])}\n`,
     );
+    recordRunEvent(ctx, {
+      kind: 'model.completed',
+      status: 'completed',
+      label: '模型调用完成',
+      summary: `${chunks} 个文本片段`,
+      payload: {
+        finish_reason: finishReason ?? null,
+        prompt_tokens: promptTokens,
+        completion_tokens: completionTokens,
+        first_token_ms: firstTokenAt == null ? null : firstTokenAt - startedAt,
+        duration_ms: Date.now() - startedAt,
+      },
+    });
 
     write(
       `e:${JSON.stringify({
@@ -1083,6 +1493,12 @@ async function produceUpstreamStream(
   } catch (e) {
     if (signal.aborted) {
       ctx.log.warn('chat.upstream_aborted');
+      recordRunEvent(ctx, {
+        kind: 'model.failed',
+        status: 'cancelled',
+        label: '模型调用已停止',
+        summary: '用户停止或连接中断',
+      });
     } else {
       const status = (e as { statusCode?: number; status?: number })?.statusCode
         ?? (e as { status?: number })?.status;
@@ -1090,6 +1506,24 @@ async function produceUpstreamStream(
       const cls = forced
         ? { classification: forced, message: `forced ${forced}` }
         : classifyProviderError({ status, err: e });
+      const rejectedTools =
+        !forced &&
+        toolsWereSent &&
+        isToolPayloadUnsupportedError(e);
+      if (rejectedTools && ctx.modelDbId) {
+        try {
+          modelsRepo.update(ctx.modelDbId, { supports_tools: false });
+          ctx.log.warn(
+            { modelId: ctx.modelDbId },
+            'chat.tools_auto_disabled_after_provider_rejection',
+          );
+        } catch (updateErr) {
+          ctx.log.warn(
+            { err: updateErr, modelId: ctx.modelDbId },
+            'chat.tools_auto_disable_failed',
+          );
+        }
+      }
       const msg = e instanceof Error ? e.message : String(e);
       // Sanitize before logging — AI SDK's APICallError carries
       // `requestBodyValues` which contains user prompts and base64 image
@@ -1104,11 +1538,31 @@ async function produceUpstreamStream(
         { err: safeErr, classification: cls },
         'chat.upstream_failed',
       );
+      recordRunEvent(ctx, {
+        kind: 'model.failed',
+        status: 'failed',
+        label: '模型调用失败',
+        summary: cls.message || msg,
+        payload: {
+          classification: cls.classification,
+          status,
+          rejected_tools: rejectedTools,
+        },
+      });
       // Wire format per spec §7.5.2 + M2 §1.3: emit failure_decision
       // annotation BEFORE the `3:` error frame so renderers can render
       // a decision card from a single end-of-stream payload. Uses the
       // `8:` annotation frame (message-bound) for parity with meta/cost.
-      const decision = buildFailureDecision(cls.classification, ctx, modelsRepo, memoriesRepo);
+      const detail = rejectedTools
+        ? '该模型刚刚拒绝了 tools 请求，系统已自动关闭此模型的 Tools 能力。联网检索 / 图像生成请切换到明确支持 Tools 的聊天模型，或在模型中心确认后重新开启。'
+        : cls.message || msg;
+      const decision = buildFailureDecision(
+        cls.classification,
+        ctx,
+        modelsRepo,
+        memoriesRepo,
+        detail,
+      );
       write(`8:${JSON.stringify([decision])}\n`);
       write(
         `3:${JSON.stringify(`provider_error/${cls.classification}: ${cls.message || msg}`)}\n`,
@@ -1140,8 +1594,31 @@ async function produceKeyMissingStream(
       { type: 'meta', conversation_id: ctx.conversationId, message_id: ctx.messageId, model_id: ctx.modelId },
     ])}\n`,
   );
+  const contextSnapshot = buildContextSnapshot(ctx);
+  write(`8:${JSON.stringify([contextSnapshot])}\n`);
+  recordRunEvent(ctx, {
+    kind: 'context.snapshot',
+    status: 'completed',
+    label: '上下文快照',
+    summary: `${Array.isArray(contextSnapshot.active_tool_names) ? contextSnapshot.active_tool_names.length : 0} 个工具可见`,
+    payload: contextSnapshot,
+  });
+  recordRunEvent(ctx, {
+    kind: 'model.started',
+    status: 'started',
+    label: '模型调用开始',
+    summary: ctx.modelNameSnapshot,
+    payload: { model_id: ctx.modelDbId, model_name: ctx.modelNameSnapshot },
+  });
   const decision = buildFailureDecision('key_missing', ctx, modelsRepo, memoriesRepo);
   write(`8:${JSON.stringify([decision])}\n`);
+  recordRunEvent(ctx, {
+    kind: 'model.failed',
+    status: 'failed',
+    label: '模型调用失败',
+    summary: 'API key 已失效或未配置',
+    payload: { classification: 'key_missing' },
+  });
   write(
     `3:${JSON.stringify(
       'provider_error/key_missing: API key 已失效或未配置 — 请在「模型中心」重新输入 API Key',
@@ -1170,6 +1647,22 @@ async function produceMockStream(
       { type: 'meta', conversation_id: ctx.conversationId, message_id: ctx.messageId, model_id: ctx.modelId },
     ])}\n`,
   );
+  const contextSnapshot = buildContextSnapshot(ctx);
+  write(`8:${JSON.stringify([contextSnapshot])}\n`);
+  recordRunEvent(ctx, {
+    kind: 'context.snapshot',
+    status: 'completed',
+    label: '上下文快照',
+    summary: `${Array.isArray(contextSnapshot.active_tool_names) ? contextSnapshot.active_tool_names.length : 0} 个工具可见`,
+    payload: contextSnapshot,
+  });
+  recordRunEvent(ctx, {
+    kind: 'model.started',
+    status: 'started',
+    label: '模型调用开始',
+    summary: ctx.modelNameSnapshot,
+    payload: { model_id: ctx.modelDbId, model_name: ctx.modelNameSnapshot, mock: true },
+  });
 
   // dev-only test hook: short-circuit to a synthesized failure_decision +
   // `3:` error frame. Mirrors produceUpstreamStream so E2E can exercise the
@@ -1185,6 +1678,13 @@ async function produceMockStream(
       : 'unknown';
     const decision = buildFailureDecision(cls, ctx, modelsRepo, memoriesRepo);
     write(`8:${JSON.stringify([decision])}\n`);
+    recordRunEvent(ctx, {
+      kind: 'model.failed',
+      status: 'failed',
+      label: '模型调用失败',
+      summary: `forced ${cls}`,
+      payload: { classification: cls, mock: true },
+    });
     write(`3:${JSON.stringify(`provider_error/${cls}: forced ${cls}`)}\n`);
     write(
       `d:${JSON.stringify({ finishReason: 'error', usage: { promptTokens: 0, completionTokens: 0 } })}\n`,
@@ -1199,6 +1699,13 @@ async function produceMockStream(
     if (isAborted()) {
       ctx.log.warn({ chunks: i }, 'chat.client_aborted');
       stream.end();
+      recordRunEvent(ctx, {
+        kind: 'model.failed',
+        status: 'cancelled',
+        label: '模型调用已停止',
+        summary: '用户停止或连接中断',
+        payload: { chunks: i, mock: true },
+      });
       return;
     }
     if (firstTokenAt == null) firstTokenAt = Date.now();
@@ -1220,6 +1727,19 @@ async function produceMockStream(
       },
     ])}\n`,
   );
+  recordRunEvent(ctx, {
+    kind: 'model.completed',
+    status: 'completed',
+    label: '模型调用完成',
+    summary: `${i} 个文本片段`,
+    payload: {
+      mock: true,
+      prompt_tokens: 12,
+      completion_tokens: text.length,
+      first_token_ms: firstTokenAt == null ? null : firstTokenAt - startedAt,
+      duration_ms: Date.now() - startedAt,
+    },
+  });
 
   const usage = { promptTokens: 12, completionTokens: text.length };
   write(`e:${JSON.stringify({ finishReason: 'stop', usage, isContinued: false })}\n`);

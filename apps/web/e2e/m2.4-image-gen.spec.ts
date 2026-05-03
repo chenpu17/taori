@@ -63,7 +63,7 @@ test('M2.4 preflight explains explicit image command for non-tool chat model', a
   const image = page.getByTestId('preflight-image');
   await expect(image).toBeVisible({ timeout: 10_000 });
   await expect(image).toHaveAttribute('data-state', 'warn');
-  await expect(image).toContainText('/image');
+  await expect(image).toContainText('打开生成器');
 });
 
 test('M2.4 preflight explains tool-call image generation for tool-capable chat model', async ({ page }) => {
@@ -202,15 +202,14 @@ test('M2.4 model selectors distinguish same model names by provider', async ({ p
   await expect(imageOptions.filter({ hasText: 'DALL-E 3 · Huawei MaaS' })).toHaveCount(1);
 });
 
-test('M2.4 natural-language image request does not open picker for non-tool chat model', async ({ page }) => {
+test('M2.4 natural-language image request opens picker for non-tool chat model', async ({ page }) => {
   await page.goto('/');
   await expect(page.getByTestId('chat-panel')).toBeVisible({ timeout: 10_000 });
 
   await page.getByTestId('composer-input').fill('画一张机器人');
   await page.getByTestId('composer-send').click();
 
-  // Natural-language requests stay on the chat path. Only explicit /image
-  // commands open the picker before the LLM round-trip.
-  await page.waitForTimeout(1500);
-  await expect(page.getByTestId('image-picker-dialog')).toHaveCount(0);
+  // Non-tool chat models cannot autonomously call image_generate, so clear
+  // image intents fall back to the same picker as /image.
+  await expect(page.getByTestId('image-picker-dialog')).toBeVisible({ timeout: 10_000 });
 });

@@ -15,7 +15,7 @@
 
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
-import { generateText } from 'ai';
+import { generateText, tool } from 'ai';
 import { createOpenAI } from '@ai-sdk/openai';
 import {
   ModelCreateSchema,
@@ -25,7 +25,10 @@ import {
   TaoriError,
 } from '@taori/shared';
 import { ProvidersRepo, ModelsRepo, CostsRepo } from '../db/repos/index.js';
-import { classifyProviderError } from '../providers/registry.js';
+import {
+  classifyProviderError,
+  isToolPayloadUnsupportedError,
+} from '../providers/registry.js';
 import type { BuildServerArgs } from '../server.js';
 
 const z_capability = z.object({ capability: ModelCapabilitySchema });
@@ -254,7 +257,52 @@ export function registerModelsRoute(
           maxTokens: 1,
           abortSignal: AbortSignal.timeout(8000),
         });
-        return { ok: true, latency_ms: Date.now() - started };
+        let toolsProbe: {
+          supported: boolean | null;
+          updated: boolean;
+          classification?: string;
+          message?: string;
+        } | null = null;
+        if (model.capability === 'chat' || model.capability === 'multimodal') {
+          try {
+            await generateText({
+              model: sdk.chat(model.model_name),
+              prompt: 'Reply exactly: ok. Do not call any tools.',
+              maxTokens: 3,
+              abortSignal: AbortSignal.timeout(8000),
+              tools: {
+                taori_probe: tool({
+                  description:
+                    'No-op capability probe. The model should not call this tool.',
+                  parameters: z.object({}),
+                  execute: async () => ({ ok: true }),
+                }),
+              },
+            });
+            const updated = model.supports_tools !== true;
+            if (updated) repo.update(model.id, { supports_tools: true });
+            toolsProbe = { supported: true, updated };
+          } catch (probeErr) {
+            const probeStatus = (probeErr as { statusCode?: number; status?: number })?.statusCode
+              ?? (probeErr as { status?: number })?.status;
+            const cls = classifyProviderError({ status: probeStatus, err: probeErr });
+            const unsupported = isToolPayloadUnsupportedError(probeErr);
+            if (unsupported && model.supports_tools !== false) {
+              repo.update(model.id, { supports_tools: false });
+            }
+            toolsProbe = {
+              supported: unsupported ? false : null,
+              updated: unsupported && model.supports_tools !== false,
+              classification: cls.classification,
+              message: cls.message,
+            };
+          }
+        }
+        return {
+          ok: true,
+          latency_ms: Date.now() - started,
+          ...(toolsProbe ? { tools_probe: toolsProbe } : {}),
+        };
       } catch (e) {
         const status = (e as { statusCode?: number; status?: number })?.statusCode
           ?? (e as { status?: number })?.status;

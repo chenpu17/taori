@@ -25,13 +25,13 @@ interface SettingsProps {
   onReopenOnboarding: () => void;
 }
 
+type SettingsTab = 'general' | 'tools' | 'prompts';
+
 export function Settings({
   onClose,
   onChanged,
   onReopenOnboarding,
 }: SettingsProps): JSX.Element {
-  const [activeTab, setActiveTab] = useState<'general' | 'tools' | 'prompts'>('general');
-
   // Escape closes the modal — standard a11y expectation (WCAG 2.1.1).
   useEffect(() => {
     const handler = (e: KeyboardEvent): void => {
@@ -63,6 +63,33 @@ export function Settings({
           </button>
         </header>
 
+        <SettingsContent
+          onChanged={onChanged}
+          onReopenOnboarding={onReopenOnboarding}
+        />
+      </div>
+    </div>
+  );
+}
+
+export function SettingsContent({
+  onChanged,
+  onReopenOnboarding,
+  fixedTab,
+}: {
+  onChanged: () => void;
+  onReopenOnboarding: () => void;
+  fixedTab?: SettingsTab;
+}): JSX.Element {
+  const [activeTab, setActiveTab] = useState<SettingsTab>(fixedTab ?? 'general');
+
+  useEffect(() => {
+    if (fixedTab) setActiveTab(fixedTab);
+  }, [fixedTab]);
+
+  return (
+    <>
+      {!fixedTab && (
         <nav className="settings-nav" aria-label="设置分组">
           {[
             ['general', '通用'],
@@ -74,52 +101,51 @@ export function Settings({
               type="button"
               className={activeTab === id ? 'active' : ''}
               data-testid={`settings-tab-${id}`}
-              onClick={() => setActiveTab(id as typeof activeTab)}
+              onClick={() => setActiveTab(id as SettingsTab)}
             >
               {label}
             </button>
           ))}
         </nav>
+      )}
 
-        {activeTab === 'general' && (
-          <>
-            <AutoFallbackSection />
-            <MonthlyBudgetSection />
-            <section className="settings-section">
-              <div className="settings-section-head">
-                <h3>Provider 与模型</h3>
-              </div>
-              <p className="hint">
-                模型与 Provider 的管理已迁移至独立的 <strong>模型中心</strong>（顶部 🧬 图标）。
-                如需重新走一遍完整 Onboarding，可点击下方按钮。
-              </p>
-              <button
-                type="button"
-                onClick={onReopenOnboarding}
-                data-testid="settings-add-provider"
-              >
-                重新打开 Onboarding
-              </button>
-            </section>
-            <DangerZone
-              onCleared={() => {
-                onChanged();
-                window.location.reload();
-              }}
-            />
-          </>
-        )}
+      {activeTab === 'general' && (
+        <>
+          <AutoFallbackSection />
+          <MonthlyBudgetSection />
+          <section className="settings-section">
+            <div className="settings-section-head">
+              <h3>Provider 与模型</h3>
+            </div>
+            <p className="hint">
+              模型与 Provider 的管理已迁移至独立的 <strong>模型中心</strong>。如需重新走一遍完整 Onboarding，可点击下方按钮。
+            </p>
+            <button
+              type="button"
+              onClick={onReopenOnboarding}
+              data-testid="settings-add-provider"
+            >
+              重新打开 Onboarding
+            </button>
+          </section>
+          <DangerZone
+            onCleared={() => {
+              onChanged();
+              window.location.reload();
+            }}
+          />
+        </>
+      )}
 
-        {activeTab === 'tools' && <ToolsSection />}
+      {activeTab === 'tools' && <ToolsSection onChanged={onChanged} />}
 
-        {activeTab === 'prompts' && (
-          <>
-            <PromptTemplatesSection />
-            <PersonasSection />
-          </>
-        )}
-      </div>
-    </div>
+      {activeTab === 'prompts' && (
+        <>
+          <PromptTemplatesSection />
+          <PersonasSection />
+        </>
+      )}
+    </>
   );
 }
 
@@ -131,7 +157,7 @@ function notifyBudgetSettingsChanged(): void {
   window.dispatchEvent(new Event('taori:budget-settings-changed'));
 }
 
-function ToolsSection(): JSX.Element {
+function ToolsSection({ onChanged }: { onChanged: () => void }): JSX.Element {
   const [tools, setTools] = useState<Tool[]>([]);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState<string | null>(null);
@@ -160,6 +186,7 @@ function ToolsSection(): JSX.Element {
     try {
       const res = await api.setToolEnabled(tool.name, !tool.enabled);
       setTools((prev) => prev.map((item) => (item.name === tool.name ? res.data : item)));
+      onChanged();
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {

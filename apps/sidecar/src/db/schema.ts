@@ -228,6 +228,31 @@ export const cost_records = sqliteTable(
   }),
 );
 
+export const run_events = sqliteTable(
+  'run_events',
+  {
+    id: text('id').primaryKey(),
+    run_id: text('run_id').notNull(),
+    conversation_id: text('conversation_id').references(() => conversations.id, {
+      onDelete: 'cascade',
+    }),
+    message_id: text('message_id').references(() => messages.id, {
+      onDelete: 'set null',
+    }),
+    kind: text('kind').notNull(),
+    status: text('status').notNull(),
+    label: text('label').notNull(),
+    summary: text('summary'),
+    payload: text('payload'),
+    created_at: integer('created_at').notNull(),
+  },
+  (t) => ({
+    convIdx: index('run_events_conv_idx').on(t.conversation_id, t.created_at),
+    runIdx: index('run_events_run_idx').on(t.run_id, t.created_at),
+    msgIdx: index('run_events_msg_idx').on(t.message_id, t.created_at),
+  }),
+);
+
 /**
  * M3.A roundtable instance. participants/summary stored as JSON text columns
  * (Drizzle serialization left to repo). status/mode are constrained to a

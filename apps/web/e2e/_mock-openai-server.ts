@@ -229,6 +229,71 @@ function sseToolCallFinal(model: string): string {
   );
 }
 
+function sseNamedToolCallStart(model: string, name: string): string {
+  return (
+    'data: ' +
+    JSON.stringify({
+      id: `chatcmpl-mock-${name}`,
+      object: 'chat.completion.chunk',
+      created: Math.floor(Date.now() / 1000),
+      model,
+      choices: [
+        {
+          index: 0,
+          delta: {
+            role: 'assistant',
+            tool_calls: [
+              {
+                index: 0,
+                id: `call_${name}_1`,
+                type: 'function',
+                function: { name, arguments: '' },
+              },
+            ],
+          },
+          finish_reason: null,
+        },
+      ],
+    }) +
+    '\n\n'
+  );
+}
+
+function sseNamedToolCallArgs(model: string, args: string): string {
+  return (
+    'data: ' +
+    JSON.stringify({
+      id: `chatcmpl-mock-${model}`,
+      object: 'chat.completion.chunk',
+      created: Math.floor(Date.now() / 1000),
+      model,
+      choices: [
+        {
+          index: 0,
+          delta: { tool_calls: [{ index: 0, function: { arguments: args } }] },
+          finish_reason: null,
+        },
+      ],
+    }) +
+    '\n\n'
+  );
+}
+
+function sseNamedToolCallFinal(model: string): string {
+  return (
+    'data: ' +
+    JSON.stringify({
+      id: `chatcmpl-mock-${model}`,
+      object: 'chat.completion.chunk',
+      created: Math.floor(Date.now() / 1000),
+      model,
+      choices: [{ index: 0, delta: {}, finish_reason: 'tool_calls' }],
+      usage: { prompt_tokens: 24, completion_tokens: 4, total_tokens: 28 },
+    }) +
+    '\n\n'
+  );
+}
+
 function hasToolResult(messages: ChatMessage[]): boolean {
   return messages.some((m) => m.role === 'tool');
 }
@@ -257,13 +322,64 @@ function shouldMockImageTool(body: ChatRequest): boolean {
   );
 }
 
+function shouldMockWebTool(body: ChatRequest): boolean {
+  if (!Array.isArray(body.tools) || body.tools.length === 0 || hasToolResult(body.messages)) {
+    return false;
+  }
+  const lastUser = [...body.messages].reverse().find((m) => m.role === 'user');
+  const text = lastUser ? textOf(lastUser).toLowerCase() : '';
+  if (!/搜索|检索|查找|网页|抓取|读取网页|fetch|search|browse|web/.test(text)) {
+    return false;
+  }
+  const names = availableToolNames(body);
+  const wantsFetch = /抓取|读取网页|fetch|url|https?:\/\//.test(text);
+  return wantsFetch ? names.has('web_fetch') : names.has('web_search');
+}
+
+function pickWebToolCall(body: ChatRequest): {
+  name: 'web_search' | 'web_fetch';
+  args: Record<string, unknown>;
+} {
+  const lastUser = [...body.messages].reverse().find((m) => m.role === 'user');
+  const text = lastUser ? textOf(lastUser).toLowerCase() : '';
+  if (/抓取|读取网页|fetch|url|https?:\/\//.test(text)) {
+    return {
+      name: 'web_fetch',
+      args: {
+        url: 'https://example.com/',
+        format: 'markdown',
+        max_chars: 1200,
+      },
+    };
+  }
+  return {
+    name: 'web_search',
+    args: {
+      query: 'Taori multi model assistant',
+      num_results: 2,
+    },
+  };
+}
+
+function availableToolNames(body: ChatRequest): Set<string> {
+  const names = new Set<string>();
+  for (const item of body.tools ?? []) {
+    if (!item || typeof item !== 'object') continue;
+    const fn = (item as { function?: { name?: unknown } }).function;
+    if (typeof fn?.name === 'string') names.add(fn.name);
+  }
+  return names;
+}
+
 export function startMockOpenAI(
   port = 17891,
   opts: {
     streamDelayMs?: number;
     fixedReply?: string;
     imageToolCalls?: boolean;
+    webToolCalls?: boolean;
     models?: MockModelListItem[];
+    onChatRequest?: (body: ChatRequest) => void;
   } = {},
 ): http.Server {
   const server = http.createServer((req, res) => {
@@ -314,6 +430,7 @@ export function startMockOpenAI(
         res.end();
         return;
       }
+      opts.onChatRequest?.(body);
       const { kind, role } = classifyAndRoleFromMessages(body.messages);
       const text =
         opts.fixedReply ??
@@ -368,6 +485,53 @@ export function startMockOpenAI(
         res.write(sseToolCallStart(body.model));
         res.write(sseToolCallArgs(body.model, JSON.stringify({ prompt: 'cute duck' })));
         res.write(sseToolCallFinal(body.model));
+        res.write('data: [DONE]\n\n');
+        res.end();
+        return;
+      }
+
+      if (opts.webToolCalls && shouldMockWebTool(body)) {
+        const { name, args } = pickWebToolCall(body);
+        if (!body.stream) {
+          res.writeHead(200, { 'content-type': 'application/json' });
+          res.end(
+            JSON.stringify({
+              id: 'chatcmpl-mock-web-tool',
+              object: 'chat.completion',
+              created: Math.floor(Date.now() / 1000),
+              model: body.model,
+              choices: [
+                {
+                  index: 0,
+                  message: {
+                    role: 'assistant',
+                    content: null,
+                    tool_calls: [
+                      {
+                        id: `call_${name}_1`,
+                        type: 'function',
+                        function: {
+                          name,
+                          arguments: JSON.stringify(args),
+                        },
+                      },
+                    ],
+                  },
+                  finish_reason: 'tool_calls',
+                },
+              ],
+            }),
+          );
+          return;
+        }
+        res.writeHead(200, {
+          'content-type': 'text/event-stream',
+          'cache-control': 'no-cache',
+          connection: 'keep-alive',
+        });
+        res.write(sseNamedToolCallStart(body.model, name));
+        res.write(sseNamedToolCallArgs(body.model, JSON.stringify(args)));
+        res.write(sseNamedToolCallFinal(body.model));
         res.write('data: [DONE]\n\n');
         res.end();
         return;

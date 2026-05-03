@@ -196,8 +196,35 @@ D1 / D2（成本看板 / 月度预算）已实现：
 - `apps/web`
   - 新增成本看板 overlay、顶栏入口、命令面板入口、预算 toast 与超预算确认门控
   - `Settings` 增加月预算配置入口
+
+## 10.7 控制中心信息架构调整（v0.8）
+
+- `apps/web`
+  - 新增 `ControlCenter` 统一承载概览、模型与供应商、工具能力、成本与调用、模板与 Persona、通用与数据
+  - 顶栏原 `设置 / 模型中心 / 成本看板` 入口保留，但统一打开控制中心的对应板块
+  - `SettingsContent`、`ModelCenter`、`CostDashboard` 增加 embedded 使用形态，避免复杂配置继续分散为多个独立弹窗
+  - 控制中心左侧导航保留旧关键 testid（如 `settings-tab-tools`），降低既有 E2E 迁移成本
+- `apps/sidecar`
+  - 无接口变化；继续复用现有 `/v1/models`、`/v1/tools`、`/v1/costs/*`、`/v1/memories/*`
+- 合同影响
+  - 仅 Renderer 信息架构变化；无数据迁移，无 Sidecar API 变更
 - 数据
   - 无新表；新增两项全局 memory 约定键：`monthly_budget_usd`、`monthly_budget_alert_state`
+
+## 10.8 保守引导与工具时间线（v0.8）
+
+- `apps/web`
+  - 能力预检栏新增保守建议：对搜索/抓网页、图片输入、图片生成工具关闭等场景给出提示，但不自动切换模型
+  - 聊天消息新增工具执行时间线，渲染 `tool_trace` annotation，展示工具名、输入摘要、状态、耗时和结果摘要
+  - 模板选择器新增“内置工作流”分组（网页调研报告 / 图片生成并复核 / 决策简报），模板只填充输入框，不改变当前模型
+- `apps/sidecar`
+  - `/v1/chat` 在内置工具调用前后追加 `tool_trace` annotation
+  - 覆盖 `builtin.web_search`、`builtin.web_fetch`、`builtin.image_generate`
+- 合同影响
+  - Sidecar→Renderer Data Stream annotation 增量：`{ type: 'tool_trace', message_id, event, call_id, tool, label, input?, output?, ok?, duration_ms? }`
+  - 无 REST 路由变化，无数据库迁移，无 `packages/shared` 导出变化
+- 验证
+  - 新增 Playwright：`apps/web/e2e/conservative-guidance-journeys.spec.ts`
 
 ## 10.6 E1 完工记录（v0.8）
 
@@ -282,6 +309,40 @@ E2（数据备份 / 恢复）已实现：
   - 新增 `BackupConflictStrategy`、`BackupPackage`、`BackupImportResponse`、`BackupExportResponse` 等备份 contract
 - 数据
   - 无新表；新增本地 JSON 备份格式 `taori-backup-v1`
+
+## 10.10 Agent 运行时前三优先级（v0.8）
+
+- `packages/shared`
+  - 新增 `ConversationProfile`、`EffectiveTool`、`ContextSnapshotAnnotation`、`ContextSource` contract
+- `apps/sidecar`
+  - 新增 `/v1/conversations/:id/profile`：返回当前会话画像（最近模型、Persona、有效工具、上下文来源、会话成本）
+  - 新增 `/v1/tools/effective?conversation_id=`：返回工具的全局启用、会话覆盖、最终有效状态
+  - 新增 `/v1/tools/:name/session-enabled`：会话级工具策略覆盖；`enabled=null` 表示恢复继承全局
+  - `/v1/chat` 新增 `context_snapshot` annotation，并在 LLM 工具注入时尊重会话级工具策略
+- `apps/web`
+  - 聊天页新增会话画像条，展示当前模型、Persona、有效工具数、会话成本
+  - 会话画像条提供搜索 / 抓网页 / 生图的当前会话工具开关
+  - assistant 消息新增“本次上下文”卡片，展示模型、Persona、附件、工具策略等来源
+- 数据
+  - 无新表；会话级工具策略复用 `memories(scope='session')`
+
+## 10.11 P1 Run Timeline（v0.8）
+
+- `packages/shared`
+  - 新增 `RunEvent`、`RunEventKind`、`RunEventStatus`、`RunTimelineResponse` contract
+  - ID 前缀新增 `run_`、`runev_`
+- `apps/sidecar`
+  - 新增 SQLite 表 `run_events`，由 Sidecar 持有运行观测状态
+  - 新增 `RunEventsRepo`
+  - 新增 `GET /v1/conversations/:id/run-events?limit=`：按会话返回最近运行事件
+  - `/v1/chat` 在聊天回合中记录：turn/context/model/tool/cost/capability_route 事件
+- `apps/web`
+  - 会话画像条新增“运行过程”入口
+  - 新增 Run Timeline 侧边面板，按 `run_id` 分组展示上下文、模型、工具、成本与回合结束状态
+- 数据
+  - 新增持久表 `run_events`；旧 DB 启动时幂等创建
+- 设计
+  - 见 [架构 17](../architecture/17-run-timeline-proposal.md) 与 [产品 12](../product/12-run-timeline.md)
 
 ## 11. 灰盒原则提醒
 

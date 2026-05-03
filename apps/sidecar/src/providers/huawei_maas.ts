@@ -15,6 +15,9 @@ export const HUAWEI_MAAS_DEFAULT_BASE_URL =
   'https://api.modelarts-maas.com/openai/v1';
 
 const REQUEST_TIMEOUT_MS = 10_000;
+const HUAWEI_KNOWN_TOOL_CHAT_MODELS = [
+  /^deepseek[-_]v3(?:[._-]\d+)?$/,
+];
 
 interface HuaweiTestResult {
   ok: boolean;
@@ -141,6 +144,8 @@ function inferHuaweiModel(item: HuaweiModelListItem): DiscoveredModel {
     capObj.function_call === true ||
     (Array.isArray(item.capabilities) &&
       item.capabilities.map(String).some((c) => /tool|function/.test(c.toLowerCase())));
+  const toolsFromKnownModel =
+    capability === 'chat' && HUAWEI_KNOWN_TOOL_CHAT_MODELS.some((re) => re.test(id));
   return {
     model_name: item.id,
     display_name: item.display_name ?? item.name ?? item.id,
@@ -152,11 +157,13 @@ function inferHuaweiModel(item: HuaweiModelListItem): DiscoveredModel {
     modalities: [...modalities],
     context_length: typeof item.context_length === 'number' ? item.context_length : null,
     supports_vision: isVision,
-    // Huawei's model-list response may not expose tool-call capability.
-    // For OpenAI-compatible chat/multimodal models, default to offering tools;
-    // unsupported upstreams will fail visibly instead of silently hiding image
-    // generation for capable models such as GLM/Kimi/DeepSeek families.
-    supports_tools: toolsFromMetadata || capability === 'chat' || capability === 'multimodal',
+    // Huawei's model-list response may not expose tool-call capability. Keep
+    // unknown models conservative: if we optimistically send OpenAI `tools`
+    // to an endpoint that does not support them, user web-search/image turns
+    // fail with a provider 400 before the model can answer. Users can still
+    // enable Tools manually in Model Center once a specific MaaS model is
+    // known to support function calling.
+    supports_tools: toolsFromMetadata || toolsFromKnownModel,
   };
 }
 

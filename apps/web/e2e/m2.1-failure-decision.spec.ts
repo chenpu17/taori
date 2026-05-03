@@ -79,6 +79,7 @@ test('M2.1 forced rate_limit → failure_decision card with switch + retry butto
 
   const card = page.getByTestId('failure-decision-card');
   await expect(card).toBeVisible({ timeout: 15_000 });
+  await expect(card).toHaveCount(1);
   await expect(card).toHaveAttribute('data-classification', 'rate_limit');
   await expect(page.getByTestId('fdc-class')).toHaveText('rate_limit');
   await expect(page.getByTestId('fdc-retry')).toBeVisible();

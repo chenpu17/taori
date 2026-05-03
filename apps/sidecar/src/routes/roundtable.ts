@@ -177,7 +177,11 @@ export function registerRoundtableRoute(
         conv.id,
       );
       if (analyzerResult.costInsert) {
-        costsRepo.insert(analyzerResult.costInsert);
+        try {
+          costsRepo.insert(analyzerResult.costInsert);
+        } catch (e) {
+          req.log.warn({ err: e }, 'roundtable.analyzer_cost_insert_failed');
+        }
       }
       if (analyzerResult.ok) {
         analyzerOutput = analyzerResult.output;

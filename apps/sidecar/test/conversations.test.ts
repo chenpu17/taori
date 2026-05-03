@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { buildServer } from '../src/server.js';
 import { openDb } from '../src/db/index.js';
 import { ControlClient } from '../src/control/client.js';
@@ -45,6 +45,7 @@ describe('conversations route', () => {
     await app.ready();
   });
   afterEach(async () => {
+    vi.restoreAllMocks();
     await app.close();
     fs.rmSync(dbPath, { force: true });
   });
@@ -283,5 +284,126 @@ describe('models test endpoint (MC-4)', () => {
       headers: auth,
     });
     expect(res.statusCode).toBe(404);
+  });
+
+  it('POST /v1/models/:id/test probes tools support and enables it when accepted', async () => {
+    const provider = await app.inject({
+      method: 'POST',
+      url: '/v1/providers',
+      headers: authJson,
+      payload: {
+        name: 'compat',
+        type: 'custom',
+        base_url: 'https://compat.example.com/v1',
+        api_key: 'sk-test',
+      },
+    });
+    const providerId = (provider.json() as { id: string }).id;
+    const model = await app.inject({
+      method: 'POST',
+      url: '/v1/models',
+      headers: authJson,
+      payload: {
+        provider_id: providerId,
+        model_name: 'kimi-k2.6',
+        capability: 'chat',
+        display_name: 'Kimi K2.6',
+        supports_tools: false,
+      },
+    });
+    const modelId = (model.json() as { id: string }).id;
+    let calls = 0;
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (_url, init) => {
+      calls++;
+      const raw = typeof init?.body === 'string' ? init.body : String(init?.body ?? '{}');
+      const body = JSON.parse(raw) as { tools?: unknown[] };
+      if (calls === 2) expect(Array.isArray(body.tools)).toBe(true);
+      return new Response(
+        JSON.stringify({
+          id: `chatcmpl-${calls}`,
+          object: 'chat.completion',
+          choices: [{ index: 0, message: { role: 'assistant', content: 'ok' }, finish_reason: 'stop' }],
+          usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
+        }),
+        { status: 200, headers: { 'content-type': 'application/json' } },
+      );
+    });
+
+    const res = await app.inject({
+      method: 'POST',
+      url: `/v1/models/${modelId}/test`,
+      headers: auth,
+    });
+    expect(res.statusCode).toBe(200);
+    const body = res.json() as { ok: boolean; tools_probe?: { supported: boolean; updated: boolean } };
+    expect(body.ok).toBe(true);
+    expect(body.tools_probe).toMatchObject({ supported: true, updated: true });
+
+    const listed = await app.inject({ method: 'GET', url: '/v1/models', headers: auth });
+    const saved = (listed.json() as { models: Array<{ id: string; supports_tools: boolean }> }).models
+      .find((m) => m.id === modelId);
+    expect(saved?.supports_tools).toBe(true);
+  });
+
+  it('POST /v1/models/:id/test disables tools when the provider rejects tools payload', async () => {
+    const provider = await app.inject({
+      method: 'POST',
+      url: '/v1/providers',
+      headers: authJson,
+      payload: {
+        name: 'compat',
+        type: 'custom',
+        base_url: 'https://compat.example.com/v1',
+        api_key: 'sk-test',
+      },
+    });
+    const providerId = (provider.json() as { id: string }).id;
+    const model = await app.inject({
+      method: 'POST',
+      url: '/v1/models',
+      headers: authJson,
+      payload: {
+        provider_id: providerId,
+        model_name: 'kimi-k2.6',
+        capability: 'chat',
+        display_name: 'Kimi K2.6',
+        supports_tools: true,
+      },
+    });
+    const modelId = (model.json() as { id: string }).id;
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (_url, init) => {
+      const raw = typeof init?.body === 'string' ? init.body : String(init?.body ?? '{}');
+      const body = JSON.parse(raw) as { tools?: unknown[] };
+      if (Array.isArray(body.tools)) {
+        return new Response(
+          JSON.stringify({ error: { message: 'This model does not support tools parameter' } }),
+          { status: 400, headers: { 'content-type': 'application/json' } },
+        );
+      }
+      return new Response(
+        JSON.stringify({
+          id: 'chatcmpl-ping',
+          object: 'chat.completion',
+          choices: [{ index: 0, message: { role: 'assistant', content: 'ok' }, finish_reason: 'stop' }],
+          usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
+        }),
+        { status: 200, headers: { 'content-type': 'application/json' } },
+      );
+    });
+
+    const res = await app.inject({
+      method: 'POST',
+      url: `/v1/models/${modelId}/test`,
+      headers: auth,
+    });
+    expect(res.statusCode).toBe(200);
+    const body = res.json() as { ok: boolean; tools_probe?: { supported: boolean; updated: boolean } };
+    expect(body.ok).toBe(true);
+    expect(body.tools_probe).toMatchObject({ supported: false, updated: true });
+
+    const listed = await app.inject({ method: 'GET', url: '/v1/models', headers: auth });
+    const saved = (listed.json() as { models: Array<{ id: string; supports_tools: boolean }> }).models
+      .find((m) => m.id === modelId);
+    expect(saved?.supports_tools).toBe(false);
   });
 });

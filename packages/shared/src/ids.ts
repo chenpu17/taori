@@ -15,6 +15,8 @@ export const ID_PREFIXES = {
   roundtable: 'rt_',
   roundtable_message: 'rtmsg_',
   cost: 'cost_',
+  run: 'run_',
+  run_event: 'runev_',
   memory: 'mem_',
   prompt_template: 'ptpl_',
   persona: 'per_',

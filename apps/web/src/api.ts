@@ -34,6 +34,9 @@ import type {
   BackupImportResponse,
   BackupPackage,
   Tool,
+  EffectiveTool,
+  ConversationProfile,
+  RunEvent,
 } from '@taori/shared';
 
 async function json<T>(res: Response): Promise<T> {
@@ -289,6 +292,16 @@ export const api = {
         }>;
       }>(r),
     ),
+  getConversationProfile: (id: string) =>
+    authedFetch(`/v1/conversations/${id}/profile`).then((r) =>
+      json<{ ok: boolean; data: ConversationProfile }>(r),
+    ),
+  getConversationRunEvents: (id: string, limit = 120) =>
+    authedFetch(
+      `/v1/conversations/${id}/run-events?limit=${encodeURIComponent(String(limit))}`,
+    ).then((r) =>
+      json<{ ok: boolean; data: { conversation_id: string; events: RunEvent[] } }>(r),
+    ),
   getFileData: (fileId: string) =>
     authedFetch(`/v1/files/${fileId}/data`).then((r) =>
       json<{ ok: boolean; file_id: string; content_type: string; data_b64: string; size_bytes: number }>(r),
@@ -364,6 +377,12 @@ export const api = {
         ok: boolean;
         latency_ms?: number;
         note?: string;
+        tools_probe?: {
+          supported: boolean | null;
+          updated: boolean;
+          classification?: string;
+          message?: string;
+        };
         error?: { classification: string; message: string };
       }>(r),
     ),
@@ -479,12 +498,30 @@ export const api = {
     authedFetch('/v1/tools').then((r) =>
       json<{ ok: boolean; data: Tool[] }>(r),
     ),
+  listEffectiveTools: (conversationId?: string | null) => {
+    const qs = conversationId
+      ? `?conversation_id=${encodeURIComponent(conversationId)}`
+      : '';
+    return authedFetch(`/v1/tools/effective${qs}`).then((r) =>
+      json<{ ok: boolean; data: EffectiveTool[] }>(r),
+    );
+  },
   setToolEnabled: (name: string, enabled: boolean) =>
     authedFetch(`/v1/tools/${encodeURIComponent(name)}/enabled`, {
       method: 'PUT',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ enabled }),
     }).then((r) => json<{ ok: boolean; data: Tool }>(r)),
+  setSessionToolEnabled: (
+    name: string,
+    conversationId: string,
+    enabled: boolean | null,
+  ) =>
+    authedFetch(`/v1/tools/${encodeURIComponent(name)}/session-enabled`, {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ conversation_id: conversationId, enabled }),
+    }).then((r) => json<{ ok: boolean; data: EffectiveTool }>(r)),
   invokeTool: (
     name: string,
     input: unknown,

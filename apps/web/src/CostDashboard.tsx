@@ -7,6 +7,7 @@ type CostGroupBy = 'model' | 'conversation' | 'feature';
 
 interface CostDashboardProps {
   onClose: () => void;
+  embedded?: boolean;
 }
 
 interface DashboardRow {
@@ -176,7 +177,7 @@ function Sparkline({
   );
 }
 
-export function CostDashboard({ onClose }: CostDashboardProps): JSX.Element {
+export function CostDashboard({ onClose, embedded = false }: CostDashboardProps): JSX.Element {
   const [scope, setScope] = useState<CostScope>('today');
   const [groupBy, setGroupBy] = useState<CostGroupBy>('model');
   const [rows, setRows] = useState<DashboardRow[] | null>(null);
@@ -188,11 +189,11 @@ export function CostDashboard({ onClose }: CostDashboardProps): JSX.Element {
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') onClose();
+      if (!embedded && e.key === 'Escape') onClose();
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [onClose]);
+  }, [onClose, embedded]);
 
   const refresh = useCallback(async (reset: boolean): Promise<void> => {
     const seq = ++refreshSeq.current;
@@ -242,7 +243,10 @@ export function CostDashboard({ onClose }: CostDashboardProps): JSX.Element {
   );
 
   return (
-    <section className="cost-dashboard" data-testid="cost-dashboard-panel">
+    <section
+      className={`cost-dashboard${embedded ? ' cost-dashboard--embedded' : ''}`}
+      data-testid="cost-dashboard-panel"
+    >
       <header className="cost-dashboard__header">
         <div>
           <h2>成本看板</h2>
@@ -260,15 +264,17 @@ export function CostDashboard({ onClose }: CostDashboardProps): JSX.Element {
           >
             {refreshing ? '刷新中…' : '刷新'}
           </button>
-          <button
-            type="button"
-            className="settings-close"
-            onClick={onClose}
-            data-testid="cost-dashboard-close"
-            aria-label="关闭成本看板"
-          >
-            ✕
-          </button>
+          {!embedded && (
+            <button
+              type="button"
+              className="settings-close"
+              onClick={onClose}
+              data-testid="cost-dashboard-close"
+              aria-label="关闭成本看板"
+            >
+              ✕
+            </button>
+          )}
         </div>
       </header>
 

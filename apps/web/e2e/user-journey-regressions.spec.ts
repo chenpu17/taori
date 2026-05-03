@@ -200,6 +200,11 @@ test('natural-language image request uses LLM tool call, not the picker, and sur
   await expect(page.locator('.msg.assistant').last()).toContainText('图片已生成', {
     timeout: 10_000,
   });
+  await page.getByTestId('open-run-timeline').click();
+  await expect(page.getByTestId('run-timeline-panel')).toBeVisible();
+  await expect(page.getByTestId('run-event').filter({ hasText: '上下文快照' })).toBeVisible();
+  await expect(page.getByTestId('run-event').filter({ hasText: '生成图片' })).toHaveCount(2);
+  await expect(page.getByTestId('run-event').filter({ hasText: '成本记录' })).toBeVisible();
 
   const cid = await findConversationContaining('帮我生成一张可爱鸭鸭的图片');
   const msgsRes = await authedFetch(env, `/v1/conversations/${cid}/messages`);
@@ -251,7 +256,7 @@ test('negative image wording stays on normal chat and does not invoke image UI',
   await expect(page.getByTestId('msg-tool-images')).toHaveCount(0);
 });
 
-test('switching tool support updates image guidance and keeps natural image routing model-driven', async ({
+test('switching tool support updates image guidance and falls back for non-tool chat models', async ({
   page,
 }) => {
   test.setTimeout(90_000);
@@ -265,13 +270,13 @@ test('switching tool support updates image guidance and keeps natural image rout
 
   await page.getByTestId('active-model').selectOption(plainChatId);
   await expect(page.getByTestId('preflight-image')).toHaveAttribute('data-state', 'warn');
-  await expect(page.getByTestId('preflight-image')).toContainText('/image');
+  await expect(page.getByTestId('preflight-image')).toContainText('打开生成器');
 
   await page.getByTestId('composer-input').fill('帮我生成一张可爱鸭鸭的图片');
   await page.getByTestId('composer-send').click();
+  await expect(page.getByTestId('image-picker-dialog')).toBeVisible({ timeout: 10_000 });
+  await page.getByTestId('image-picker-cancel').click();
   await expect(page.getByTestId('image-picker-dialog')).toHaveCount(0);
-  await expect(page.locator('.msg.assistant').last()).toBeVisible({ timeout: 20_000 });
-  await expect(page.getByTestId('msg-tool-images')).toHaveCount(0);
 
   await page.getByTestId('active-model').selectOption(toolChatId);
   await expect(page.getByTestId('preflight-image')).toHaveAttribute('data-state', 'ready');

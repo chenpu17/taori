@@ -4,9 +4,8 @@ import { useEffect, useLayoutEffect, useState, useCallback, useRef, useMemo } fr
 import { getSidecarEndpoint, authedFetch } from './sidecar.js';
 import { api } from './api.js';
 import { Onboarding } from './Onboarding.js';
-import { Settings } from './Settings.js';
-import { ModelCenter } from './ModelCenter.js';
-import { CostDashboard } from './CostDashboard.js';
+import { ControlCenter } from './ControlCenter.js';
+import type { ControlCenterSection } from './ControlCenter.js';
 import { HelpCenter } from './HelpCenter.js';
 import { CommandPalette } from './CommandPalette.js';
 import { DiscoverableTip, TIPS, shouldShowTip } from './DiscoverableTip.js';
@@ -14,9 +13,18 @@ import { TaoriIcon } from './TaoriIcon.js';
 import { RoundtableLaunchDialog } from './Roundtable.js';
 import { RoundtablePanel } from './RoundtablePanel.js';
 import { priceTier, PRICE_TIER_LABEL, formatUsd, estimateInputTokens, estimateCostUsd } from '@taori/shared';
-import type { Model, Persona, PromptTemplate, Provider } from '@taori/shared';
+import type {
+  ContextSource,
+  EffectiveTool,
+  Model,
+  Persona,
+  PromptTemplate,
+  Provider,
+  RunEvent,
+  Tool,
+} from '@taori/shared';
 import { renderMarkdown } from './markdown.js';
-import { modelDisplayWithProvider } from './modelDisplay.js';
+import { modelBaseDisplayName, modelDisplayWithProvider } from './modelDisplay.js';
 
 const STARTER_PROMPTS: Array<{ icon: string; title: string; desc: string; text: string }> = [
   {
@@ -45,6 +53,35 @@ const STARTER_PROMPTS: Array<{ icon: string; title: string; desc: string; text: 
   },
 ];
 
+const BUILTIN_WORKFLOW_TEMPLATES: Array<{
+  id: string;
+  name: string;
+  description: string;
+  content: string;
+}> = [
+  {
+    id: 'workflow-web-research',
+    name: '网页调研报告',
+    description: '搜索/抓取资料后输出结构化结论',
+    content:
+      '请围绕 {{主题}} 做一次网页调研：先搜索公开资料，必要时抓取关键网页，再输出背景、关键发现、风险和下一步建议。',
+  },
+  {
+    id: 'workflow-image-review',
+    name: '图片生成并复核',
+    description: '先生成视觉物料，再用视觉模型审稿',
+    content:
+      '请为 {{用途}} 生成一张视觉物料。生成后我会点击“理解这张图”进行复核，请最后给出设计修改建议。',
+  },
+  {
+    id: 'workflow-decision-brief',
+    name: '决策简报',
+    description: '整理备选方案、分歧、风险和建议',
+    content:
+      '请针对 {{决策问题}} 输出一份决策简报：列出备选方案、评价标准、主要分歧、风险和推荐决策。',
+  },
+];
+
 interface HealthState {
   ok: boolean;
   control: 'connected' | 'disconnected' | 'unknown' | 'error';
@@ -65,6 +102,36 @@ interface ConversationSummary {
 const DISCOVERABLE_COST_TIP_THRESHOLD_USD = 0.01;
 const ACTIVE_CHAT_MODEL_MEMORY_KEY = 'active_chat_model_id';
 type MemoryScopeLabel = 'default' | 'global' | 'session';
+type TemplateLike = Pick<PromptTemplate, 'name' | 'description' | 'content'>;
+
+interface ToolTraceAnnotation {
+  type: 'tool_trace';
+  call_id?: string;
+  tool?: string;
+  label?: string;
+  event?: 'start' | 'finish';
+  input?: string;
+  output?: string;
+  ok?: boolean;
+  duration_ms?: number;
+}
+
+interface ContextSnapshotAnnotation {
+  type: 'context_snapshot';
+  context_sources?: ContextSource[];
+  active_tool_names?: string[];
+  disabled_tool_names?: string[];
+}
+
+interface ToolTraceStep {
+  callId: string;
+  tool: string;
+  label: string;
+  input: string | null;
+  output: string | null;
+  status: 'running' | 'ok' | 'error';
+  durationMs: number | null;
+}
 
 function formatTokenCount(value: number | null): string {
   return value == null ? '—' : value.toLocaleString();
@@ -87,13 +154,77 @@ function extractTemplateVariables(content: string): string[] {
 }
 
 function fillTemplateContent(
-  template: PromptTemplate,
+  template: TemplateLike,
   answers: Record<string, string>,
 ): string {
   return template.content.replace(
     /{{\s*([A-Za-z0-9_\-.:\u4e00-\u9fa5]+)\s*}}/g,
     (_match: string, key: string) => answers[key.trim()] ?? '',
   );
+}
+
+function toolTraceStepsFromAnnotations(annotations: Array<Record<string, unknown>>): ToolTraceStep[] {
+  const steps = new Map<string, ToolTraceStep>();
+  for (const raw of annotations) {
+    if (raw?.type !== 'tool_trace') continue;
+    const ann = raw as unknown as ToolTraceAnnotation;
+    const callId = ann.call_id || `${ann.tool ?? 'tool'}-${steps.size}`;
+    const prev = steps.get(callId);
+    const label = ann.label || ann.tool || '工具调用';
+    const next: ToolTraceStep = prev ?? {
+      callId,
+      tool: ann.tool || 'tool',
+      label,
+      input: null,
+      output: null,
+      status: 'running',
+      durationMs: null,
+    };
+    if (ann.tool) next.tool = ann.tool;
+    if (ann.label) next.label = ann.label;
+    if (typeof ann.input === 'string') next.input = ann.input;
+    if (typeof ann.output === 'string') next.output = ann.output;
+    if (ann.event === 'finish') next.status = ann.ok === false ? 'error' : 'ok';
+    if (typeof ann.duration_ms === 'number' && Number.isFinite(ann.duration_ms)) {
+      next.durationMs = ann.duration_ms;
+    }
+    steps.set(callId, next);
+  }
+  return [...steps.values()];
+}
+
+function isExpectedStopError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return /aborted|aborterror|econnreset|network error/i.test(message);
+}
+
+const USER_STOP_PENDING_KEY = 'taori.stream.user_stop_pending';
+
+function setUserStopPending(value: boolean): void {
+  try {
+    if (value) {
+      sessionStorage.setItem(USER_STOP_PENDING_KEY, '1');
+    } else {
+      sessionStorage.removeItem(USER_STOP_PENDING_KEY);
+    }
+  } catch {
+    /* ignore storage failures */
+  }
+}
+
+function hasUserStopPending(): boolean {
+  try {
+    return sessionStorage.getItem(USER_STOP_PENDING_KEY) === '1';
+  } catch {
+    return false;
+  }
+}
+
+function contextSnapshotFromAnnotations(
+  annotations: Array<Record<string, unknown>>,
+): ContextSnapshotAnnotation | null {
+  const snapshot = annotations.find((raw) => raw?.type === 'context_snapshot');
+  return snapshot ? (snapshot as unknown as ContextSnapshotAnnotation) : null;
 }
 
 function comparableModelUnitPrice(model: Model): number | null {
@@ -119,7 +250,7 @@ function findKnownCheaperPeer(models: Model[], current: Model): Model | null {
 type BootState =
   | { kind: 'loading' }
   | { kind: 'onboarding' }
-  | { kind: 'ready'; providers: Provider[]; chatModels: Model[]; defaultChatModel: Model }
+  | { kind: 'ready'; providers: Provider[]; chatModels: Model[]; defaultChatModel: Model; tools: Tool[] }
   | { kind: 'error'; error: string };
 
 export function App(): JSX.Element {
@@ -136,9 +267,8 @@ export function App(): JSX.Element {
       return false;
     }
   });
-  const [settingsOpen, setSettingsOpen] = useState(false);
-  const [modelCenterOpen, setModelCenterOpen] = useState(false);
-  const [costDashboardOpen, setCostDashboardOpen] = useState(false);
+  const [controlCenterSection, setControlCenterSection] =
+    useState<ControlCenterSection | null>(null);
   const [helpOpen, setHelpOpen] = useState(false);
   const [forceOnboarding, setForceOnboarding] = useState(false);
 
@@ -174,9 +304,10 @@ export function App(): JSX.Element {
   const reload = useCallback(async (opts?: { silent?: boolean }): Promise<void> => {
     if (!opts?.silent) setBoot({ kind: 'loading' });
     try {
-      const [{ providers }, { models }] = await Promise.all([
+      const [{ providers }, { models }, toolsRes] = await Promise.all([
         api.listProviders(),
         api.listModels(),
+        api.listTools(),
       ]);
       const enabled = providers.filter((p) => p.enabled);
       const chatModels = models.filter(
@@ -186,7 +317,7 @@ export function App(): JSX.Element {
       if (enabled.length === 0 || !def) {
         setBoot({ kind: 'onboarding' });
       } else {
-        setBoot({ kind: 'ready', providers, chatModels, defaultChatModel: def });
+        setBoot({ kind: 'ready', providers, chatModels, defaultChatModel: def, tools: toolsRes.data });
       }
     } catch (e) {
       setBoot({
@@ -217,13 +348,13 @@ export function App(): JSX.Element {
   }, [persistBrowseOnly]);
 
   const onReopenOnboarding = useCallback((): void => {
-    setSettingsOpen(false);
+    setControlCenterSection(null);
     setForceOnboarding(true);
     persistBrowseOnly(false);
   }, [persistBrowseOnly]);
 
   const onSettingsChanged = useCallback((): void => {
-    void reload();
+    void reload({ silent: true });
   }, [reload]);
 
   const onModelsChanged = useCallback((): void => {
@@ -259,7 +390,7 @@ export function App(): JSX.Element {
               onClick={(e) => {
                 e.preventDefault();
                 e.stopPropagation();
-                window.setTimeout(() => setCostDashboardOpen(true), 0);
+                window.setTimeout(() => setControlCenterSection('costs'), 0);
               }}
               data-testid="open-cost-dashboard"
               aria-label="成本看板"
@@ -272,7 +403,7 @@ export function App(): JSX.Element {
             <button
               type="button"
               className="settings-btn"
-              onClick={() => setModelCenterOpen(true)}
+              onClick={() => setControlCenterSection('models')}
               data-testid="open-model-center"
               aria-label="模型中心"
               title="模型中心"
@@ -296,7 +427,7 @@ export function App(): JSX.Element {
             <button
               type="button"
               className="settings-btn"
-              onClick={() => setSettingsOpen(true)}
+              onClick={() => setControlCenterSection('general')}
               data-testid="open-settings"
               aria-label="设置"
               title="设置"
@@ -330,51 +461,22 @@ export function App(): JSX.Element {
           providers={boot.providers}
           chatModels={boot.chatModels}
           defaultModel={boot.defaultChatModel}
-          onOpenSettings={() => setSettingsOpen(true)}
-          onOpenCostDashboard={() => setCostDashboardOpen(true)}
-          onOpenModelCenter={() => setModelCenterOpen(true)}
+          tools={boot.tools}
+          onOpenSettings={() => setControlCenterSection('general')}
+          onOpenCostDashboard={() => setControlCenterSection('costs')}
+          onOpenModelCenter={() => setControlCenterSection('models')}
+          onOpenTools={() => setControlCenterSection('tools')}
           onOpenHelp={() => setHelpOpen(true)}
         />
       ) : null}
-      {settingsOpen && (
-        <Settings
-          onClose={() => setSettingsOpen(false)}
+      {controlCenterSection && (
+        <ControlCenter
+          initialSection={controlCenterSection}
+          onClose={() => setControlCenterSection(null)}
           onChanged={onSettingsChanged}
+          onModelsChanged={onModelsChanged}
           onReopenOnboarding={onReopenOnboarding}
         />
-      )}
-      {modelCenterOpen && (
-        <div
-          className="model-center-overlay"
-          role="dialog"
-          aria-modal="true"
-          data-testid="model-center-overlay"
-          onClick={(e) => {
-            if (e.target === e.currentTarget) setModelCenterOpen(false);
-          }}
-        >
-          <ModelCenter
-            onClose={() => setModelCenterOpen(false)}
-            onChanged={onModelsChanged}
-            onReopenOnboarding={() => {
-              setModelCenterOpen(false);
-              onReopenOnboarding();
-            }}
-          />
-        </div>
-      )}
-      {costDashboardOpen && (
-        <div
-          className="model-center-overlay"
-          role="dialog"
-          aria-modal="true"
-          data-testid="cost-dashboard-overlay"
-          onClick={(e) => {
-            if (e.target === e.currentTarget) setCostDashboardOpen(false);
-          }}
-        >
-          <CostDashboard onClose={() => setCostDashboardOpen(false)} />
-        </div>
       )}
       {helpOpen && <HelpCenter onClose={() => setHelpOpen(false)} />}
     </div>
@@ -429,18 +531,22 @@ function Workspace({
   providers,
   chatModels,
   defaultModel,
+  tools,
   onOpenSettings,
   onOpenCostDashboard,
   onOpenModelCenter,
+  onOpenTools,
   onOpenHelp,
 }: {
   endpoint: { url: string; bearer: string };
   providers: Provider[];
   chatModels: Model[];
   defaultModel: Model;
+  tools: Tool[];
   onOpenSettings: () => void;
   onOpenCostDashboard: () => void;
   onOpenModelCenter: () => void;
+  onOpenTools: () => void;
   onOpenHelp: () => void;
 }): JSX.Element {
   const [conversations, setConversations] = useState<ConversationSummary[]>([]);
@@ -717,6 +823,7 @@ function Workspace({
           providers={providers}
           chatModels={chatModels}
           model={activeModel}
+          tools={tools}
           modelMemoryScope={activeModelMemoryScope}
           onModelChange={persistActiveModel}
           conversationId={activeConvId}
@@ -730,6 +837,7 @@ function Workspace({
           onConversationUpdated={() => void refreshConversations()}
           onOpenSettings={onOpenSettings}
           onOpenModelCenter={onOpenModelCenter}
+          onOpenTools={onOpenTools}
           roundtableLaunchSeq={roundtableLaunchSeq}
           onLoopbackToConversation={(id) => {
             setActiveConvId(id);
@@ -1084,6 +1192,7 @@ function ChatPanel({
   providers,
   chatModels,
   model,
+  tools,
   modelMemoryScope,
   onModelChange,
   conversationId,
@@ -1092,6 +1201,7 @@ function ChatPanel({
   onConversationUpdated,
   onOpenSettings,
   onOpenModelCenter,
+  onOpenTools,
   roundtableLaunchSeq,
   onLoopbackToConversation,
 }: {
@@ -1099,6 +1209,7 @@ function ChatPanel({
   providers: Provider[];
   chatModels: Model[];
   model: Model;
+  tools: Tool[];
   modelMemoryScope: MemoryScopeLabel;
   onModelChange: (id: string) => void;
   conversationId: string | null;
@@ -1107,6 +1218,7 @@ function ChatPanel({
   onConversationUpdated: () => void;
   onOpenSettings: () => void;
   onOpenModelCenter: () => void;
+  onOpenTools: () => void;
   roundtableLaunchSeq: number;
   /** A4 — RoundtablePanel SummaryCard "↪ 带回原对话" callback. */
   onLoopbackToConversation: (id: string) => void;
@@ -1167,6 +1279,7 @@ function ChatPanel({
   // the in-flight message on error (no `0:` text arrived), so we render a
   // synthetic placeholder + decision card keyed off this id.
   const [lastFailureMsgId, setLastFailureMsgId] = useState<string | null>(null);
+  const preserveFailureForConversationRef = useRef<string | null>(null);
 
   const clearFailureDecisionState = useCallback((): void => {
     setFailureByMsg({});
@@ -1238,6 +1351,13 @@ function ChatPanel({
   const [imagePickerError, setImagePickerError] = useState<string | null>(null);
   const [imagePickerSubmitting, setImagePickerSubmitting] = useState(false);
   const [imageModels, setImageModels] = useState<Model[]>([]);
+  const [effectiveTools, setEffectiveTools] = useState<EffectiveTool[]>(
+    () => tools.map((t) => ({ ...t, session_enabled: null, effective_enabled: t.enabled })),
+  );
+  const imageToolEnabled =
+    effectiveTools.find((t) => t.name === 'builtin.image_generate')?.effective_enabled
+    ?? tools.find((t) => t.name === 'builtin.image_generate')?.enabled
+    ?? true;
   // M3.A.4 — roundtable launch dialog state. Open by clicking the "🔍 圆桌"
   // button next to send. After confirm, parent receives the roundtable id;
   // M3.A.5 will use it to swap chat-bubble view for the roundtable panel.
@@ -1255,11 +1375,19 @@ function ChatPanel({
   const [selectedPersonaId, setSelectedPersonaId] = useState<string>('');
   const [templatePickerOpen, setTemplatePickerOpen] = useState(false);
   const [templateVarDraft, setTemplateVarDraft] = useState<{
-    template: PromptTemplate;
+    template: TemplateLike;
     vars: string[];
     answers: Record<string, string>;
   } | null>(null);
   const [promptAssetsError, setPromptAssetsError] = useState<string | null>(null);
+  const [sessionToolBusy, setSessionToolBusy] = useState<string | null>(null);
+  const [profileCost, setProfileCost] = useState<{
+    current_conversation_usd: number;
+    current_conversation_calls: number;
+  } | null>(null);
+  const [runTimelineOpen, setRunTimelineOpen] = useState(false);
+  const [runEvents, setRunEvents] = useState<RunEvent[] | null>(null);
+  const [runEventsError, setRunEventsError] = useState<string | null>(null);
   const [queuedTips, setQueuedTips] = useState<Array<keyof typeof TIPS>>([]);
   const [activeTipId, setActiveTipId] = useState<keyof typeof TIPS | null>(null);
   // Wired up to openImagePicker after it's declared. Lets the failureFetch
@@ -1295,102 +1423,129 @@ function ChatPanel({
     }
     const res = await fetch(input as RequestInfo, nextInit);
     if (!res.ok || !res.body) return res;
-    // ReadableStream.tee() is browser-native; in jsdom-style envs it can be
-    // missing. Fall through gracefully so chat keeps working — failure card
-    // capture only ever runs in real browsers (E2E + production).
-    if (typeof (res.body as ReadableStream).tee !== 'function') return res;
-    const [a, b] = res.body.tee();
-    void (async () => {
-      const reader = b.getReader();
-      const decoder = new TextDecoder();
-      let buf = '';
-      let pendingMsgId: string | null = null;
-      let observedConversationId: string | null = null;
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buf = '';
+    let pendingMsgId: string | null = null;
+    let observedConversationId: string | null = null;
+    let finalized = false;
+
+    const finalizeObservedConversation = (): void => {
+      if (finalized) return;
+      finalized = true;
+      // If the user aborts a first-turn stream before useChat.onFinish runs,
+      // the parent still needs the server-created conversation id so the
+      // sidebar selection and subsequent actions point at the persisted row.
+      if (
+        observedConversationId &&
+        announcedConvIdRef.current !== observedConversationId
+      ) {
+        preserveFailureForConversationRef.current = observedConversationId;
+        announcedConvIdRef.current = observedConversationId;
+        onConversationCreated(observedConversationId);
+      }
+    };
+
+    const processAnnotationLine = (rawLine: string): void => {
+      const line = rawLine.endsWith('\r') ? rawLine.slice(0, -1) : rawLine;
+      if (!line.startsWith('8:')) return;
       try {
-        for (;;) {
-          const { value, done } = await reader.read();
-          if (done) break;
-          buf += decoder.decode(value, { stream: true });
-          let nl: number;
-          while ((nl = buf.indexOf('\n')) >= 0) {
-            const line = buf.slice(0, nl);
-            buf = buf.slice(nl + 1);
-            if (!line.startsWith('8:')) continue;
-            try {
-              const arr = JSON.parse(line.slice(2));
-              if (!Array.isArray(arr)) continue;
-              for (const ann of arr) {
-                if (ann?.type === 'meta' && typeof ann.message_id === 'string') {
-                  pendingMsgId = ann.message_id;
-                }
-                if (
-                  ann?.type === 'meta' &&
-                  typeof ann.conversation_id === 'string' &&
-                  conversationIdRef.current !== ann.conversation_id
-                ) {
-                  // The forced-error path may finish before useChat's onFinish
-                  // captures the conversation_id annotation, leaving the auto-
-                  // fallback effect without a target convId for persistence.
-                  // Mirror to the ref only — invoking onConversationCreated
-                  // here would re-render mid-stream and break the
-                  // failure-decision card flow (M2 §1.4).
-                  conversationIdRef.current = ann.conversation_id;
-                  observedConversationId = ann.conversation_id;
-                }
-                if (ann?.type === 'failure_decision' && pendingMsgId) {
-                  const decision: FailureDecision = {
-                    classification: ann.classification as FailureClassification,
-                    current_model_id: (ann.current_model_id as string | null) ?? null,
-                    recommended_model_id: (ann.recommended_model_id as string | null) ?? null,
-                    auto_fallback_enabled: ann.auto_fallback_enabled === true,
-                  };
-                  const id = pendingMsgId;
-                  setFailureByMsg((prev) => (prev[id] ? prev : { ...prev, [id]: decision }));
-                  setLastFailureMsgId(id);
-                }
-                // M2.4 — explicit image-command path. The sidecar emits NO text
-                // (no `0:` frame) so useChat's onFinish handler may never
-                // see annotations. The tee'd reader is the reliable channel.
-                if (
-                  ann?.type === 'capability_route' &&
-                  ann.capability === 'image' &&
-                  typeof ann.prompt === 'string' &&
-                  typeof ann.user_message_id === 'string'
-                ) {
-                  const route = {
-                    prompt: ann.prompt as string,
-                    user_message_id: ann.user_message_id as string,
-                    conversation_id:
-                      typeof ann.conversation_id === 'string'
-                        ? (ann.conversation_id as string)
-                        : null,
-                  };
-                  // Defer to a microtask so the parent ChatView state setters
-                  // see the most recent conversationIdRef.
-                  queueMicrotask(() => void capabilityRouteRef.current?.(route));
-                }
-              }
-            } catch {
-              /* ignore parse errors */
-            }
+        const arr = JSON.parse(line.slice(2));
+        if (!Array.isArray(arr)) return;
+        for (const ann of arr) {
+          if (ann?.type === 'meta' && typeof ann.message_id === 'string') {
+            pendingMsgId = ann.message_id;
+          }
+          if (
+            ann?.type === 'meta' &&
+            typeof ann.conversation_id === 'string' &&
+            conversationIdRef.current !== ann.conversation_id
+          ) {
+            // Mirror to the ref only — invoking onConversationCreated here can
+            // re-render mid-stream and disrupt useChat's in-flight error flow.
+            conversationIdRef.current = ann.conversation_id;
+            observedConversationId = ann.conversation_id;
+          }
+          if (ann?.type === 'failure_decision' && pendingMsgId) {
+            const decision: FailureDecision = {
+              classification: ann.classification as FailureClassification,
+              current_model_id: (ann.current_model_id as string | null) ?? null,
+              recommended_model_id: (ann.recommended_model_id as string | null) ?? null,
+              auto_fallback_enabled: ann.auto_fallback_enabled === true,
+              detail: typeof ann.detail === 'string' ? (ann.detail as string) : undefined,
+            };
+            const id = pendingMsgId;
+            setFailureByMsg((prev) => (prev[id] ? prev : { ...prev, [id]: decision }));
+            setLastFailureMsgId(id);
+          }
+          // M2.4 — explicit image-command path. The sidecar emits NO text
+          // (no `0:` frame) so useChat's onFinish handler may never see it.
+          if (
+            ann?.type === 'capability_route' &&
+            ann.capability === 'image' &&
+            typeof ann.prompt === 'string' &&
+            typeof ann.user_message_id === 'string'
+          ) {
+            const route = {
+              prompt: ann.prompt as string,
+              user_message_id: ann.user_message_id as string,
+              conversation_id:
+                typeof ann.conversation_id === 'string'
+                  ? (ann.conversation_id as string)
+                  : null,
+            };
+            queueMicrotask(() => void capabilityRouteRef.current?.(route));
           }
         }
       } catch {
-        /* stream cancelled */
-      } finally {
-        // If the user aborts a first-turn stream before useChat.onFinish runs,
-        // the parent still needs the server-created conversation id so the
-        // sidebar selection and subsequent actions point at the persisted row.
-        if (
-          observedConversationId &&
-          announcedConvIdRef.current !== observedConversationId
-        ) {
-          announcedConvIdRef.current = observedConversationId;
-          onConversationCreated(observedConversationId);
-        }
+        /* ignore parse errors */
       }
-    })();
-    return new Response(a, {
+    };
+
+    const processChunk = (value: Uint8Array): void => {
+      buf += decoder.decode(value, { stream: true });
+      let nl: number;
+      while ((nl = buf.indexOf('\n')) >= 0) {
+        const line = buf.slice(0, nl);
+        buf = buf.slice(nl + 1);
+        processAnnotationLine(line);
+      }
+    };
+
+    const tappedBody = new ReadableStream<Uint8Array>({
+      async pull(controller) {
+        try {
+          const { value, done } = await reader.read();
+          if (done) {
+            const tail = decoder.decode();
+            if (tail) buf += tail;
+            if (buf) {
+              processAnnotationLine(buf);
+              buf = '';
+            }
+            finalizeObservedConversation();
+            controller.close();
+            return;
+          }
+          if (value) {
+            processChunk(value);
+            controller.enqueue(value);
+          }
+        } catch (e) {
+          finalizeObservedConversation();
+          controller.error(e);
+        }
+      },
+      async cancel(reason) {
+        try {
+          await reader.cancel(reason);
+        } finally {
+          finalizeObservedConversation();
+        }
+      },
+    });
+
+    return new Response(tappedBody, {
       status: res.status,
       statusText: res.statusText,
       headers: res.headers,
@@ -1398,7 +1553,10 @@ function ChatPanel({
   }, [onConversationCreated]);
 
   const composerRef = useRef<HTMLTextAreaElement | null>(null);
+  const composerComposingRef = useRef(false);
+  const composerCompositionEndedAtRef = useRef(0);
   const messagesRef = useRef<HTMLDivElement | null>(null);
+  const lastUserStopAtRef = useRef(0);
 
   const loadImageModels = useCallback(async (): Promise<Model[]> => {
     const res = await api.listModels();
@@ -1499,8 +1657,88 @@ function ChatPanel({
     };
   }, [conversationId]);
 
+  const refreshEffectiveTools = useCallback(async (): Promise<void> => {
+    try {
+      const res = await api.listEffectiveTools(conversationId);
+      setEffectiveTools(res.data);
+    } catch {
+      setEffectiveTools(
+        tools.map((t) => ({
+          ...t,
+          session_enabled: null,
+          effective_enabled: t.enabled,
+        })),
+      );
+    }
+  }, [conversationId, tools]);
+
+  useEffect(() => {
+    void refreshEffectiveTools();
+  }, [refreshEffectiveTools]);
+
+  const refreshRunTimeline = useCallback(async (): Promise<void> => {
+    if (!conversationId) {
+      setRunEvents(null);
+      setRunEventsError(null);
+      return;
+    }
+    try {
+      const res = await api.getConversationRunEvents(conversationId);
+      setRunEvents(res.data.events);
+      setRunEventsError(null);
+    } catch (e) {
+      setRunEventsError(e instanceof Error ? e.message : String(e));
+    }
+  }, [conversationId]);
+
+  useEffect(() => {
+    if (!conversationId) {
+      setRunTimelineOpen(false);
+      setRunEvents(null);
+      setRunEventsError(null);
+      return;
+    }
+    void refreshRunTimeline();
+  }, [conversationId, refreshRunTimeline]);
+
+  useEffect(() => {
+    let cancelled = false;
+    if (!conversationId) {
+      setProfileCost(null);
+      return;
+    }
+    api.getConversationProfile(conversationId)
+      .then((res) => {
+        if (cancelled) return;
+        setEffectiveTools(res.data.effective_tools);
+        setProfileCost(res.data.cost);
+      })
+      .catch(() => {
+        if (!cancelled) setProfileCost(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [conversationId, selectedPersonaId]);
+
+  const setSessionToolOverride = useCallback(
+    async (name: string, enabled: boolean | null): Promise<void> => {
+      if (!conversationId) return;
+      setSessionToolBusy(name);
+      try {
+        const res = await api.setSessionToolEnabled(name, conversationId, enabled);
+        setEffectiveTools((prev) =>
+          prev.map((toolItem) => (toolItem.name === name ? res.data : toolItem)),
+        );
+      } finally {
+        setSessionToolBusy(null);
+      }
+    },
+    [conversationId],
+  );
+
   const applyTemplate = useCallback(
-    async (template: PromptTemplate): Promise<void> => {
+    async (template: TemplateLike): Promise<void> => {
       const vars = extractTemplateVariables(template.content);
       if (vars.length > 0) {
         setTemplateVarDraft({ template, vars, answers: {} });
@@ -1515,7 +1753,7 @@ function ChatPanel({
   );
 
   const insertTemplateWithAnswers = useCallback(
-    (template: PromptTemplate, answers: Record<string, string>): void => {
+    (template: TemplateLike, answers: Record<string, string>): void => {
       const next = fillTemplateContent(template, answers);
       setInput((prev) => (prev.trim() ? `${prev}\n\n${next}` : next));
       setTemplateVarDraft(null);
@@ -1568,7 +1806,19 @@ function ChatPanel({
       conversation_id: conversationId ?? undefined,
       ...(selectedPersonaId ? { persona_id: selectedPersonaId } : {}),
     },
-    onError: (e) => console.error('[useChat] onError:', e),
+    onError: (e) => {
+      if ((lastUserStopAtRef.current > 0 || hasUserStopPending()) && isExpectedStopError(e)) {
+        lastUserStopAtRef.current = 0;
+        setUserStopPending(false);
+        console.info('[useChat] stream stopped by user');
+        return;
+      }
+      if (isExpectedStopError(e)) {
+        console.warn('[useChat] recoverable stream interruption:', e);
+        return;
+      }
+      console.error('[useChat] onError:', e);
+    },
     onFinish: (msg, opts) => {
       // Vercel AI SDK attaches per-message annotations on msg.annotations;
       // older code paths used opts.annotations. Read both for safety
@@ -1634,8 +1884,10 @@ function ChatPanel({
         }
       }
       void refreshRealtime();
+      void refreshRunTimeline();
       window.setTimeout(() => void refreshRealtime(), 250);
       window.setTimeout(() => void refreshRealtime(), 1000);
+      window.setTimeout(() => void refreshRunTimeline(), 400);
       // Notify the sidebar so newly-created or renamed conversations show up.
       onConversationUpdated();
     },
@@ -1693,7 +1945,14 @@ function ChatPanel({
         announcedConvIdRef.current = route.conversation_id;
         onConversationCreated(route.conversation_id);
       }
+      if (!imageToolEnabled) {
+        setImagePicker(null);
+        setImagePickerError(null);
+        setDropError('图像生成工具已关闭。请到「控制中心 → 工具能力」启用后再生成图片。');
+        return;
+      }
       setImagePickerError(null);
+      setDropError(null);
       // 1. Load all image-capable enabled models (filtered + price-sorted).
       let imgModels: Model[] = [];
       try {
@@ -1750,7 +2009,7 @@ function ChatPanel({
         }, 0);
       }
     },
-    [loadImageModels, onConversationCreated],
+    [imageToolEnabled, loadImageModels, onConversationCreated],
   );
 
   // Wire ref so the failureFetch tee reader (declared earlier) can fire it.
@@ -1869,13 +2128,14 @@ function ChatPanel({
         await loadImagesForMessages(r.messages);
       }
       void refreshRealtime();
+      void refreshRunTimeline();
       setImagePicker(null);
     } catch (e) {
       setImagePickerError((e as Error).message ?? '请求失败');
     } finally {
       setImagePickerSubmitting(false);
     }
-  }, [setMessages]); // refreshRealtime is hoisted via useCallback below.
+  }, [setMessages, refreshRunTimeline]); // refreshRealtime is hoisted via useCallback below.
 
   const submitImagePicker = useCallback(async () => {
     if (!imagePicker || !imagePicker.selectedModelId) return;
@@ -2076,6 +2336,10 @@ function ChatPanel({
   // single-hop guard is **per conversation** and must survive switching
   // away and back, so a previously-consumed hop stays consumed.
   useEffect(() => {
+    if (preserveFailureForConversationRef.current === conversationId) {
+      preserveFailureForConversationRef.current = null;
+      return;
+    }
     autoFallbackTriggeredMsgs.current.clear();
     setLastFailureMsgId(null);
   }, [conversationId]);
@@ -2334,6 +2598,7 @@ function ChatPanel({
             current_model_id: (a.current_model_id as string | null) ?? null,
             recommended_model_id: (a.recommended_model_id as string | null) ?? null,
             auto_fallback_enabled: a.auto_fallback_enabled === true,
+            detail: typeof a.detail === 'string' ? (a.detail as string) : undefined,
           };
           setFailureByMsg((prev) =>
             prev[m.id] ? prev : { ...prev, [m.id]: decision },
@@ -2364,7 +2629,7 @@ function ChatPanel({
     autoFallbackTriggeredMsgs.current.add(lastFailureMsgId);
     autoFallbackUsedInThread.current = true;
     autoFallbackUsedConvs.current.add(conv);
-    const note = `已自动切换到「${modelDisplayWithProvider(target, providers)}」并重试。`;
+    const note = `已自动切换到「${modelBaseDisplayName(target)}」并重试。`;
     // Inject a system note so the user sees what happened (M2 §1.4).
     setMessages((prev) => [
       ...prev,
@@ -2388,7 +2653,9 @@ function ChatPanel({
         }
       }
       changeModelAndClearFailure(target.id);
-      regenerateWithCurrentConversation({ model_id: target.id });
+      window.setTimeout(() => {
+        regenerateWithCurrentConversation({ model_id: target.id });
+      }, 0);
     })();
   }, [
     failureByMsg,
@@ -2396,7 +2663,6 @@ function ChatPanel({
     isLoading,
     chatModels,
     changeModelAndClearFailure,
-    providers,
     regenerateWithCurrentConversation,
     setMessages,
   ]);
@@ -2517,6 +2783,10 @@ function ChatPanel({
     [personas, selectedPersonaId],
   );
   const failureDecisionCount = Object.keys(failureByMsg).length;
+  const hasMessageBoundFailure = useMemo(
+    () => messages.some((m) => m.role === 'assistant' && Boolean(failureByMsg[m.id])),
+    [failureByMsg, messages],
+  );
 
   useLayoutEffect(() => {
     if (activeRoundtableId) return;
@@ -2549,6 +2819,8 @@ function ChatPanel({
     setWasStoppedRecently(false);
   }, [conversationId]);
   const onStopClick = useCallback((): void => {
+    lastUserStopAtRef.current = Date.now();
+    setUserStopPending(true);
     stop();
     setWasStoppedRecently(true);
     const refreshStoppedConversation = (): void => {
@@ -2705,6 +2977,24 @@ function ChatPanel({
           {promptAssetsError}
         </div>
       )}
+      <SessionProfileStrip
+        model={model}
+        personaName={
+          selectedPersonaId
+            ? personas.find((persona) => persona.id === selectedPersonaId)?.name ?? 'Persona'
+            : null
+        }
+        conversationId={conversationId}
+        tools={effectiveTools}
+        cost={realtime ?? profileCost}
+        busyToolName={sessionToolBusy}
+        onSetToolOverride={(name, enabled) => void setSessionToolOverride(name, enabled)}
+        onOpenTools={onOpenTools}
+        onOpenRunTimeline={() => {
+          setRunTimelineOpen(true);
+          void refreshRunTimeline();
+        }}
+      />
       <CapabilityPreflight
         model={model}
         chatModels={chatModels}
@@ -2713,11 +3003,16 @@ function ChatPanel({
         activePersona={activePersona}
         conversationId={conversationId}
         confirmPrefs={confirmPrefs}
+        imageToolEnabled={imageToolEnabled}
         estimatePoint={estimate.point ?? null}
         monthlyBudgetUsd={monthlyBudgetUsd}
         monthSpentUsd={realtime?.month_usd ?? null}
         inputHasText={input.trim().length > 0}
+        inputText={input}
+        pendingHasImage={pending.some((p) => p.kind === 'image')}
         onOpenModelCenter={onOpenModelCenter}
+        onOpenTools={onOpenTools}
+        onSelectModel={(modelId) => onModelChange(modelId)}
       />
       {activeRoundtableId ? (
         <RoundtablePanel
@@ -2785,6 +3080,12 @@ function ChatPanel({
             | string
             | undefined;
           const cost = annMessageId ? costByMsg[annMessageId] : undefined;
+          const toolTraceSteps = m.role === 'assistant'
+            ? toolTraceStepsFromAnnotations(anns)
+            : [];
+          const contextSnapshot = m.role === 'assistant'
+            ? contextSnapshotFromAnnotations(anns)
+            : null;
           const isLastAssistant =
             m.role === 'assistant' && m === messages[messages.length - 1];
           return (
@@ -2855,6 +3156,12 @@ function ChatPanel({
 	                    </figure>
 	                  ))}
                 </div>
+              )}
+              {m.role === 'assistant' && toolTraceSteps.length > 0 && (
+                <ToolTraceTimeline steps={toolTraceSteps} />
+              )}
+              {m.role === 'assistant' && contextSnapshot && (
+                <ContextSnapshotCard snapshot={contextSnapshot} />
               )}
               {m.role === 'assistant' && cost && (
                 <div className="msg-cost" data-testid="msg-cost">
@@ -2984,7 +3291,7 @@ function ChatPanel({
         */}
         {lastFailureMsgId
           && failureByMsg[lastFailureMsgId]
-          && !messages.some((m) => m.id === lastFailureMsgId)
+          && !hasMessageBoundFailure
           && (
             <div className="msg assistant" data-role="assistant" data-failed="1">
               <FailureDecisionCard
@@ -3029,6 +3336,8 @@ function ChatPanel({
       <form
         onSubmit={(e) => {
           e.preventDefault();
+          lastUserStopAtRef.current = 0;
+          setUserStopPending(false);
           if (pending.some((p) => p.kind === 'image') && !model.supports_vision) return;
           const atts = pending.map(({ kind, mime, data_b64, name }) => ({ kind, mime, data_b64, name }));
 
@@ -3042,6 +3351,7 @@ function ChatPanel({
           const triggersImage = isImage && confirmPrefs.imageAlways;
           if (overBudget && monthlyBudgetUsd != null && realtime) {
             const fire = (overrideModelId?: string) => {
+              clearFailureDecisionState();
               setPending([]);
               const body = withCurrentConversation({
                 ...(atts.length > 0 ? { attachments: atts } : {}),
@@ -3073,6 +3383,7 @@ function ChatPanel({
           }
           if (!skip && (exceedsThreshold || triggersImage)) {
             const fire = (overrideModelId?: string) => {
+              clearFailureDecisionState();
               setPending([]);
               const body = withCurrentConversation({
                 ...(atts.length > 0 ? { attachments: atts } : {}),
@@ -3099,6 +3410,7 @@ function ChatPanel({
             return;
           }
 
+          clearFailureDecisionState();
           setPending([]);
           const body = withCurrentConversation(atts.length > 0 ? { attachments: atts } : {});
           handleSubmit(e, Object.keys(body).length > 0 ? { body } : undefined);
@@ -3162,11 +3474,25 @@ function ChatPanel({
           rows={1}
           ref={composerRef}
           onKeyDown={(e) => {
-            if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) {
+            const native = e.nativeEvent as KeyboardEvent & { isComposing?: boolean; keyCode?: number };
+            const justEndedComposition = Date.now() - composerCompositionEndedAtRef.current < 120;
+            const isImeComposing =
+              composerComposingRef.current ||
+              native.isComposing === true ||
+              native.keyCode === 229 ||
+              justEndedComposition;
+            if (e.key === 'Enter' && !e.shiftKey && !isImeComposing) {
               e.preventDefault();
               const form = (e.currentTarget as HTMLTextAreaElement).form;
               if (form) form.requestSubmit();
             }
+          }}
+          onCompositionStart={() => {
+            composerComposingRef.current = true;
+          }}
+          onCompositionEnd={() => {
+            composerComposingRef.current = false;
+            composerCompositionEndedAtRef.current = Date.now();
           }}
           onInput={(e) => {
             const ta = e.currentTarget as HTMLTextAreaElement;
@@ -3250,6 +3576,14 @@ function ChatPanel({
           onScopeChange={setCostPanelScope}
         />
       )}
+      {runTimelineOpen && (
+        <RunTimelinePanel
+          events={runEvents}
+          error={runEventsError}
+          onRefresh={() => void refreshRunTimeline()}
+          onClose={() => setRunTimelineOpen(false)}
+        />
+      )}
       {imagePicker && (
         <ImagePickerDialog
           prompt={imagePicker.prompt}
@@ -3320,8 +3654,9 @@ function TemplatePickerDialog({
 }: {
   templates: PromptTemplate[];
   onClose: () => void;
-  onApply: (template: PromptTemplate) => void;
+  onApply: (template: TemplateLike) => void;
 }): JSX.Element {
+  const hasTemplates = templates.length > 0;
   return (
     <div
       className="dialog-backdrop"
@@ -3337,27 +3672,330 @@ function TemplatePickerDialog({
             ✕
           </button>
         </div>
-        {templates.length === 0 ? (
-          <p className="hint">还没有模板。可以先到设置里创建一个。</p>
-        ) : (
-          <div className="picker-dialog-list">
-            {templates.map((template) => (
-              <button
-                key={template.id}
-                type="button"
-                className="picker-dialog-item"
-                data-testid="template-picker-item"
-                onClick={() => onApply(template)}
-              >
-                <strong>{template.name}</strong>
-                {template.description && <span>{template.description}</span>}
-                <code>{template.content.slice(0, 140)}</code>
-              </button>
+        <div className="picker-dialog-list">
+          <div className="picker-dialog-section-title">内置工作流</div>
+          {BUILTIN_WORKFLOW_TEMPLATES.map((template) => (
+            <button
+              key={template.id}
+              type="button"
+              className="picker-dialog-item workflow-template"
+              data-testid="workflow-template-item"
+              onClick={() => onApply(template)}
+            >
+              <strong>{template.name}</strong>
+              <span>{template.description}</span>
+              <code>{template.content.slice(0, 140)}</code>
+            </button>
+          ))}
+          <div className="picker-dialog-section-title">我的模板</div>
+          {!hasTemplates ? (
+            <p className="hint">还没有自定义模板。可以先到设置里创建一个。</p>
+          ) : (
+            <>
+              {templates.map((template) => (
+                <button
+                  key={template.id}
+                  type="button"
+                  className="picker-dialog-item"
+                  data-testid="template-picker-item"
+                  onClick={() => onApply(template)}
+                >
+                  <strong>{template.name}</strong>
+                  {template.description && <span>{template.description}</span>}
+                  <code>{template.content.slice(0, 140)}</code>
+                </button>
+              ))}
+            </>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function ToolTraceTimeline({ steps }: { steps: ToolTraceStep[] }): JSX.Element {
+  return (
+    <div className="tool-trace" data-testid="tool-trace-timeline">
+      <div className="tool-trace-title">工具执行</div>
+      <ol>
+        {steps.map((step) => (
+          <li
+            key={step.callId}
+            className={`tool-trace-step tool-trace-${step.status}`}
+            data-testid="tool-trace-step"
+            data-tool={step.tool}
+            data-status={step.status}
+          >
+            <span className="tool-trace-dot" aria-hidden="true" />
+            <div>
+              <div className="tool-trace-head">
+                <strong>{step.label}</strong>
+                <span>
+                  {step.status === 'running'
+                    ? '执行中'
+                    : step.status === 'ok'
+                      ? '完成'
+                      : '失败'}
+                  {step.durationMs != null ? ` · ${step.durationMs}ms` : ''}
+                </span>
+              </div>
+              {step.input && <p>输入：{step.input}</p>}
+              {step.output && <p>结果：{step.output}</p>}
+            </div>
+          </li>
+        ))}
+      </ol>
+    </div>
+  );
+}
+
+function SessionProfileStrip({
+  model,
+  personaName,
+  conversationId,
+  tools,
+  cost,
+  busyToolName,
+  onSetToolOverride,
+  onOpenTools,
+  onOpenRunTimeline,
+}: {
+  model: Model;
+  personaName: string | null;
+  conversationId: string | null;
+  tools: EffectiveTool[];
+  cost: {
+    current_conversation_usd: number;
+    current_conversation_calls: number;
+  } | null;
+  busyToolName: string | null;
+  onSetToolOverride: (name: string, enabled: boolean | null) => void;
+  onOpenTools: () => void;
+  onOpenRunTimeline: () => void;
+}): JSX.Element {
+  const toolNames = ['builtin.web_search', 'builtin.web_fetch', 'builtin.image_generate'];
+  const visibleTools = tools.filter((toolItem) => toolNames.includes(toolItem.name));
+  const enabledCount = tools.filter((toolItem) => toolItem.effective_enabled).length;
+  return (
+    <div className="session-profile-strip" data-testid="session-profile-strip">
+      <div className="session-profile-main">
+        <span data-testid="session-profile-model">模型：{modelBaseDisplayName(model)}</span>
+        <span data-testid="session-profile-persona">
+          Persona：{personaName ?? '无'}
+        </span>
+        <span data-testid="session-profile-tools">
+          工具：{enabledCount}/{tools.length}
+        </span>
+        <span data-testid="session-profile-cost">
+          本会话：{formatUsd(cost?.current_conversation_usd ?? 0)}
+        </span>
+      </div>
+      <div className="session-tool-policy" data-testid="session-tool-policy">
+        {visibleTools.map((toolItem) => {
+          const disabled = !conversationId || !toolItem.enabled || busyToolName === toolItem.name;
+          const next = toolItem.session_enabled === false ? null : false;
+          const label =
+            toolItem.name === 'builtin.web_search'
+              ? '搜索'
+              : toolItem.name === 'builtin.web_fetch'
+                ? '抓网页'
+                : '生图';
+          return (
+            <button
+              key={toolItem.name}
+              type="button"
+              className={`session-tool-chip ${toolItem.effective_enabled ? 'on' : 'off'}`}
+              data-testid={`session-tool-policy-${toolItem.name}`}
+              disabled={disabled}
+              title={
+                conversationId
+                  ? toolItem.enabled
+                    ? '只影响当前会话；再次点击恢复继承全局设置。'
+                    : '该工具已在全局关闭，请到工具中心开启。'
+                  : '发送第一条消息后可设置当前会话工具策略。'
+              }
+              onClick={() => onSetToolOverride(toolItem.name, next)}
+            >
+              {label} {toolItem.effective_enabled ? '开' : '关'}
+            </button>
+          );
+        })}
+        <button
+          type="button"
+          className="session-tool-chip"
+          data-testid="session-tool-policy-open-tools"
+          onClick={onOpenTools}
+        >
+          工具中心
+        </button>
+        <button
+          type="button"
+          className="session-tool-chip"
+          data-testid="open-run-timeline"
+          disabled={!conversationId}
+          onClick={onOpenRunTimeline}
+          title={conversationId ? '查看当前会话最近的运行过程' : '发送第一条消息后可查看运行过程'}
+        >
+          运行过程
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function ContextSnapshotCard({
+  snapshot,
+}: {
+  snapshot: ContextSnapshotAnnotation;
+}): JSX.Element {
+  const sources = Array.isArray(snapshot.context_sources)
+    ? snapshot.context_sources
+    : [];
+  return (
+    <div className="context-snapshot-card" data-testid="context-snapshot-card">
+      <div className="context-snapshot-title">
+        <span>本次上下文</span>
+        <span>
+          {(snapshot.active_tool_names ?? []).length} 个工具可见
+        </span>
+      </div>
+      <div className="context-source-list">
+        {sources.map((source, index) => (
+          <span
+            key={`${source.type}-${index}`}
+            className={`context-source-chip ${source.active ? 'active' : 'inactive'}`}
+            data-testid="context-source-chip"
+            title={`${source.scope} · ${source.type}`}
+          >
+            {source.label}
+          </span>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function runEventStatusText(status: RunEvent['status']): string {
+  if (status === 'started') return '开始';
+  if (status === 'progress') return '进行中';
+  if (status === 'completed') return '完成';
+  if (status === 'cancelled') return '已停止';
+  return '失败';
+}
+
+function runEventMeta(event: RunEvent): string {
+  const payload = event.payload ?? {};
+  if (event.kind.startsWith('tool.')) {
+    const tool = typeof payload.tool === 'string' ? payload.tool : null;
+    const duration = typeof payload.duration_ms === 'number' ? `${payload.duration_ms}ms` : null;
+    return [tool, duration].filter(Boolean).join(' · ');
+  }
+  if (event.kind === 'cost.recorded') {
+    const input = typeof payload.input_tokens === 'number' ? `${payload.input_tokens} in` : null;
+    const output = typeof payload.output_tokens === 'number' ? `${payload.output_tokens} out` : null;
+    const usd = typeof payload.actual_usd === 'number' ? formatUsd(payload.actual_usd) : null;
+    return [input, output, usd].filter(Boolean).join(' · ');
+  }
+  if (event.kind.startsWith('model.')) {
+    const duration = typeof payload.duration_ms === 'number' ? `${payload.duration_ms}ms` : null;
+    const modelName = typeof payload.model_name === 'string' ? payload.model_name : null;
+    return [modelName, duration].filter(Boolean).join(' · ');
+  }
+  return event.kind;
+}
+
+function RunTimelinePanel({
+  events,
+  error,
+  onRefresh,
+  onClose,
+}: {
+  events: RunEvent[] | null;
+  error: string | null;
+  onRefresh: () => void;
+  onClose: () => void;
+}): JSX.Element {
+  const groups = useMemo(() => {
+    const map = new Map<string, RunEvent[]>();
+    for (const event of events ?? []) {
+      const list = map.get(event.run_id) ?? [];
+      list.push(event);
+      map.set(event.run_id, list);
+    }
+    return [...map.entries()].reverse();
+  }, [events]);
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent): void => {
+      if (e.key === 'Escape') onClose();
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [onClose]);
+
+  return (
+    <aside className="run-timeline-panel" data-testid="run-timeline-panel">
+      <header>
+        <div>
+          <h3>运行过程</h3>
+          <span>{events ? `${events.length} 条事件` : '加载中'}</span>
+        </div>
+        <div className="run-timeline-actions">
+          <button type="button" data-testid="run-timeline-refresh" onClick={onRefresh}>
+            刷新
+          </button>
+          <button type="button" className="close" data-testid="run-timeline-close" onClick={onClose}>
+            ×
+          </button>
+        </div>
+      </header>
+      <div className="panel-body">
+        {error && <div className="error" role="alert">加载失败: {error}</div>}
+        {!error && events == null && <div className="hint">加载中…</div>}
+        {!error && events != null && events.length === 0 && (
+          <div className="hint" data-testid="run-timeline-empty">
+            暂无运行事件
+          </div>
+        )}
+        {!error && groups.length > 0 && (
+          <div className="run-groups">
+            {groups.map(([runId, list]) => (
+              <section className="run-group" data-testid="run-group" key={runId}>
+                <div className="run-group-head">
+                  <strong>{runId}</strong>
+                  <span>{new Date(list[0]!.created_at).toLocaleTimeString()}</span>
+                </div>
+                <ol>
+                  {list.map((event) => (
+                    <li
+                      key={event.id}
+                      className={`run-event run-event-${event.status}`}
+                      data-testid="run-event"
+                      data-kind={event.kind}
+                      data-status={event.status}
+                    >
+                      <span className="run-event-dot" aria-hidden="true" />
+                      <div className="run-event-body">
+                        <div className="run-event-title">
+                          <strong>{event.label}</strong>
+                          <span>{runEventStatusText(event.status)}</span>
+                        </div>
+                        <div className="run-event-meta">
+                          {runEventMeta(event)}
+                        </div>
+                        {event.summary && (
+                          <p>{event.summary}</p>
+                        )}
+                      </div>
+                    </li>
+                  ))}
+                </ol>
+              </section>
             ))}
           </div>
         )}
       </div>
-    </div>
+    </aside>
   );
 }
 
@@ -3369,7 +4007,7 @@ function TemplateVariablesDialog({
   onCancel,
   onSubmit,
 }: {
-  template: PromptTemplate;
+  template: TemplateLike;
   vars: string[];
   answers: Record<string, string>;
   onAnswersChange: (answers: Record<string, string>) => void;
@@ -3448,11 +4086,16 @@ function CapabilityPreflight({
   activePersona,
   conversationId,
   confirmPrefs,
+  imageToolEnabled,
   estimatePoint,
   monthlyBudgetUsd,
   monthSpentUsd,
   inputHasText,
+  inputText,
+  pendingHasImage,
   onOpenModelCenter,
+  onOpenTools,
+  onSelectModel,
 }: {
   model: Model;
   chatModels: Model[];
@@ -3466,16 +4109,31 @@ function CapabilityPreflight({
     disabledModels: string[];
     disabledConvs: string[];
   };
+  imageToolEnabled: boolean;
   estimatePoint: number | null;
   monthlyBudgetUsd: number | null;
   monthSpentUsd: number | null;
   inputHasText: boolean;
+  inputText: string;
+  pendingHasImage: boolean;
   onOpenModelCenter: () => void;
+  onOpenTools: () => void;
+  onSelectModel: (modelId: string) => void;
 }): JSX.Element {
   const hasImageModel = imageModels.length > 0;
-  const hasVisionPeer = chatModels.some(
+  const visionPeer = chatModels.find(
     (m) =>
+      m.id !== model.id &&
       m.supports_vision &&
+      m.enabled &&
+      !m.demoted &&
+      !(m.disabled_until && m.disabled_until > Date.now()),
+  );
+  const hasVisionPeer = Boolean(visionPeer || model.supports_vision);
+  const toolPeer = chatModels.find(
+    (m) =>
+      m.id !== model.id &&
+      m.supports_tools &&
       m.enabled &&
       !m.demoted &&
       !(m.disabled_until && m.disabled_until > Date.now()),
@@ -3494,19 +4152,27 @@ function CapabilityPreflight({
     estimatePoint != null &&
     estimatePoint > confirmPrefs.threshold;
 
-  const imageState = model.supports_tools
+  const imageState = !imageToolEnabled
+    ? hasImageModel
+      ? 'warn'
+      : 'off'
+    : model.supports_tools
     ? hasImageModel
       ? 'ready'
       : 'warn'
     : hasImageModel
       ? 'warn'
       : 'off';
-  const imageText = model.supports_tools
+  const imageText = !imageToolEnabled
+    ? hasImageModel
+      ? '图片生成：工具已关闭'
+      : '图片生成：工具已关闭，且未配置 image 模型'
+    : model.supports_tools
     ? hasImageModel
       ? `图片生成：模型可自主调用工具（默认 ${imageModels[0] ? modelDisplayWithProvider(imageModels[0], providers) : 'image model'}）`
       : '图片生成：聊天模型支持工具，但未配置 image 模型'
     : hasImageModel
-      ? '图片生成：当前聊天模型不支持工具；可用 /image 手动生成'
+      ? '图片生成：当前聊天模型不支持工具；图片请求会打开生成器'
       : '图片生成：未配置 image 模型';
   const visionState = model.supports_vision ? 'ready' : hasVisionPeer ? 'fallback' : 'off';
   const visionText = model.supports_vision
@@ -3530,7 +4196,32 @@ function CapabilityPreflight({
       ? `成本确认：本月预算已超 ${formatUsd(monthlyBudgetUsd)}`
       : thresholdWillConfirm
         ? `成本确认：预计超过阈值 ${formatUsd(confirmPrefs.threshold)}`
-        : `成本确认：阈值 ${formatUsd(confirmPrefs.threshold)}`;
+      : `成本确认：阈值 ${formatUsd(confirmPrefs.threshold)}`;
+  const text = inputText.trim().toLowerCase();
+  const wantsWeb =
+    /https?:\/\//.test(text) ||
+    /搜索|检索|查找|网页|抓取|读取网页|最新|search|fetch|browse|web/.test(text);
+  const wantsImage =
+    /\/image\b|生成.*(图片|图像|海报|插图)|画一张|绘制|generate.*(image|poster|picture)/i.test(inputText);
+  const suggestion = pendingHasImage && !model.supports_vision && visionPeer
+    ? {
+        kind: 'vision',
+        text: `这条消息带图片，建议切到视觉模型：${modelDisplayWithProvider(visionPeer, providers)}`,
+        modelId: visionPeer.id,
+      }
+    : wantsWeb && !model.supports_tools && toolPeer
+      ? {
+          kind: 'tools',
+          text: `这条消息像是需要搜索/抓网页，建议切到工具模型：${modelDisplayWithProvider(toolPeer, providers)}`,
+          modelId: toolPeer.id,
+        }
+      : wantsImage && !imageToolEnabled
+        ? {
+            kind: 'image-tool-off',
+            text: '这条消息像是要生成图片，但 image_generate 工具已关闭。',
+            modelId: null,
+          }
+        : null;
 
   return (
     <div className="capability-preflight" data-testid="capability-preflight">
@@ -3539,9 +4230,11 @@ function CapabilityPreflight({
         data-testid="preflight-image"
         data-state={imageState}
         title={
-          model.supports_tools
+          !imageToolEnabled
+            ? 'builtin.image_generate 已关闭；自然语言图片请求和 /image 命令都不会打开图像生成器。'
+            : model.supports_tools
             ? '普通图片生成请求会交给模型判断是否调用 image_generate；/image 命令仍会直接打开选择器。'
-            : '普通图片生成请求不会被系统正则抢先分流；请切换支持工具的聊天模型，或用 /image 显式打开选择器。'
+            : '当前聊天模型不能自主调用 tools；明确的图片生成请求会直接打开图像生成器，/image 命令也可用。'
         }
       >
         {imageText}
@@ -3567,7 +4260,7 @@ function CapabilityPreflight({
       >
         {costText}
       </span>
-      {!hasImageModel || (!model.supports_tools && hasImageModel) ? (
+      {!hasImageModel || !imageToolEnabled || (!model.supports_tools && hasImageModel) ? (
         <button
           type="button"
           className="preflight-link"
@@ -3577,6 +4270,32 @@ function CapabilityPreflight({
           检查模型配置
         </button>
       ) : null}
+      {suggestion && (
+        <div
+          className="preflight-suggestion"
+          data-testid="capability-suggestion"
+          data-kind={suggestion.kind}
+        >
+          <span>{suggestion.text}</span>
+          {suggestion.modelId ? (
+            <button
+              type="button"
+              data-testid="capability-suggestion-switch"
+              onClick={() => onSelectModel(suggestion.modelId!)}
+            >
+              切换
+            </button>
+          ) : (
+            <button
+              type="button"
+              data-testid="capability-suggestion-configure"
+              onClick={onOpenTools}
+            >
+              检查工具
+            </button>
+          )}
+        </div>
+      )}
     </div>
   );
 }
@@ -4308,6 +5027,7 @@ interface FailureDecision {
   current_model_id: string | null;
   recommended_model_id: string | null;
   auto_fallback_enabled: boolean;
+  detail?: string;
 }
 
 const FAILURE_CLASS_LABEL: Record<FailureClassification, string> = {
@@ -4327,7 +5047,7 @@ const FAILURE_CLASS_HINT: Record<FailureClassification, string> = {
   network: '请检查网络后重试。',
   content_filter: '内容策略问题，更换模型通常无效；建议改写后重试。',
   auth: '请到设置中检查 API Key。',
-  config_error: '请在「模型中心」编辑模型，确认模型名称 / endpoint ID 正确。',
+  config_error: '请在「模型中心」检查模型名、Base URL、接入点，以及该模型是否真的支持当前能力（如 Tools / 视觉）。',
   key_missing: '请在「模型中心」→ Provider 旁边的 ⚙ 重新输入 API Key，或重启后重新配置。',
   unknown: '可重试或切换模型。',
 };
@@ -4381,7 +5101,7 @@ function FailureDecisionCard({
           {decision.classification}
         </span>
       </div>
-      <div className="fdc-hint">{FAILURE_CLASS_HINT[decision.classification]}</div>
+      <div className="fdc-hint">{decision.detail ?? FAILURE_CLASS_HINT[decision.classification]}</div>
       <div className="decision-rationale fdc-rationale" data-testid="fdc-rationale">
         <div>
           <strong>失败来源</strong>

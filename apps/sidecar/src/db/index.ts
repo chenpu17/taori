@@ -119,6 +119,22 @@ CREATE INDEX IF NOT EXISTS cost_records_conv_idx ON cost_records(conversation_id
 CREATE INDEX IF NOT EXISTS cost_records_model_idx ON cost_records(model_id, created_at);
 CREATE INDEX IF NOT EXISTS cost_records_source_idx ON cost_records(source_type, source_id);
 
+CREATE TABLE IF NOT EXISTS run_events (
+  id TEXT PRIMARY KEY,
+  run_id TEXT NOT NULL,
+  conversation_id TEXT REFERENCES conversations(id) ON DELETE CASCADE,
+  message_id TEXT REFERENCES messages(id) ON DELETE SET NULL,
+  kind TEXT NOT NULL,
+  status TEXT NOT NULL,
+  label TEXT NOT NULL,
+  summary TEXT,
+  payload TEXT,
+  created_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS run_events_conv_idx ON run_events(conversation_id, created_at);
+CREATE INDEX IF NOT EXISTS run_events_run_idx ON run_events(run_id, created_at);
+CREATE INDEX IF NOT EXISTS run_events_msg_idx ON run_events(message_id, created_at);
+
 CREATE TABLE IF NOT EXISTS memories (
   id TEXT PRIMARY KEY,
   scope TEXT NOT NULL,

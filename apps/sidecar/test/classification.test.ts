@@ -73,6 +73,26 @@ describe('classifyProviderError (spec §7.5.2)', () => {
       'rate_limit',
     );
   });
+
+  it('400 with unsupported tools payload gives tool-specific config guidance', () => {
+    const err = Object.assign(new Error('Provider rejected request'), {
+      statusCode: 400,
+      responseBody: JSON.stringify({
+        error: {
+          message: 'This model does not support tools parameter',
+        },
+      }),
+    });
+    const classified = classifyProviderError({ err });
+    expect(classified.classification).toBe('config_error');
+    expect(classified.message).toContain('工具调用');
+    expect(classified.message).not.toContain('火山方舟');
+  });
+
+  it('generic 400/404 config errors are provider-neutral', () => {
+    expect(classifyProviderError({ status: 400 }).message).not.toContain('火山方舟');
+    expect(classifyProviderError({ status: 404 }).message).not.toContain('火山方舟');
+  });
 });
 
 describe('ModelsRepo demote/disable (spec §7.5.2)', () => {

@@ -15,6 +15,7 @@ import {
   conversations,
   messages,
   cost_records,
+  run_events,
   memories,
   prompt_templates,
   personas,
@@ -37,6 +38,9 @@ import type {
   Persona,
   PersonaCreate,
   PersonaUpdate,
+  RunEvent,
+  RunEventKind,
+  RunEventStatus,
 } from '@taori/shared';
 import {
   makeId,
@@ -53,6 +57,7 @@ type ProviderRow = typeof providers.$inferSelect;
 type ModelRow = typeof models.$inferSelect;
 type PromptTemplateRow = typeof prompt_templates.$inferSelect;
 type PersonaRow = typeof personas.$inferSelect;
+type RunEventRow = typeof run_events.$inferSelect;
 
 function toProvider(row: ProviderRow): Provider {
   return {
@@ -134,6 +139,32 @@ function toPersona(row: PersonaRow): Persona {
     prompt: row.prompt,
     created_at: row.created_at,
     updated_at: row.updated_at,
+  };
+}
+
+function toRunEvent(row: RunEventRow): RunEvent {
+  let payload: Record<string, unknown> | null = null;
+  if (row.payload) {
+    try {
+      const parsed = JSON.parse(row.payload);
+      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+        payload = parsed as Record<string, unknown>;
+      }
+    } catch {
+      payload = null;
+    }
+  }
+  return {
+    id: row.id,
+    run_id: row.run_id,
+    conversation_id: row.conversation_id,
+    message_id: row.message_id,
+    kind: row.kind as RunEventKind,
+    status: row.status as RunEventStatus,
+    label: row.label,
+    summary: row.summary,
+    payload,
+    created_at: row.created_at,
   };
 }
 
@@ -1061,6 +1092,64 @@ export class MessagesRepo {
       count += 1;
     }
     return count;
+  }
+}
+
+export interface RunEventInsert {
+  run_id: string;
+  conversation_id?: string | null;
+  message_id?: string | null;
+  kind: RunEventKind;
+  status: RunEventStatus;
+  label: string;
+  summary?: string | null;
+  payload?: Record<string, unknown> | null;
+}
+
+export class RunEventsRepo {
+  constructor(private db: Db) {}
+
+  append(input: RunEventInsert): RunEvent {
+    const row = this.db
+      .insert(run_events)
+      .values({
+        id: makeId('run_event'),
+        run_id: input.run_id,
+        conversation_id: input.conversation_id ?? null,
+        message_id: input.message_id ?? null,
+        kind: input.kind,
+        status: input.status,
+        label: input.label,
+        summary: input.summary ?? null,
+        payload: input.payload ? JSON.stringify(input.payload) : null,
+        created_at: Date.now(),
+      })
+      .returning()
+      .get();
+    return toRunEvent(row);
+  }
+
+  listByConversation(conversationId: string, limit = 100): RunEvent[] {
+    const safeLimit = Math.max(1, Math.min(500, Math.floor(limit)));
+    return this.db
+      .select()
+      .from(run_events)
+      .where(eq(run_events.conversation_id, conversationId))
+      .orderBy(desc(run_events.created_at))
+      .limit(safeLimit)
+      .all()
+      .reverse()
+      .map(toRunEvent);
+  }
+
+  listByRun(runId: string): RunEvent[] {
+    return this.db
+      .select()
+      .from(run_events)
+      .where(eq(run_events.run_id, runId))
+      .orderBy(asc(run_events.created_at))
+      .all()
+      .map(toRunEvent);
   }
 }
 

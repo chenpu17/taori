@@ -78,10 +78,12 @@ export function ModelCenter({
   onClose,
   onChanged,
   onReopenOnboarding,
+  embedded = false,
 }: {
   onClose: () => void;
   onChanged?: () => void;
   onReopenOnboarding: () => void;
+  embedded?: boolean;
 }): JSX.Element {
   const [activeTab, setActiveTab] = useState<ModelCapability>('chat');
   const [models, setModels] = useState<Model[]>([]);
@@ -127,11 +129,11 @@ export function ModelCenter({
   // Esc closes the page (a11y + matches Settings).
   useEffect(() => {
     const handler = (e: KeyboardEvent): void => {
-      if (e.key === 'Escape' && !importDrawer) onClose();
+      if (!embedded && e.key === 'Escape' && !importDrawer) onClose();
     };
     window.addEventListener('keydown', handler);
     return () => window.removeEventListener('keydown', handler);
-  }, [onClose, importDrawer]);
+  }, [onClose, importDrawer, embedded]);
 
   const providerById = useMemo(
     () => new Map(providers.map((p) => [p.id, p])),
@@ -263,6 +265,12 @@ export function ModelCenter({
     note?: string | null;
     classification?: string | null;
   } | null>(null);
+  const [modelProbe, setModelProbe] = useState<{
+    modelId: string;
+    status: 'running' | 'done';
+    ok?: boolean;
+    note?: string;
+  } | null>(null);
 
   const onTestProvider = async (p: Provider): Promise<void> => {
     setTestResult(null);
@@ -292,6 +300,38 @@ export function ModelCenter({
     }
   };
 
+  const onProbeModel = async (m: Model): Promise<void> => {
+    setModelProbe({ modelId: m.id, status: 'running' });
+    try {
+      const res = await api.testModel(m.id);
+      const probe = res.tools_probe;
+      const note = probe
+        ? probe.supported === true
+          ? `Tools 支持已确认${probe.updated ? '，已自动开启' : ''}`
+          : probe.supported === false
+            ? `Tools 不支持已确认${probe.updated ? '，已自动关闭' : ''}`
+            : `连通正常，但 Tools 探测不确定：${probe.message ?? probe.classification ?? '未知'}`
+        : res.ok
+          ? `连通正常：${res.latency_ms ?? 0}ms`
+          : res.error?.message ?? res.note ?? '探测失败';
+      setModelProbe({
+        modelId: m.id,
+        status: 'done',
+        ok: res.ok && (probe?.supported !== false),
+        note,
+      });
+      await refresh();
+      onChanged?.();
+    } catch (e) {
+      setModelProbe({
+        modelId: m.id,
+        status: 'done',
+        ok: false,
+        note: e instanceof Error ? e.message : String(e),
+      });
+    }
+  };
+
   const visibleModels = (modelsByCap.get(activeTab) ?? [])
     .slice()
     .sort((a, b) => a.fallback_order - b.fallback_order);
@@ -299,7 +339,7 @@ export function ModelCenter({
 
   return (
     <div
-      className={`model-center${editing ? ' is-editing' : ''}`}
+      className={`model-center${editing ? ' is-editing' : ''}${embedded ? ' model-center--embedded' : ''}`}
       data-testid="model-center"
     >
       <header className="model-center__header">
@@ -317,9 +357,11 @@ export function ModelCenter({
           >
             {syncing ? '同步中…' : '🔄 同步价格'}
           </button>
-          <button type="button" onClick={onClose} data-testid="model-center-close">
-            关闭
-          </button>
+          {!embedded && (
+            <button type="button" onClick={onClose} data-testid="model-center-close">
+              关闭
+            </button>
+          )}
         </div>
       </header>
 
@@ -554,6 +596,19 @@ export function ModelCenter({
                           >
                             {expandedModelId === m.id ? '收起健康' : '健康'}
                           </button>
+                          {(m.capability === 'chat' || m.capability === 'multimodal') && (
+                            <button
+                              type="button"
+                              onClick={() => void onProbeModel(m)}
+                              disabled={modelProbe?.modelId === m.id && modelProbe.status === 'running'}
+                              data-testid={`model-tools-probe-${m.id}`}
+                              title="真实请求探测该模型是否接受 OpenAI tools 参数"
+                            >
+                              {modelProbe?.modelId === m.id && modelProbe.status === 'running'
+                                ? '探测中'
+                                : '探测Tools'}
+                            </button>
+                          )}
                           <button
                             type="button"
                             onClick={() => setEditing(m)}
@@ -573,6 +628,15 @@ export function ModelCenter({
                         </div>
                       </td>
                     </tr>
+                    {modelProbe?.modelId === m.id && modelProbe.status === 'done' && (
+                      <tr className="model-health-row" data-testid={`model-tools-probe-result-${m.id}`}>
+                        <td colSpan={5}>
+                          <div className={`model-probe-result ${modelProbe.ok ? 'ok' : 'bad'}`}>
+                            {modelProbe.note}
+                          </div>
+                        </td>
+                      </tr>
+                    )}
                     {expandedModelId === m.id && (
                       <tr className="model-health-row" data-testid={`model-health-panel-${m.id}`}>
                         <td colSpan={5}>

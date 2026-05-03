@@ -157,6 +157,14 @@ function makeCostInsert(
   };
 }
 
+function isReservedInvalidBaseUrl(baseUrl: string): boolean {
+  try {
+    return new URL(baseUrl).hostname.toLowerCase().endsWith('.invalid');
+  } catch {
+    return false;
+  }
+}
+
 export async function runAnalyzer(
   deps: AnalyzerDeps,
   input: AnalyzerInput,
@@ -190,6 +198,22 @@ export async function runAnalyzer(
       ok: false,
       reason: 'no_key',
       message: 'keystore returned empty key',
+      costInsert: makeCostInsert(
+        conversationId,
+        pendingRoundtableId,
+        input.analyzerModel,
+        null,
+        null,
+        false,
+        0,
+      ),
+    };
+  }
+  if (isReservedInvalidBaseUrl(input.analyzerProvider.base_url)) {
+    return {
+      ok: false,
+      reason: 'upstream_error',
+      message: 'analyzer provider base_url uses reserved .invalid host',
       costInsert: makeCostInsert(
         conversationId,
         pendingRoundtableId,

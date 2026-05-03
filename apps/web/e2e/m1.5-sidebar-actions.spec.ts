@@ -123,20 +123,21 @@ test('model selector: switching the active model updates send body', async ({
   await expect(selector).toBeVisible();
   // Default mock-model is selected.
   await expect(selector.locator('option')).toHaveCount(2);
+  const newModel = ((await (await authedFetch(env, '/v1/models')).json()) as {
+    models: { id: string; model_name: string }[];
+  }).models.find((m) => m.model_name === 'mock-model-b');
+  expect(newModel?.id).toBeTruthy();
 
   // Capture the next /v1/chat request body.
   const reqPromise = page.waitForRequest((req) =>
     req.url().endsWith('/v1/chat') && req.method() === 'POST',
   );
-  await selector.selectOption({ label: 'Mock chat B' });
+  await selector.selectOption(newModel!.id);
   await sendMessage(page, 'hi from model B');
   const req = await reqPromise;
   const body = JSON.parse(req.postData() ?? '{}') as { model_id?: string };
   expect(body.model_id).toBeTruthy();
   // It should not be the default seed model — we picked the new one.
-  const newModel = ((await (await authedFetch(env, '/v1/models')).json()) as {
-    models: { id: string; model_name: string }[];
-  }).models.find((m) => m.model_name === 'mock-model-b');
   expect(body.model_id).toBe(newModel?.id);
 });
 

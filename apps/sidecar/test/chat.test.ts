@@ -3,7 +3,7 @@ import { buildServer } from '../src/server.js';
 import { openDb } from '../src/db/index.js';
 import { ControlClient } from '../src/control/client.js';
 import { MemoryStore } from '../src/keystore.js';
-import { ConversationsRepo, MessagesRepo, ProvidersRepo, ModelsRepo } from '../src/db/repos/index.js';
+import { ConversationsRepo, MessagesRepo, ProvidersRepo, ModelsRepo, RunEventsRepo } from '../src/db/repos/index.js';
 import type { FastifyInstance } from 'fastify';
 import os from 'node:os';
 import path from 'node:path';
@@ -69,6 +69,39 @@ describe('chat M1.2', () => {
     expect(msgs[1]!.role).toBe('assistant');
     expect(msgs[1]!.status).toBe('complete');
     expect(msgs[1]!.content).toContain('hello taori');
+  });
+
+  it('mock-path: records a run timeline for the chat turn', async () => {
+    const res = await app.inject({
+      method: 'POST',
+      url: '/v1/chat',
+      headers: { authorization: `Bearer ${bearer}`, 'content-type': 'application/json' },
+      payload: { model_id: 'mdl_unknown', messages: [{ role: 'user', content: 'timeline please' }] },
+    });
+    expect(res.statusCode).toBe(200);
+    const meta = JSON.parse(res.payload.split('\n').find((l) => l.startsWith('8:'))!.slice(2))[0] as {
+      conversation_id: string;
+      message_id: string;
+    };
+    const events = new RunEventsRepo(db).listByConversation(meta.conversation_id);
+    expect(events.map((e) => e.kind)).toEqual(expect.arrayContaining([
+      'turn.started',
+      'context.snapshot',
+      'model.started',
+      'model.completed',
+      'cost.recorded',
+      'turn.completed',
+    ]));
+    expect(new Set(events.map((e) => e.run_id)).size).toBe(1);
+
+    const routeRes = await app.inject({
+      method: 'GET',
+      url: `/v1/conversations/${meta.conversation_id}/run-events`,
+      headers: { authorization: `Bearer ${bearer}` },
+    });
+    expect(routeRes.statusCode).toBe(200);
+    const body = JSON.parse(routeRes.payload) as { data: { events: Array<{ kind: string }> } };
+    expect(body.data.events.some((e) => e.kind === 'turn.completed')).toBe(true);
   });
 
   it('reuses existing conversation_id on follow-up turn', async () => {

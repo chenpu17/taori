@@ -80,6 +80,48 @@ describe('M2.3 capability bus + file_read', () => {
     expect(fr?.source).toBe('builtin');
   });
 
+  it('session tool policy overrides effective tools and blocks invoke', async () => {
+    const convId = 'conv_policy';
+    const policyRes = await app.inject({
+      method: 'PUT',
+      url: `/v1/tools/${encodeURIComponent('builtin.file_read')}/session-enabled`,
+      headers: { authorization: `Bearer ${bearer}`, 'content-type': 'application/json' },
+      payload: JSON.stringify({ conversation_id: convId, enabled: false }),
+    });
+    expect(policyRes.statusCode).toBe(200);
+    const policyBody = policyRes.json() as {
+      data: { name: string; session_enabled: boolean | null; effective_enabled: boolean };
+    };
+    expect(policyBody.data.name).toBe('builtin.file_read');
+    expect(policyBody.data.session_enabled).toBe(false);
+    expect(policyBody.data.effective_enabled).toBe(false);
+
+    const effectiveRes = await app.inject({
+      method: 'GET',
+      url: `/v1/tools/effective?conversation_id=${convId}`,
+      headers: { authorization: `Bearer ${bearer}` },
+    });
+    expect(effectiveRes.statusCode).toBe(200);
+    const effectiveBody = effectiveRes.json() as {
+      data: Array<{ name: string; session_enabled: boolean | null; effective_enabled: boolean }>;
+    };
+    const row = effectiveBody.data.find((tool) => tool.name === 'builtin.file_read');
+    expect(row?.session_enabled).toBe(false);
+    expect(row?.effective_enabled).toBe(false);
+
+    const invokeRes = await invoke(app, {
+      name: 'builtin.file_read',
+      input: { file_id: 'file_x' },
+      conversation_id: convId,
+    });
+    const invokeBody = invokeRes.json() as {
+      data: { ok: boolean; error: { classification: string; message: string } };
+    };
+    expect(invokeBody.data.ok).toBe(false);
+    expect(invokeBody.data.error.classification).toBe('permission_denied');
+    expect(invokeBody.data.error.message).toContain('this conversation');
+  });
+
   it('invoke file_read returns text and writes cost_record', async () => {
     const filePath = path.join(tmpDir, 'sample.txt');
     fs.writeFileSync(filePath, 'hello taori');

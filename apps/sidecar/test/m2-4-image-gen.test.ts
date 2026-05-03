@@ -274,7 +274,7 @@ describe('M2.4 — image_generate via /v1/tools/invoke', () => {
     expect(body.error?.message).toMatch(/opaque token|invalid/);
   });
 
-  it('does not route natural-language image requests to picker for non-tool chat models', async () => {
+  it('routes natural-language image requests to picker for non-tool chat models', async () => {
     const models = new ModelsRepo(db);
     const providers = new ProvidersRepo(db);
     const provider = providers.list()[0]!;
@@ -292,7 +292,6 @@ describe('M2.4 — image_generate via /v1/tools/invoke', () => {
       headers: {
         authorization: `Bearer ${bearer}`,
         'content-type': 'application/json',
-        'x-test-force-classification': 'network',
       },
       payload: {
         model_id: nonToolChat.id,
@@ -300,8 +299,8 @@ describe('M2.4 — image_generate via /v1/tools/invoke', () => {
       },
     });
     expect(res.statusCode).toBe(200);
-    expect(res.payload).not.toContain('"type":"capability_route"');
-    expect(res.payload).toContain('"message_id":"msg_');
+    expect(res.payload).toContain('"type":"capability_route"');
+    expect(res.payload).toContain('"prompt":"生成机器人的图片"');
   });
 
   it('does not route natural-language image requests to picker for tool-capable chat models', async () => {
@@ -589,6 +588,53 @@ describe('M2.4 — image_generate via /v1/tools/invoke', () => {
     }
   });
 
+  it('auto-disables Tools when a Huawei MaaS chat endpoint rejects the tools payload', async () => {
+    const models = new ModelsRepo(db);
+    const providers = new ProvidersRepo(db);
+    const huawei = providers.create({
+      name: 'Huawei MaaS',
+      type: 'huawei_maas',
+      base_url: 'https://huawei.example.com/openai/v1',
+      api_key: 'hw-test-key',
+    });
+    await keystore.write(huawei.api_key_ref!, 'hw-test-key');
+    const huaweiChat = models.create({
+      provider_id: huawei.id,
+      model_name: 'kimi-k2.6',
+      capability: 'chat',
+      display_name: 'Kimi K2.6',
+      supports_tools: true,
+    });
+
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async (_url, init) => {
+      const rawBody = typeof init?.body === 'string' ? init.body : String(init?.body ?? '{}');
+      const body = JSON.parse(rawBody) as { tools?: unknown[] };
+      expect(body.tools).toBeDefined();
+      return new Response(
+        JSON.stringify({ error: { message: 'This model does not support tools parameter' } }),
+        { status: 400, headers: { 'content-type': 'application/json' } },
+      );
+    });
+
+    try {
+      const res = await app.inject({
+        method: 'POST',
+        url: '/v1/chat',
+        headers: { authorization: `Bearer ${bearer}`, 'content-type': 'application/json' },
+        payload: {
+          model_id: huaweiChat.id,
+          messages: [{ role: 'user', content: '你互联网检索下 azure app testing 的信息' }],
+        },
+      });
+      expect(res.statusCode).toBe(200);
+      expect(res.payload).toContain('"type":"failure_decision"');
+      expect(res.payload).toContain('工具调用');
+      expect(models.get(huaweiChat.id)?.supports_tools).toBe(false);
+    } finally {
+      fetchSpy.mockRestore();
+    }
+  });
+
   it('normalizes Huawei MaaS data URI image responses before persisting', async () => {
     const providers = new ProvidersRepo(db);
     const models = new ModelsRepo(db);
@@ -666,5 +712,20 @@ describe('M2.4 — image_generate via /v1/tools/invoke', () => {
     expect(res.statusCode).toBe(200);
     expect(res.payload).toContain('"type":"capability_route"');
     expect(res.payload).toContain('"prompt":"a robot"');
+  });
+
+  it('routes natural image intents to picker when the selected chat model cannot use tools', async () => {
+    const res = await app.inject({
+      method: 'POST',
+      url: '/v1/chat',
+      headers: { authorization: `Bearer ${bearer}`, 'content-type': 'application/json' },
+      payload: {
+        model_id: chatModelId,
+        messages: [{ role: 'user', content: '能否帮我生成一张图片来说明下' }],
+      },
+    });
+    expect(res.statusCode).toBe(200);
+    expect(res.payload).toContain('"type":"capability_route"');
+    expect(res.payload).toContain('能否帮我生成一张图片来说明下');
   });
 });

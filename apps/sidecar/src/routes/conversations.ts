@@ -14,9 +14,19 @@
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { TaoriError } from '@taori/shared';
-import { ConversationsRepo, MessagesRepo, FilesRepo } from '../db/repos/index.js';
+import {
+  ConversationsRepo,
+  MessagesRepo,
+  FilesRepo,
+  CostsRepo,
+  ModelsRepo,
+  MemoriesRepo,
+  PersonasRepo,
+  RunEventsRepo,
+} from '../db/repos/index.js';
 import type { BuildServerArgs } from '../server.js';
 import fs from 'node:fs/promises';
+import { readSessionToolEnabled } from './tools.js';
 
 const PatchSchema = z
   .object({
@@ -43,10 +53,94 @@ export function registerConversationsRoute(
   const convRepo = new ConversationsRepo(deps.db);
   const msgRepo = new MessagesRepo(deps.db);
   const filesRepo = new FilesRepo(deps.db);
+  const costsRepo = new CostsRepo(deps.db);
+  const modelsRepo = new ModelsRepo(deps.db);
+  const memoriesRepo = new MemoriesRepo(deps.db);
+  const personasRepo = new PersonasRepo(deps.db);
+  const runEventsRepo = new RunEventsRepo(deps.db);
 
   app.get<{ Querystring: { q?: string } }>('/v1/conversations', async (req) => {
     return { conversations: convRepo.list({ q: req.query.q }) };
   });
+
+  app.get<{ Params: { id: string } }>(
+    '/v1/conversations/:id/profile',
+    async (req) => {
+      const conv = convRepo.get(req.params.id);
+      if (!conv) {
+        throw new TaoriError({
+          code: 'not_found',
+          message: `Conversation ${req.params.id} not found`,
+        });
+      }
+      const rows = msgRepo.listByConversation(req.params.id);
+      const lastAssistant = [...rows].reverse().find((m) => m.role === 'assistant' && m.model_id);
+      const activeModel = lastAssistant?.model_id ? modelsRepo.get(lastAssistant.model_id) : null;
+      const personaId = memoriesRepo.get('session', req.params.id, 'active_persona_id');
+      const persona = personaId ? personasRepo.get(personaId) : null;
+      const effectiveTools = (deps.bus?.list() ?? []).map((tool) => {
+        const sessionEnabled = readSessionToolEnabled(memoriesRepo, req.params.id, tool.name);
+        return {
+          ...tool,
+          session_enabled: sessionEnabled,
+          effective_enabled: tool.enabled && sessionEnabled !== false,
+        };
+      });
+      const attachmentCount = rows.reduce((sum, row) => {
+        if (!row.attachments) return sum;
+        try {
+          const parsed = JSON.parse(row.attachments);
+          return sum + (Array.isArray(parsed) ? parsed.length : 0);
+        } catch {
+          return sum;
+        }
+      }, 0);
+      const enabledToolCount = effectiveTools.filter((tool) => tool.effective_enabled).length;
+      const cost = costsRepo.realtime(req.params.id);
+      return {
+        ok: true,
+        data: {
+          conversation_id: conv.id,
+          title: conv.title,
+          active_model_id: activeModel?.id ?? null,
+          active_model_label: activeModel?.display_name ?? activeModel?.model_name ?? null,
+          active_persona_id: persona?.id ?? null,
+          active_persona_name: persona?.name ?? null,
+          effective_tools: effectiveTools,
+          context_sources: [
+            {
+              type: 'model',
+              label: activeModel?.display_name ?? activeModel?.model_name ?? '由当前选择决定',
+              scope: activeModel ? 'session' : 'request',
+              active: Boolean(activeModel),
+            },
+            {
+              type: 'persona',
+              label: persona?.name ?? '未绑定 Persona',
+              scope: persona ? 'session' : 'default',
+              active: Boolean(persona),
+            },
+            {
+              type: 'tool_policy',
+              label: `${enabledToolCount}/${effectiveTools.length} 个工具可用`,
+              scope: 'session',
+              active: enabledToolCount > 0,
+            },
+            {
+              type: 'attachment',
+              label: attachmentCount > 0 ? `${attachmentCount} 个历史附件` : '无历史附件',
+              scope: 'session',
+              active: attachmentCount > 0,
+            },
+          ],
+          cost: {
+            current_conversation_usd: cost.current_conversation_usd,
+            current_conversation_calls: cost.current_conversation_calls,
+          },
+        },
+      };
+    },
+  );
 
   app.get<{ Params: { id: string } }>(
     '/v1/conversations/:id/messages',
@@ -84,6 +178,28 @@ export function registerConversationsRoute(
         };
       });
       return { conversation: conv, messages };
+    },
+  );
+
+  app.get<{ Params: { id: string }; Querystring: { limit?: string } }>(
+    '/v1/conversations/:id/run-events',
+    async (req) => {
+      const conv = convRepo.get(req.params.id);
+      if (!conv) {
+        throw new TaoriError({
+          code: 'not_found',
+          message: `Conversation ${req.params.id} not found`,
+        });
+      }
+      const rawLimit = Number(req.query.limit ?? 120);
+      const limit = Number.isFinite(rawLimit) ? rawLimit : 120;
+      return {
+        ok: true,
+        data: {
+          conversation_id: req.params.id,
+          events: runEventsRepo.listByConversation(req.params.id, limit),
+        },
+      };
     },
   );
 

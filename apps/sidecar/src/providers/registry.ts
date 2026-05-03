@@ -66,6 +66,58 @@ function messageFromError(err: unknown): string | undefined {
   return typeof message === 'string' ? message : undefined;
 }
 
+function stringFromUnknown(value: unknown): string | undefined {
+  if (typeof value === 'string') return value;
+  if (!isRecord(value)) return undefined;
+  const error = value.error;
+  if (isRecord(error)) {
+    const message = error.message;
+    if (typeof message === 'string') return message;
+  }
+  const message = value.message;
+  if (typeof message === 'string') return message;
+  const detail = value.detail;
+  if (typeof detail === 'string') return detail;
+  return undefined;
+}
+
+function responseTextCandidates(err: unknown): string[] {
+  if (!isRecord(err)) return [];
+  const out: string[] = [];
+  const responseBody = err.responseBody;
+  if (typeof responseBody === 'string') {
+    out.push(responseBody);
+    try {
+      const parsed = JSON.parse(responseBody) as unknown;
+      const nested = stringFromUnknown(parsed);
+      if (nested) out.push(nested);
+    } catch {
+      /* non-JSON upstream body */
+    }
+  }
+  const data = err.data;
+  const dataText = stringFromUnknown(data);
+  if (dataText) out.push(dataText);
+  return out;
+}
+
+export function isToolPayloadUnsupportedError(err: unknown): boolean {
+  const text = errorCandidates(err)
+    .flatMap((candidate) => [
+      messageFromError(candidate),
+      ...responseTextCandidates(candidate),
+    ])
+    .filter((message): message is string => Boolean(message))
+    .join('\n');
+  if (!text) return false;
+  return (
+    /(?:tools?|tool_calls?|function[_\s-]?call(?:ing)?|functions?)\b[\s\S]{0,120}\b(?:unsupported|not supported|does not support|not support|invalid|unknown|unrecognized|not allowed|forbidden|extra_forbidden|extra inputs are not permitted)/i.test(text) ||
+    /\b(?:unsupported|not supported|does not support|not support|invalid|unknown|unrecognized|not allowed|forbidden|extra_forbidden|extra inputs are not permitted)\b[\s\S]{0,120}\b(?:tools?|tool_calls?|function[_\s-]?call(?:ing)?|functions?)/i.test(text) ||
+    /(?:不支持|未知|无效|非法|不允许)[\s\S]{0,80}(?:tools?|tool_calls?|工具|函数调用|function)/i.test(text) ||
+    /(?:tools?|tool_calls?|工具|函数调用|function)[\s\S]{0,80}(?:不支持|未知|无效|非法|不允许)/i.test(text)
+  );
+}
+
 async function timedFetch(
   url: string,
   init: RequestInit,
@@ -85,7 +137,10 @@ export function classifyProviderError(args: {
 }): { classification: ErrorClassification; message: string } {
   const candidates = errorCandidates(args.err);
   const messages = candidates
-    .map(messageFromError)
+    .flatMap((candidate) => [
+      messageFromError(candidate),
+      ...responseTextCandidates(candidate),
+    ])
     .filter((message): message is string => Boolean(message));
 
   for (const candidate of candidates) {
@@ -136,19 +191,25 @@ export function classifyProviderError(args: {
     };
   }
   if (status === 400) {
+    if (isToolPayloadUnsupportedError(args.err)) {
+      return {
+        classification: 'config_error',
+        message:
+          'Provider returned 400 — 当前模型不支持工具调用（web search / 图像生成等 tools 参数）。' +
+          '请换用支持 tools 的聊天模型，或在模型中心关闭该模型的 Tools 能力。',
+      };
+    }
     return {
       classification: 'config_error',
       message:
-        'Provider returned 400 — 模型名称或接入端 ID 有误；' +
-        '火山方舟用户请确认使用正确的 endpoint ID（如 ep-xxx）或已在控制台激活该模型',
+        'Provider returned 400 — 请求被供应商拒绝；常见原因是模型名称、接入点、请求参数或该模型不支持当前能力。请检查模型配置与供应商返回详情。',
     };
   }
   if (status === 404) {
     return {
       classification: 'config_error',
       message:
-        'Provider returned 404 — 接入点不存在；' +
-        '火山方舟用户请到控制台「模型广场」开通该模型的使用权限，或改用 endpoint ID（ep-xxx）作为模型名称',
+        'Provider returned 404 — 模型或接入点不存在，或当前 API Key 无权访问该模型。请检查供应商、Base URL 与模型名。',
     };
   }
   if (status && status >= 500) {
