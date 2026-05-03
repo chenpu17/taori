@@ -543,4 +543,103 @@ describe('providers + models', () => {
     expect(res.statusCode).toBe(400);
     expect(res.json().message).toMatch(/every model/i);
   });
+
+  it('PATCH /v1/models/:id enabled=false clears stale default binding', async () => {
+    const pr = await app.inject({
+      method: 'POST',
+      url: '/v1/providers',
+      headers: authJson,
+      payload: {
+        name: 'disable-default-provider',
+        type: 'openai',
+        base_url: 'https://api.openai.com/v1',
+        api_key: 'sk-test-disable-default',
+      },
+    });
+    expect(pr.statusCode).toBe(201);
+    const provider = pr.json() as { id: string };
+    const mr = await app.inject({
+      method: 'POST',
+      url: '/v1/models',
+      headers: authJson,
+      payload: {
+        provider_id: provider.id,
+        model_name: 'disable-default-model',
+        capability: 'chat',
+        display_name: 'Disable default model',
+        is_default_for: 'chat',
+        enabled: true,
+      },
+    });
+    expect(mr.statusCode).toBe(201);
+    const model = mr.json() as { id: string; is_default_for: string | null };
+    expect(model.is_default_for).toBe('chat');
+
+    const patch = await app.inject({
+      method: 'PATCH',
+      url: `/v1/models/${model.id}`,
+      headers: authJson,
+      payload: { enabled: false },
+    });
+    expect(patch.statusCode).toBe(200);
+    const updated = patch.json() as { enabled: boolean; is_default_for: string | null };
+    expect(updated.enabled).toBe(false);
+    expect(updated.is_default_for).toBeNull();
+  });
+
+  it('rejects assigning disabled models as defaults', async () => {
+    const pr = await app.inject({
+      method: 'POST',
+      url: '/v1/providers',
+      headers: authJson,
+      payload: {
+        name: 'disabled-default-provider',
+        type: 'openai',
+        base_url: 'https://api.openai.com/v1',
+        api_key: 'sk-test-disabled-default',
+      },
+    });
+    expect(pr.statusCode).toBe(201);
+    const provider = pr.json() as { id: string };
+
+    const createDisabledDefault = await app.inject({
+      method: 'POST',
+      url: '/v1/models',
+      headers: authJson,
+      payload: {
+        provider_id: provider.id,
+        model_name: 'disabled-default-on-create',
+        capability: 'chat',
+        display_name: 'Disabled default on create',
+        is_default_for: 'chat',
+        enabled: false,
+      },
+    });
+    expect(createDisabledDefault.statusCode).toBe(400);
+    expect(createDisabledDefault.json().message).toMatch(/disabled models cannot be set as default/i);
+
+    const disabledModel = await app.inject({
+      method: 'POST',
+      url: '/v1/models',
+      headers: authJson,
+      payload: {
+        provider_id: provider.id,
+        model_name: 'disabled-default-existing',
+        capability: 'chat',
+        display_name: 'Disabled default existing',
+        enabled: false,
+      },
+    });
+    expect(disabledModel.statusCode).toBe(201);
+    const model = disabledModel.json() as { id: string };
+
+    const setDefault = await app.inject({
+      method: 'POST',
+      url: `/v1/models/${model.id}/default`,
+      headers: authJson,
+      payload: { capability: 'chat' },
+    });
+    expect(setDefault.statusCode).toBe(400);
+    expect(setDefault.json().message).toMatch(/disabled models cannot be set as default/i);
+  });
 });

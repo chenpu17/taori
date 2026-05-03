@@ -78,11 +78,17 @@ export function registerModelsRoute(
         message: `Provider ${parsed.data.provider_id} not found`,
       });
     }
+    if (parsed.data.enabled === false && parsed.data.is_default_for) {
+      throw new TaoriError({
+        code: 'validation_error',
+        message: 'Disabled models cannot be set as default',
+      });
+    }
     try {
       const model = repo.create(parsed.data);
       // If is_default_for was set on creation, promote properly so any
       // pre-existing defaults get demoted in one transaction.
-      if (parsed.data.is_default_for) {
+      if (parsed.data.is_default_for && model.enabled) {
         repo.setDefaultFor(model.id, parsed.data.is_default_for);
       }
       reply.code(201);
@@ -118,6 +124,12 @@ export function registerModelsRoute(
         });
       }
       if (parsed.data.is_default_for !== undefined && parsed.data.is_default_for !== null) {
+        if (!updated.enabled) {
+          throw new TaoriError({
+            code: 'validation_error',
+            message: 'Disabled models cannot be set as default',
+          });
+        }
         return repo.setDefaultFor(updated.id, parsed.data.is_default_for);
       }
       return updated;
@@ -134,13 +146,20 @@ export function registerModelsRoute(
           message: 'Body must be { capability: ... }',
         });
       }
-      const updated = repo.setDefaultFor(req.params.id, body.data.capability);
-      if (!updated) {
+      const model = repo.get(req.params.id);
+      if (!model) {
         throw new TaoriError({
           code: 'not_found',
           message: `Model ${req.params.id} not found`,
         });
       }
+      if (!model.enabled) {
+        throw new TaoriError({
+          code: 'validation_error',
+          message: 'Disabled models cannot be set as default',
+        });
+      }
+      const updated = repo.setDefaultFor(model.id, body.data.capability);
       return updated;
     },
   );

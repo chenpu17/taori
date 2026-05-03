@@ -429,6 +429,27 @@ async function cleanupPromptAssets(env, assets) {
   }
 }
 
+async function cleanupTempModel(env, model) {
+  if (!model?.id) return;
+  await authedFetch(env, `/v1/models/${model.id}`, { method: 'DELETE' }).catch(() => null);
+}
+
+async function createTempManagedModel(env, caps) {
+  const providerId = caps.toolChat.provider_id;
+  if (!providerId) return null;
+  return postJson(env, '/v1/models', {
+    provider_id: providerId,
+    model_name: `${RUN_ID}-managed-toggle-probe`,
+    display_name: `${RUN_ID} 管理验证模型`,
+    capability: 'chat',
+    enabled: false,
+    price_input_per_1m: 0,
+    price_output_per_1m: 0,
+    supports_tools: false,
+    supports_vision: false,
+  }).catch(() => null);
+}
+
 async function applyTemplateFromUi(page, assets) {
   await page.getByTestId('open-template-picker').click();
   await expectVisible(page.getByTestId('template-picker-overlay'), 'template picker', 10_000);
@@ -497,6 +518,7 @@ async function assertCostDashboardTab(page, testId, label) {
 async function runJourney({ env, caps }) {
   fs.mkdirSync(ARTIFACT_DIR, { recursive: true });
   let promptAssets = null;
+  let tempManagedModel = null;
   const browser = await chromium.launch({ headless: process.env.HEADED !== '1' });
   const context = await browser.newContext({
     viewport: { width: 1440, height: 1000 },
@@ -552,6 +574,7 @@ async function runJourney({ env, caps }) {
     events.steps.push({ name: 'provider_labels_in_active_selector', ok: true, option_count: optionTexts.length });
 
     promptAssets = await createPromptAssetsFromUi(page, env);
+    tempManagedModel = await createTempManagedModel(env, caps);
     events.steps.push({
       name: 'create_prompt_assets_from_ui',
       ok: true,
@@ -789,6 +812,30 @@ async function runJourney({ env, caps }) {
     await expectVisible(page.getByTestId('control-center'), 'control center for models', 10_000);
     await expectVisible(page.getByTestId('model-center'), 'model center', 20_000);
     await expectVisible(page.getByTestId('model-center-providers'), 'model center providers', 20_000);
+    if (tempManagedModel) {
+      await page.getByTestId('model-center-tab-chat').click();
+      await page.getByTestId('model-center-search').fill(RUN_ID);
+      await page.getByTestId('model-center-status-filter').selectOption('disabled');
+      await expectVisible(page.getByTestId(`model-row-${tempManagedModel.id}`), 'temporary disabled model row', 20_000);
+      await page.getByTestId(`model-row-select-${tempManagedModel.id}`).check();
+      await page.getByTestId('model-center-bulk-enable').click();
+      await page.getByTestId('model-center-status-filter').selectOption('enabled');
+      await expectVisible(page.getByTestId(`model-row-${tempManagedModel.id}`), 'temporary enabled model row', 20_000);
+      await page.getByTestId(`provider-chip-library-${caps.toolChat.provider_id}`).click();
+      await expectVisible(page.getByTestId('import-drawer'), 'provider model library drawer', 20_000);
+      await page.getByTestId('import-drawer-refresh').click();
+      await expectHidden(page.getByTestId('import-drawer-err'), 'provider library refresh error', 20_000);
+      await expectVisible(page.getByTestId('import-drawer-list'), 'provider library model list', 30_000);
+      await screenshot(page, '13b-model-library-refresh');
+      await expectNoLayoutOverflow(page, 'model library refresh');
+      await page.locator('[data-testid="import-drawer"] button[aria-label="关闭"]').click();
+      await expectHidden(page.getByTestId('import-drawer'), 'provider model library drawer after close', 10_000);
+      events.steps.push({
+        name: 'model_management_library_refresh_and_bulk_toggle',
+        ok: true,
+        provider_id: caps.toolChat.provider_id,
+      });
+    }
     await screenshot(page, '13-model-center');
     await expectNoLayoutOverflow(page, 'model center');
     await page.getByTestId('settings-close').click();
@@ -849,6 +896,7 @@ async function runJourney({ env, caps }) {
     return events;
   } finally {
     await cleanupPromptAssets(env, promptAssets);
+    await cleanupTempModel(env, tempManagedModel);
     fs.writeFileSync(
       path.join(ARTIFACT_DIR, 'events.json'),
       JSON.stringify(events, null, 2),

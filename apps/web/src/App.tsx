@@ -1,6 +1,7 @@
 import { useChat } from '@ai-sdk/react';
 import type { Message as AiMessage } from '@ai-sdk/react';
 import { useEffect, useLayoutEffect, useState, useCallback, useRef, useMemo } from 'react';
+import { createPortal } from 'react-dom';
 import { getSidecarEndpoint, authedFetch } from './sidecar.js';
 import { api } from './api.js';
 import { Onboarding } from './Onboarding.js';
@@ -2539,7 +2540,8 @@ function ChatPanel({
   useEffect(() => {
     if (!lastFailureMsgId || !failureByMsg[lastFailureMsgId]) return;
     enqueueTip('fallback');
-  }, [enqueueTip, failureByMsg, lastFailureMsgId]);
+    return scrollMessagesToLatest();
+  }, [enqueueTip, failureByMsg, lastFailureMsgId, scrollMessagesToLatest]);
 
   useEffect(() => {
     if (!realtime || realtime.month_usd < DISCOVERABLE_COST_TIP_THRESHOLD_USD) {
@@ -2627,6 +2629,7 @@ function ChatPanel({
           setFailureByMsg((prev) =>
             prev[m.id] ? prev : { ...prev, [m.id]: decision },
           );
+          setLastFailureMsgId(m.id);
         }
       }
     }
@@ -5113,8 +5116,31 @@ function FailureDecisionCard({
     : decision.classification === 'content_filter'
       ? '这是内容策略问题，系统不会推荐换模型绕过。'
       : '当前没有可用推荐模型，先按分类提示处理。';
-  return (
+  const [useMobilePortal, setUseMobilePortal] = useState(() =>
+    typeof window === 'undefined' ? false : window.matchMedia('(max-width: 760px)').matches,
+  );
+  const cardRef = useRef<HTMLDivElement | null>(null);
+  useEffect(() => {
+    const media = window.matchMedia('(max-width: 760px)');
+    const update = () => setUseMobilePortal(media.matches);
+    update();
+    media.addEventListener('change', update);
+    return () => media.removeEventListener('change', update);
+  }, []);
+  useEffect(() => {
+    const target = cardRef.current?.querySelector('[data-testid="fdc-switch"]') ?? cardRef.current;
+    if (target instanceof HTMLElement) {
+      target.scrollIntoView({ block: 'end', inline: 'nearest', behavior: 'auto' });
+      const timer = window.setTimeout(() => {
+        target.scrollIntoView({ block: 'end', inline: 'nearest', behavior: 'auto' });
+      }, 50);
+      return () => window.clearTimeout(timer);
+    }
+    return undefined;
+  }, [decision.classification, decision.current_model_id, decision.recommended_model_id]);
+  const card = (
     <div
+      ref={cardRef}
       className={`failure-decision-card cls-${decision.classification}`}
       role="alert"
       data-testid="failure-decision-card"
@@ -5178,4 +5204,5 @@ function FailureDecisionCard({
       </div>
     </div>
   );
+  return useMobilePortal ? createPortal(card, document.body) : card;
 }

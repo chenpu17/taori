@@ -99,6 +99,10 @@ export function ModelCenter({
     capability: ModelCapability;
     providerId: string | null;
   } | null>(null);
+  const [modelQuery, setModelQuery] = useState('');
+  const [providerFilter, setProviderFilter] = useState<string>('all');
+  const [statusFilter, setStatusFilter] = useState<'all' | 'enabled' | 'disabled'>('all');
+  const [selectedModelIds, setSelectedModelIds] = useState<Set<string>>(new Set());
 
   const refresh = async (): Promise<void> => {
     setLoading(true);
@@ -139,6 +143,22 @@ export function ModelCenter({
     () => new Map(providers.map((p) => [p.id, p])),
     [providers],
   );
+
+  const providerStats = useMemo(() => {
+    const stats = new Map<string, { total: number; enabled: number; disabled: number }>();
+    for (const provider of providers) {
+      stats.set(provider.id, { total: 0, enabled: 0, disabled: 0 });
+    }
+    for (const model of models) {
+      if (!model.provider_id) continue;
+      const row = stats.get(model.provider_id) ?? { total: 0, enabled: 0, disabled: 0 };
+      row.total += 1;
+      if (model.enabled) row.enabled += 1;
+      else row.disabled += 1;
+      stats.set(model.provider_id, row);
+    }
+    return stats;
+  }, [models, providers]);
 
   const modelsByCap = useMemo(() => {
     const out = new Map<ModelCapability, Model[]>();
@@ -332,10 +352,72 @@ export function ModelCenter({
     }
   };
 
-  const visibleModels = (modelsByCap.get(activeTab) ?? [])
+  useEffect(() => {
+    setSelectedModelIds(new Set());
+  }, [activeTab, modelQuery, providerFilter, statusFilter]);
+
+  const activeTabModels = (modelsByCap.get(activeTab) ?? [])
     .slice()
     .sort((a, b) => a.fallback_order - b.fallback_order);
+  const query = modelQuery.trim().toLowerCase();
+  const visibleModels = activeTabModels.filter((m) => {
+    if (providerFilter !== 'all' && m.provider_id !== providerFilter) return false;
+    if (statusFilter === 'enabled' && !m.enabled) return false;
+    if (statusFilter === 'disabled' && m.enabled) return false;
+    if (!query) return true;
+    const provider = m.provider_id ? providerById.get(m.provider_id) : null;
+    const text = [
+      m.alias,
+      m.display_name,
+      m.model_name,
+      provider?.name,
+      provider?.type,
+    ]
+      .filter(Boolean)
+      .join(' ')
+      .toLowerCase();
+    return text.includes(query);
+  });
   const tab = CAPABILITY_TABS.find((t) => t.id === activeTab)!;
+  const activeEnabledCount = activeTabModels.filter((m) => m.enabled).length;
+  const activeDisabledCount = activeTabModels.length - activeEnabledCount;
+  const selectedVisibleIds = visibleModels
+    .map((m) => m.id)
+    .filter((id) => selectedModelIds.has(id));
+
+  const toggleSelectModel = (id: string): void => {
+    setSelectedModelIds((current) => {
+      const next = new Set(current);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  };
+
+  const toggleSelectAllVisible = (): void => {
+    setSelectedModelIds((current) => {
+      const next = new Set(current);
+      const allSelected = visibleModels.length > 0 && visibleModels.every((m) => next.has(m.id));
+      for (const model of visibleModels) {
+        if (allSelected) next.delete(model.id);
+        else next.add(model.id);
+      }
+      return next;
+    });
+  };
+
+  const onBulkEnabled = async (enabled: boolean): Promise<void> => {
+    const ids = selectedVisibleIds;
+    if (ids.length === 0) return;
+    try {
+      await Promise.all(ids.map((id) => api.updateModel(id, { enabled })));
+      setSelectedModelIds(new Set());
+      await refresh();
+      onChanged?.();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    }
+  };
 
   return (
     <div
@@ -345,7 +427,7 @@ export function ModelCenter({
       <header className="model-center__header">
         <div>
           <h2>模型中心</h2>
-          <p className="hint">按能力分组管理你的模型阵列；价格、默认、启用状态一目了然。</p>
+          <p className="hint">按 Provider 与能力管理模型库；先刷新供应商清单，再把常用模型导入并按需启停。</p>
         </div>
         <div className="model-center__header-actions">
           <button
@@ -409,6 +491,27 @@ export function ModelCenter({
                     🔑
                   </span>
                 )}
+                <span
+                  className="provider-chip__count"
+                  data-testid={`provider-chip-count-${p.id}`}
+                  title="已管理模型 / 启用 / 停用"
+                >
+                  {providerStats.get(p.id)?.total ?? 0} 个 · 开 {providerStats.get(p.id)?.enabled ?? 0} · 关 {providerStats.get(p.id)?.disabled ?? 0}
+                </span>
+                <button
+                  type="button"
+                  className="provider-chip__test"
+                  onClick={() =>
+                    setImportDrawer({
+                      capability: activeTab,
+                      providerId: p.id,
+                    })
+                  }
+                  data-testid={`provider-chip-library-${p.id}`}
+                  title="打开供应商模型库并刷新候选清单"
+                >
+                  模型库
+                </button>
                 <button
                   type="button"
                   className="provider-chip__test"
@@ -467,7 +570,9 @@ export function ModelCenter({
         <div className="model-center__matrix-head">
           <div>
             <h3>{tab.label}</h3>
-            <p className="hint">{tab.hint}</p>
+            <p className="hint">
+              {tab.hint} · 已管理 {activeTabModels.length} 个，启用 {activeEnabledCount} 个，停用 {activeDisabledCount} 个
+            </p>
           </div>
           <button
             type="button"
@@ -484,16 +589,83 @@ export function ModelCenter({
             + 导入模型
           </button>
         </div>
+        <div className="model-center__filters" data-testid="model-center-filters">
+          <label>
+            搜索
+            <input
+              type="search"
+              value={modelQuery}
+              onChange={(e) => setModelQuery(e.target.value)}
+              placeholder="模型名、别名、Provider…"
+              data-testid="model-center-search"
+            />
+          </label>
+          <label>
+            Provider
+            <select
+              value={providerFilter}
+              onChange={(e) => setProviderFilter(e.target.value)}
+              data-testid="model-center-provider-filter"
+            >
+              <option value="all">全部 Provider</option>
+              {providers.map((p) => (
+                <option key={p.id} value={p.id}>
+                  {p.name}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label>
+            状态
+            <select
+              value={statusFilter}
+              onChange={(e) => setStatusFilter(e.target.value as 'all' | 'enabled' | 'disabled')}
+              data-testid="model-center-status-filter"
+            >
+              <option value="all">全部状态</option>
+              <option value="enabled">只看启用</option>
+              <option value="disabled">只看停用</option>
+            </select>
+          </label>
+          <div className="model-center__bulk" data-testid="model-center-bulk-actions">
+            <span>已选 {selectedVisibleIds.length} 个</span>
+            <button
+              type="button"
+              disabled={selectedVisibleIds.length === 0}
+              onClick={() => void onBulkEnabled(true)}
+              data-testid="model-center-bulk-enable"
+            >
+              批量启用
+            </button>
+            <button
+              type="button"
+              disabled={selectedVisibleIds.length === 0}
+              onClick={() => void onBulkEnabled(false)}
+              data-testid="model-center-bulk-disable"
+            >
+              批量停用
+            </button>
+          </div>
+        </div>
         {loading ? (
           <p className="hint">加载中…</p>
         ) : visibleModels.length === 0 ? (
           <p className="hint">
-            尚无 <strong>{tab.label}</strong> 模型。点击右上 “+ 导入模型” 从 Provider 导入。
+            当前筛选下没有 <strong>{tab.label}</strong> 模型。可以调整筛选，或点击右上“+ 导入模型”刷新供应商模型库。
           </p>
         ) : (
           <table className="model-matrix" data-testid="model-matrix">
             <thead>
               <tr>
+                <th className="model-matrix__select">
+                  <input
+                    type="checkbox"
+                    checked={visibleModels.length > 0 && visibleModels.every((m) => selectedModelIds.has(m.id))}
+                    onChange={toggleSelectAllVisible}
+                    aria-label="选择当前筛选下全部模型"
+                    data-testid="model-center-select-all"
+                  />
+                </th>
                 <th>模型</th>
                 <th>Provider</th>
                 <th>价格（USD/1M tok 或单次）</th>
@@ -520,6 +692,15 @@ export function ModelCenter({
                 return (
                   <Fragment key={m.id}>
                     <tr data-testid={`model-row-${m.id}`}>
+                      <td className="model-matrix__select">
+                        <input
+                          type="checkbox"
+                          checked={selectedModelIds.has(m.id)}
+                          onChange={() => toggleSelectModel(m.id)}
+                          aria-label={`选择 ${m.display_name}`}
+                          data-testid={`model-row-select-${m.id}`}
+                        />
+                      </td>
                       <td>
                         <div className="model-cell-name">
                           <strong>{m.alias ?? m.display_name ?? m.model_name}</strong>
@@ -582,10 +763,11 @@ export function ModelCenter({
                           <button
                             type="button"
                             onClick={() => void onSetDefault(m)}
-                            disabled={isDefault}
+                            disabled={isDefault || !m.enabled}
                             data-testid={`model-row-default-${m.id}`}
+                            title={!m.enabled ? '停用模型不能设为默认' : undefined}
                           >
-                            {isDefault ? '已是默认' : '设为默认'}
+                            {isDefault ? '已是默认' : m.enabled ? '设为默认' : '停用中'}
                           </button>
                           <button
                             type="button"
@@ -630,7 +812,7 @@ export function ModelCenter({
                     </tr>
                     {modelProbe?.modelId === m.id && modelProbe.status === 'done' && (
                       <tr className="model-health-row" data-testid={`model-tools-probe-result-${m.id}`}>
-                        <td colSpan={5}>
+                        <td colSpan={6}>
                           <div className={`model-probe-result ${modelProbe.ok ? 'ok' : 'bad'}`}>
                             {modelProbe.note}
                           </div>
@@ -639,7 +821,7 @@ export function ModelCenter({
                     )}
                     {expandedModelId === m.id && (
                       <tr className="model-health-row" data-testid={`model-health-panel-${m.id}`}>
-                        <td colSpan={5}>
+                        <td colSpan={6}>
                           <ModelHealthPanel health={healthRows.get(m.id) ?? null} />
                         </td>
                       </tr>
@@ -661,6 +843,10 @@ export function ModelCenter({
           onClose={() => setImportDrawer(null)}
           onImported={async () => {
             setImportDrawer(null);
+            await refresh();
+            onChanged?.();
+          }}
+          onModelsChanged={async () => {
             await refresh();
             onChanged?.();
           }}
@@ -796,6 +982,7 @@ function ImportDrawer({
   initialProviderId,
   onClose,
   onImported,
+  onModelsChanged,
 }: {
   providers: Provider[];
   existingModels: Model[];
@@ -803,15 +990,34 @@ function ImportDrawer({
   initialProviderId: string | null;
   onClose: () => void;
   onImported: () => Promise<void>;
+  onModelsChanged: () => Promise<void>;
 }): JSX.Element {
   const [providerId, setProviderId] = useState<string | null>(initialProviderId);
   const [capability, setCapability] = useState<ModelCapability>(initialCapability);
   const [discovered, setDiscovered] = useState<DiscoveredModel[]>([]);
   const [filter, setFilter] = useState('');
+  const [libraryStatus, setLibraryStatus] = useState<'all' | 'unmanaged' | 'enabled' | 'disabled'>('all');
   const [discovering, setDiscovering] = useState(false);
   const [importing, setImporting] = useState(false);
   const [picked, setPicked] = useState<Set<string>>(new Set());
   const [err, setErr] = useState<string | null>(null);
+  const [importEnabled, setImportEnabled] = useState(true);
+
+  const discover = async (): Promise<void> => {
+    if (!providerId) return;
+    setDiscovering(true);
+    setErr(null);
+    setPicked(new Set());
+    setDiscovered([]);
+    try {
+      const res = await api.discoverModels(providerId);
+      setDiscovered(res.models);
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : String(e));
+    } finally {
+      setDiscovering(false);
+    }
+  };
 
   // Auto-discover when provider changes.
   useEffect(() => {
@@ -839,12 +1045,12 @@ function ImportDrawer({
     };
   }, [providerId]);
 
-  const existingKeys = useMemo(
+  const existingByName = useMemo(
     () =>
-      new Set(
+      new Map(
         existingModels
           .filter((m) => m.provider_id === providerId)
-          .map((m) => m.model_name),
+          .map((m) => [m.model_name, m]),
       ),
     [existingModels, providerId],
   );
@@ -859,13 +1065,20 @@ function ImportDrawer({
     };
     return discovered
       .filter(capMatch)
+      .filter((m) => {
+        const existing = existingByName.get(m.model_name);
+        if (libraryStatus === 'unmanaged') return !existing;
+        if (libraryStatus === 'enabled') return existing?.enabled === true;
+        if (libraryStatus === 'disabled') return existing?.enabled === false;
+        return true;
+      })
       .filter((m) =>
         f === ''
           ? true
           : m.model_name.toLowerCase().includes(f) ||
             (m.display_name ?? '').toLowerCase().includes(f),
       );
-  }, [discovered, filter, capability]);
+  }, [discovered, filter, capability, existingByName, libraryStatus]);
 
   const toggle = (name: string): void => {
     setPicked((s) => {
@@ -896,6 +1109,7 @@ function ImportDrawer({
           supports_vision: m.supports_vision ?? false,
           supports_tools: m.supports_tools ?? false,
           modalities: m.modalities ?? undefined,
+          enabled: importEnabled,
         });
       }
       await onImported();
@@ -903,6 +1117,16 @@ function ImportDrawer({
       setErr(e instanceof Error ? e.message : String(e));
     } finally {
       setImporting(false);
+    }
+  };
+
+  const onToggleExisting = async (model: Model): Promise<void> => {
+    setErr(null);
+    try {
+      await api.updateModel(model.id, { enabled: !model.enabled });
+      await onModelsChanged();
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : String(e));
     }
   };
 
@@ -953,6 +1177,19 @@ function ImportDrawer({
             </select>
           </label>
           <label>
+            状态
+            <select
+              value={libraryStatus}
+              onChange={(e) => setLibraryStatus(e.target.value as 'all' | 'unmanaged' | 'enabled' | 'disabled')}
+              data-testid="import-drawer-status"
+            >
+              <option value="all">全部候选</option>
+              <option value="unmanaged">只看未管理</option>
+              <option value="enabled">只看已启用</option>
+              <option value="disabled">只看已停用</option>
+            </select>
+          </label>
+          <label>
             搜索
             <input
               type="search"
@@ -962,6 +1199,14 @@ function ImportDrawer({
               data-testid="import-drawer-filter"
             />
           </label>
+          <button
+            type="button"
+            onClick={() => void discover()}
+            disabled={!providerId || discovering}
+            data-testid="import-drawer-refresh"
+          >
+            {discovering ? '刷新中…' : '刷新清单'}
+          </button>
         </div>
 
         {discovering ? (
@@ -975,7 +1220,8 @@ function ImportDrawer({
         ) : (
           <ul className="import-drawer__list" data-testid="import-drawer-list">
             {filtered.map((m) => {
-              const isExisting = existingKeys.has(m.model_name);
+              const existing = existingByName.get(m.model_name);
+              const isExisting = Boolean(existing);
               const isPicked = picked.has(m.model_name);
               return (
                 <li
@@ -989,6 +1235,7 @@ function ImportDrawer({
                       disabled={isExisting}
                       checked={isPicked}
                       onChange={() => toggle(m.model_name)}
+                      data-testid={`import-drawer-pick-${m.model_name}`}
                     />
                     <span className="import-row__name">
                       {m.display_name ?? m.model_name}
@@ -1002,7 +1249,27 @@ function ImportDrawer({
                           ? `每秒 ${formatUsd(m.price_per_video_second ?? null)}`
                           : `输入 ${formatUsd(m.price_input_per_1m ?? null)} · 输出 ${formatUsd(m.price_output_per_1m ?? null)}`}
                     </span>
-                    {isExisting && <span className="badge">已导入</span>}
+                    {existing ? (
+                      <>
+                        <span className={`badge ${existing.enabled ? 'badge--default' : ''}`}>
+                          {existing.enabled ? '已启用' : '已停用'}
+                        </span>
+                        <button
+                          type="button"
+                          className="import-row__toggle"
+                          onClick={(e) => {
+                            e.preventDefault();
+                            e.stopPropagation();
+                            void onToggleExisting(existing);
+                          }}
+                          data-testid={`import-drawer-toggle-${existing.id}`}
+                        >
+                          {existing.enabled ? '停用' : '启用'}
+                        </button>
+                      </>
+                    ) : (
+                      <span className="badge">未管理</span>
+                    )}
                   </label>
                 </li>
               );
@@ -1011,8 +1278,17 @@ function ImportDrawer({
         )}
 
         <footer className="import-drawer__foot">
+          <label className="field-inline">
+            <input
+              type="checkbox"
+              checked={importEnabled}
+              onChange={(e) => setImportEnabled(e.target.checked)}
+              data-testid="import-drawer-import-enabled"
+            />
+            <span>导入后立即启用</span>
+          </label>
           <span className="hint">
-            已选 {picked.size} 项 / 共 {filtered.length} 个候选
+            已选 {picked.size} 项 / 当前 {filtered.length} 个候选
           </span>
           <button
             type="button"

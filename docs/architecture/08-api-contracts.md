@@ -267,11 +267,14 @@
   "supports_tools": true,
   "supports_json": true,
   "is_default_for": "chat",
+  "enabled": true,
   "fallback_order": 1
 }
 ```
 
 > **id 永远由后端生成**（`mdl_` + nanoid(12)），用户只能改 `alias`。这样 alias 改名不会影响历史 cost_records / messages 的引用。
+>
+> `enabled` 可选，默认 `true`；用于从供应商模型库导入但暂不启用的场景。`enabled=false` 与 `is_default_for` 不能同时成立，停用模型不能成为默认模型。
 
 ### `POST /v1/models/batch`
 
@@ -283,7 +286,8 @@
 
 **特殊副作用：**
 - 改 `is_default_for` → 同 capability 内取消旧默认
-- 改 `enabled=false` → 不影响历史 cost_records
+- 改 `enabled=false` → 自动清理该模型的 `is_default_for`；不影响历史 cost_records
+- 对停用模型设置默认 → `400 validation_error`
 
 ### `DELETE /v1/models/:id`
 

@@ -128,6 +128,7 @@ export const ModelCreateSchema = z.object({
   supports_tools: z.boolean().optional(),
   supports_json: z.boolean().optional(),
   is_default_for: ModelCapabilitySchema.nullable().optional(),
+  enabled: z.boolean().optional(),
 });
 export type ModelCreate = z.infer<typeof ModelCreateSchema>;
 

@@ -163,6 +163,14 @@ C3（Prompt 模板 & Persona 预设）已实现：
 - 数据
   - 新增两张业务表；`memories` 新增约定键 `active_persona_id`
 
+## 10.12 Model 管理增强（v0.8 polish）
+
+- `apps/web/src/ModelCenter.tsx`：模型中心拆成“已管理模型工作台 + 供应商模型库抽屉”。工作台支持按 Provider / 状态 / 关键字筛选，选择当前筛选结果后批量启用或停用；Provider chip 显示已管理 / 启用 / 停用数量，并可直接打开对应供应商模型库。
+- `apps/web/src/ModelCenter.tsx`：供应商模型库支持刷新 discovery 清单，按未管理 / 已启用 / 已停用筛选；已管理模型可在抽屉内直接启停，未管理候选可选择“导入后立即启用”。
+- `packages/shared`：`ModelCreateSchema` 新增可选 `enabled`，支持导入模型但暂不启用。
+- `apps/sidecar`：创建模型时 `enabled` 默认 `true`；停用默认模型会自动清理 `is_default_for`；停用模型不能被设为默认模型。
+- 验证：`apps/web/e2e/m2.5-modelcenter.spec.ts` 覆盖模型库刷新、批量启用、停用导入与抽屉内启用；`apps/sidecar/test/providers.test.ts` 覆盖停用默认绑定清理与停用默认拒绝。
+
 ## 10.4 D1 / D2 完工记录（v0.8）
 
 D1 / D2（成本看板 / 月度预算）已实现：

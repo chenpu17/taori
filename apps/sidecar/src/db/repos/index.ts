@@ -380,13 +380,13 @@ export class ModelsRepo {
         supports_vision: input.supports_vision ?? false,
         supports_tools: input.supports_tools ?? false,
         supports_json: input.supports_json ?? false,
-        is_default_for: input.is_default_for ?? null,
+        is_default_for: input.enabled === false ? null : (input.is_default_for ?? null),
         fallback_order: 0,
         user_rating: null,
         failure_count_24h: 0,
         demoted: false,
         disabled_until: null,
-        enabled: true,
+        enabled: input.enabled ?? true,
         created_at: now,
         updated_at: now,
       })
@@ -462,6 +462,15 @@ export class ModelsRepo {
   update(id: string, patch: ModelUpdate): Model | null {
     const existing = this.get(id);
     if (!existing) return null;
+    const nextEnabled = patch.enabled ?? existing.enabled;
+    const nextDefault =
+      nextEnabled === false
+        ? existing.is_default_for || patch.is_default_for !== undefined
+          ? null
+          : undefined
+        : patch.is_default_for !== undefined
+          ? patch.is_default_for
+          : undefined;
     const row = this.db
       .update(models)
       .set({
@@ -470,9 +479,7 @@ export class ModelsRepo {
           display_name: patch.display_name,
         }),
         ...(patch.capability !== undefined && { capability: patch.capability }),
-        ...(patch.is_default_for !== undefined && {
-          is_default_for: patch.is_default_for,
-        }),
+        ...(nextDefault !== undefined && { is_default_for: nextDefault }),
         ...(patch.enabled !== undefined && { enabled: patch.enabled }),
         ...(patch.fallback_order !== undefined && {
           fallback_order: patch.fallback_order,
@@ -644,6 +651,7 @@ export class ModelsRepo {
   setDefaultFor(modelId: string, capability: ModelCapability): Model | null {
     const target = this.get(modelId);
     if (!target) return null;
+    if (!target.enabled) return null;
     this.db.transaction((tx) => {
       tx.update(models)
         .set({ is_default_for: null, updated_at: Date.now() })
