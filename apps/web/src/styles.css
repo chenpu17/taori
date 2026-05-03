@@ -3352,6 +3352,14 @@ header h1::before {
   text-transform: uppercase;
   letter-spacing: 0.04em;
 }
+.model-matrix th:nth-child(5),
+.model-matrix td:nth-child(5) {
+  min-width: 72px;
+}
+.model-matrix th:nth-child(6),
+.model-matrix td:nth-child(6) {
+  min-width: 340px;
+}
 .model-cell-name {
   display: flex;
   align-items: center;
@@ -3382,6 +3390,7 @@ header h1::before {
   gap: 6px;
   cursor: pointer;
   font-size: 12px;
+  white-space: nowrap;
 }
 .switch input { accent-color: #6366f1; }
 .btn-primary {
@@ -3450,7 +3459,7 @@ header h1::before {
 }
 .provider-chip__count {
   color: var(--muted);
-  background: color-mix(in srgb, var(--surface-2) 70%, white);
+  background: color-mix(in srgb, var(--surface-2) 78%, var(--surface));
   border: 1px solid var(--border);
   border-radius: 999px;
   padding: 2px 8px;
@@ -3564,7 +3573,7 @@ header h1::before {
   margin-bottom: 10px;
   border: 1px solid var(--border);
   border-radius: 12px;
-  background: color-mix(in srgb, var(--surface-2) 55%, white);
+  background: color-mix(in srgb, var(--surface-2) 76%, var(--surface));
 }
 .model-center__filters label {
   display: flex;
@@ -3600,8 +3609,10 @@ header h1::before {
   border-radius: 8px;
   background: var(--surface);
   color: var(--fg);
-  padding: 7px 10px;
+  min-height: 32px;
+  padding: 0 10px;
   cursor: pointer;
+  white-space: nowrap;
 }
 .model-center__bulk button:disabled,
 .import-drawer__filters > button:disabled {
@@ -3616,8 +3627,31 @@ header h1::before {
   accent-color: #0f766e;
 }
 .model-cell-actions {
-  display: inline-flex;
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
   gap: 6px;
+  min-width: 320px;
+}
+.model-cell-actions button {
+  min-width: 34px;
+  height: 32px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--surface-2) 72%, var(--surface));
+  color: var(--fg);
+  padding: 0 10px;
+  line-height: 1;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.model-cell-actions button:hover:not(:disabled) {
+  border-color: color-mix(in srgb, var(--accent) 32%, var(--border));
+  background: color-mix(in srgb, var(--accent) 10%, var(--surface-2));
+}
+.model-cell-actions button:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
 }
 .model-health-row td {
   padding-top: 0;

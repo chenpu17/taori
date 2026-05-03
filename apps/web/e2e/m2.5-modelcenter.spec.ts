@@ -98,6 +98,12 @@ test('model-center: provider library refresh, bulk enable, and import disabled c
       { id: 'mock-strategy', object: 'model' },
       { id: 'mock-user', object: 'model' },
       { id: 'mock-tech', object: 'model' },
+      {
+        id: 'mock-vision',
+        object: 'model',
+        name: 'Mock Vision',
+        architecture: { input_modalities: ['text', 'image'] },
+      },
     ],
   });
   try {
@@ -168,8 +174,15 @@ test('model-center: provider library refresh, bulk enable, and import disabled c
 
     await page.getByTestId(`provider-chip-library-${provider.id}`).click();
     await expect(page.getByTestId('import-drawer')).toBeVisible();
+    await expect(page.getByTestId('import-drawer-capability')).toHaveValue('all');
     await page.getByTestId('import-drawer-refresh').click();
     await expect(page.getByTestId('import-drawer-row-mock-tech')).toBeVisible();
+    await expect(page.getByTestId('import-drawer-row-mock-vision')).toBeVisible();
+    await expect(page.getByTestId('import-drawer-counts')).toContainText('已刷新 4 个候选');
+    await page.getByTestId('import-drawer-capability').selectOption('multimodal');
+    await expect(page.getByTestId('import-drawer-row-mock-vision')).toBeVisible();
+    await expect(page.getByTestId('import-drawer-row-mock-tech')).toHaveCount(0);
+    await page.getByTestId('import-drawer-capability').selectOption('all');
     await page.getByTestId('import-drawer-status').selectOption('unmanaged');
     await expect(page.getByTestId('import-drawer-row-mock-tech')).toBeVisible();
     await expect(page.getByTestId('import-drawer-row-mock-strategy')).toHaveCount(0);

@@ -35,6 +35,8 @@ const CAPABILITY_TABS: { id: ModelCapability; label: string; hint: string }[] = 
   { id: 'embedding', label: '🧬 向量嵌入', hint: '检索 / 语义索引' },
 ];
 
+type ImportCapabilityFilter = ModelCapability | 'all';
+
 interface SyncSummary {
   synced_at: number;
   total_providers: number;
@@ -169,7 +171,7 @@ export function ModelCenter({
   const [healthRows, setHealthRows] = useState<Map<string, ModelHealthRow>>(new Map());
   const [expandedModelId, setExpandedModelId] = useState<string | null>(null);
   const [importDrawer, setImportDrawer] = useState<{
-    capability: ModelCapability;
+    capability: ImportCapabilityFilter;
     providerId: string | null;
   } | null>(null);
   const [modelQuery, setModelQuery] = useState('');
@@ -615,7 +617,7 @@ export function ModelCenter({
                   className="provider-chip__test"
                   onClick={() =>
                     setImportDrawer({
-                      capability: activeTab,
+                      capability: 'all',
                       providerId: p.id,
                     })
                   }
@@ -1179,7 +1181,7 @@ function ImportDrawer({
 }: {
   providers: Provider[];
   existingModels: Model[];
-  initialCapability: ModelCapability;
+  initialCapability: ImportCapabilityFilter;
   initialProviderId: string | null;
   onClose: () => void;
   onImported: () => Promise<void>;
@@ -1187,7 +1189,7 @@ function ImportDrawer({
   onProviderSynced: (providerId: string) => Promise<void>;
 }): JSX.Element {
   const [providerId, setProviderId] = useState<string | null>(initialProviderId);
-  const [capability, setCapability] = useState<ModelCapability>(initialCapability);
+  const [capability, setCapability] = useState<ImportCapabilityFilter>(initialCapability);
   const [discovered, setDiscovered] = useState<DiscoveredModel[]>([]);
   const [filter, setFilter] = useState('');
   const [libraryStatus, setLibraryStatus] = useState<'all' | 'unmanaged' | 'enabled' | 'disabled'>('all');
@@ -1252,9 +1254,10 @@ function ImportDrawer({
 
   const filtered = useMemo(() => {
     const f = filter.trim().toLowerCase();
-    // Filter by selected capability so e.g. "图像" tab only offers image models.
+    // Discovery is always provider-wide; this only filters the visible library.
     // Multimodal also shows under chat to match the matrix view.
     const capMatch = (m: DiscoveredModel) => {
+      if (capability === 'all') return true;
       if (capability === 'chat') return m.capability === 'chat' || m.capability === 'multimodal';
       return m.capability === capability;
     };
@@ -1412,12 +1415,13 @@ function ImportDrawer({
             </select>
           </label>
           <label>
-            能力
+            展示能力
             <select
               value={capability}
-              onChange={(e) => setCapability(e.target.value as ModelCapability)}
+              onChange={(e) => setCapability(e.target.value as ImportCapabilityFilter)}
               data-testid="import-drawer-capability"
             >
+              <option value="all">全部能力</option>
               {CAPABILITY_TABS.map((t) => (
                 <option key={t.id} value={t.id}>
                   {t.label}
@@ -1454,9 +1458,13 @@ function ImportDrawer({
             disabled={!providerId || discovering}
             data-testid="import-drawer-refresh"
           >
-            {discovering ? '刷新中…' : '刷新清单'}
+            {discovering ? '刷新中…' : '刷新全部清单'}
           </button>
         </div>
+
+        <p className="hint" data-testid="import-drawer-counts">
+          刷新会拉取该 Provider 的全部能力清单；当前展示 {filtered.length} / 已刷新 {discovered.length} 个候选。
+        </p>
 
         {discovering ? (
           <p className="hint">发现中…（首次可能 2–5 秒）</p>
@@ -1551,7 +1559,7 @@ function ImportDrawer({
             <span>导入后立即启用</span>
           </label>
           <span className="hint">
-            已选 {picked.size} 项 / 当前 {filtered.length} 个候选
+            已选 {picked.size} 项 / 当前展示 {filtered.length} 个候选
           </span>
           <button
             type="button"

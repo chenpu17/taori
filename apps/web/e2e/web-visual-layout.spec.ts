@@ -354,6 +354,49 @@ test('small viewport: model center fits horizontally and can scroll to close', a
   await expect(page.getByTestId('model-center-close')).toBeInViewport();
 });
 
+test('dark mode: model center filters and row actions stay compact', async ({
+  page,
+}) => {
+  await page.emulateMedia({ colorScheme: 'dark' });
+  await seedChatModels(4);
+
+  await page.goto('/');
+  await expect(page.getByTestId('chat-panel')).toBeVisible({ timeout: 10_000 });
+  await page.getByTestId('open-model-center').click();
+  await expect(page.getByTestId('model-center')).toBeVisible();
+
+  const metrics = await page.evaluate(() => {
+    const parse = (color: string): [number, number, number] => {
+      const rgb = color.match(/rgba?\((\d+),\s*(\d+),\s*(\d+)/);
+      if (rgb) return [Number(rgb[1]), Number(rgb[2]), Number(rgb[3])];
+      const srgb = color.match(/color\(srgb\s+([\d.]+)\s+([\d.]+)\s+([\d.]+)/);
+      if (srgb) {
+        return [
+          Math.round(Number(srgb[1]) * 255),
+          Math.round(Number(srgb[2]) * 255),
+          Math.round(Number(srgb[3]) * 255),
+        ];
+      }
+      throw new Error(`Unsupported CSS color: ${color}`);
+    };
+    const filter = document.querySelector('[data-testid="model-center-filters"]');
+    if (!filter) throw new Error('missing model center filters');
+    const filterColor = parse(getComputedStyle(filter).backgroundColor);
+    const maxActionHeight = Math.max(
+      ...Array.from(document.querySelectorAll('.model-cell-actions button')).map((button) =>
+        button.getBoundingClientRect().height,
+      ),
+    );
+    return {
+      filterAverage: filterColor.reduce((sum, channel) => sum + channel, 0) / 3,
+      maxActionHeight,
+    };
+  });
+
+  expect(metrics.filterAverage).toBeLessThan(70);
+  expect(metrics.maxActionHeight).toBeLessThanOrEqual(36);
+});
+
 test('visual contrast: sidebar search, import filters, and edit cancel remain readable', async ({
   page,
 }) => {
