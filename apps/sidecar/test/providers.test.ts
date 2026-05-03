@@ -95,6 +95,114 @@ describe('providers + models', () => {
     expect(body.error.classification).toBe('auth');
   });
 
+  it('OpenAI-compatible discovery reads real /models and infers gpt-image as image', async () => {
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          data: [
+            { id: 'gpt-4o-mini', object: 'model' },
+            { id: 'gpt-image-1', object: 'model' },
+            {
+              id: 'gpt-4o',
+              object: 'model',
+              architecture: { input_modalities: ['text', 'image'] },
+            },
+          ],
+        }),
+        { status: 200, headers: { 'content-type': 'application/json' } },
+      ),
+    );
+
+    let res = await app.inject({
+      method: 'POST',
+      url: '/v1/providers',
+      headers: authJson,
+      payload: {
+        name: 'PackyAPI',
+        type: 'openai',
+        base_url: 'https://api.packy.example/v1',
+        api_key: 'sk-packy',
+      },
+    });
+    expect(res.statusCode).toBe(201);
+    const provider = res.json();
+
+    res = await app.inject({
+      method: 'GET',
+      url: `/v1/providers/${provider.id}/discover`,
+      headers: auth,
+    });
+    expect(res.statusCode).toBe(200);
+    const models = res.json().models as Array<{
+      model_name: string;
+      capability: string;
+      modalities: string[];
+      supports_vision: boolean;
+      supports_tools: boolean;
+    }>;
+    expect(models.find((m) => m.model_name === 'gpt-image-1')).toMatchObject({
+      capability: 'image',
+      modalities: ['image'],
+      supports_vision: false,
+      supports_tools: false,
+    });
+    expect(models.find((m) => m.model_name === 'gpt-4o')).toMatchObject({
+      capability: 'multimodal',
+      supports_vision: true,
+    });
+
+    res = await app.inject({
+      method: 'DELETE',
+      url: `/v1/providers/${provider.id}`,
+      headers: auth,
+    });
+    expect(res.statusCode).toBe(204);
+  });
+
+  it('custom OpenAI-compatible discovery also exposes image models', async () => {
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          data: [
+            { id: 'packy-chat', object: 'model' },
+            { id: 'packy-gpt-image', object: 'model' },
+          ],
+        }),
+        { status: 200, headers: { 'content-type': 'application/json' } },
+      ),
+    );
+
+    let res = await app.inject({
+      method: 'POST',
+      url: '/v1/providers',
+      headers: authJson,
+      payload: {
+        name: 'Custom PackyAPI',
+        type: 'custom',
+        base_url: 'https://packy.example/v1',
+        api_key: 'sk-packy',
+      },
+    });
+    expect(res.statusCode).toBe(201);
+    const provider = res.json();
+
+    res = await app.inject({
+      method: 'GET',
+      url: `/v1/providers/${provider.id}/discover`,
+      headers: auth,
+    });
+    expect(res.statusCode).toBe(200);
+    const models = res.json().models as Array<{ model_name: string; capability: string }>;
+    expect(models.find((m) => m.model_name === 'packy-gpt-image')?.capability).toBe('image');
+
+    res = await app.inject({
+      method: 'DELETE',
+      url: `/v1/providers/${provider.id}`,
+      headers: auth,
+    });
+    expect(res.statusCode).toBe(204);
+  });
+
   it('Huawei MaaS provider test reports missing /models as config error', async () => {
     vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('not found', { status: 404 }));
     const res = await app.inject({

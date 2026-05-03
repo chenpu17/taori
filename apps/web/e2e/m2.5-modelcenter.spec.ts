@@ -219,6 +219,47 @@ test('model-center: provider library refresh, bulk enable, and import disabled c
   }
 });
 
+test('model-center: OpenAI-compatible PackyAPI refresh shows gpt-image models', async ({
+  page,
+}) => {
+  test.setTimeout(90_000);
+  const env = readSidecarEnv();
+  await resetSidecar(env);
+  const server = startMockOpenAI(17933, {
+    models: [
+      { id: 'gpt-4o-mini', object: 'model' },
+      { id: 'gpt-image-1', object: 'model' },
+    ],
+  });
+  try {
+    const providerRes = await authedFetch(env, '/v1/providers', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        name: 'PackyAPI',
+        type: 'openai',
+        base_url: 'http://127.0.0.1:17933/v1',
+        api_key: 'sk-packy',
+      }),
+    });
+    expect(providerRes.ok).toBeTruthy();
+    const provider = (await providerRes.json()) as { id: string };
+
+    await page.goto('/');
+    await page.getByTestId('open-model-center').click();
+    await expect(page.getByTestId('model-center')).toBeVisible();
+    await page.getByTestId(`provider-chip-library-${provider.id}`).click();
+    await expect(page.getByTestId('import-drawer')).toBeVisible();
+    await page.getByTestId('import-drawer-refresh').click();
+    await expect(page.getByTestId('import-drawer-row-gpt-image-1')).toBeVisible();
+    await page.getByTestId('import-drawer-capability').selectOption('image');
+    await expect(page.getByTestId('import-drawer-row-gpt-image-1')).toBeVisible();
+    await expect(page.getByTestId('import-drawer-row-gpt-4o-mini')).toHaveCount(0);
+  } finally {
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  }
+});
+
 test('model-center: provider edit and scoped catalog sync update managed model pricing', async ({
   page,
 }) => {

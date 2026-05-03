@@ -241,6 +241,8 @@ async function callAdapter(
   switch (type) {
     case 'openai':
       return adapterOpenAI(args);
+    case 'custom':
+      return adapterOpenAI(args);
     case 'replicate':
       return adapterReplicate(args);
     case 'sd_webui':

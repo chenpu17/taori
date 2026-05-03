@@ -229,7 +229,7 @@ interface OpenRouterListItem {
   name?: string;
   context_length?: number;
   pricing?: { prompt?: string; completion?: string };
-  architecture?: { modality?: string; input_modalities?: string[] };
+  architecture?: { modality?: string; input_modalities?: string[]; output_modalities?: string[] };
 }
 
 function openRouterPriceToPer1m(raw: string | undefined): number | null {
@@ -243,16 +243,26 @@ function openRouterToDiscovered(item: OpenRouterListItem): DiscoveredModel {
   const inputModalities =
     item.architecture?.input_modalities ??
     (item.architecture?.modality ? [item.architecture.modality] : []);
+  const outputModalities = item.architecture?.output_modalities ?? [];
   const supportsVision = inputModalities.some((m) =>
+    m.toLowerCase().includes('image'),
+  );
+  const generatesImage = outputModalities.some((m) =>
     m.toLowerCase().includes('image'),
   );
   // Most OpenRouter models are chat. We surface multimodal when input
   // accepts image, so the UI groups them under the multimodal capability
   // pool but the chat-candidate selector still considers them.
-  const capability: DiscoveredModel['capability'] = supportsVision
+  const capability: DiscoveredModel['capability'] = generatesImage
+    ? 'image'
+    : supportsVision
     ? 'multimodal'
     : 'chat';
-  const modalities: DiscoveredModel['modalities'] = supportsVision
+  const modalities: DiscoveredModel['modalities'] = generatesImage
+    ? supportsVision
+      ? ['text', 'image']
+      : ['image']
+    : supportsVision
     ? ['text', 'image']
     : ['text'];
   return {
@@ -305,7 +315,18 @@ async function listOpenRouterModels(
   return (body.data ?? []).map(openRouterToDiscovered);
 }
 
-interface OpenAIListItem { id: string }
+interface OpenAIListItem {
+  id: string;
+  name?: string;
+  context_length?: number;
+  pricing?: { prompt?: string; completion?: string; image?: string };
+  architecture?: { modality?: string; input_modalities?: string[]; output_modalities?: string[] };
+  input_modalities?: string[];
+  output_modalities?: string[];
+  modalities?: string[];
+  capability?: string;
+  capabilities?: Record<string, unknown>;
+}
 
 async function testOpenAI(
   baseUrl: string,
@@ -349,8 +370,97 @@ const OPENAI_RECOMMENDED: DiscoveredModel[] = [
   },
 ];
 
-async function listOpenAIModels(): Promise<DiscoveredModel[]> {
-  return OPENAI_RECOMMENDED;
+function hasTruthyCapability(item: OpenAIListItem, names: string[]): boolean {
+  const caps = item.capabilities;
+  if (!caps) return false;
+  return names.some((name) => caps[name] === true);
+}
+
+function inferOpenAICompatibleModel(item: OpenAIListItem): DiscoveredModel {
+  const id = item.id;
+  const displayName = item.name ?? item.id;
+  const metadata = `${id} ${displayName} ${item.capability ?? ''}`.toLowerCase();
+  const inputModalities = [
+    ...(item.input_modalities ?? []),
+    ...(item.architecture?.input_modalities ?? []),
+    ...(item.architecture?.modality ? [item.architecture.modality] : []),
+    ...(item.modalities ?? []),
+  ].map((m) => m.toLowerCase());
+  const outputModalities = [
+    ...(item.output_modalities ?? []),
+    ...(item.architecture?.output_modalities ?? []),
+  ].map((m) => m.toLowerCase());
+  const explicitCapability = (item.capability ?? '').toLowerCase();
+  const isImageGeneration =
+    explicitCapability === 'image' ||
+    outputModalities.includes('image') ||
+    hasTruthyCapability(item, ['image_generation', 'image', 'images']) ||
+    /\b(?:gpt-image|dall[-_ ]?e|imagen|flux|sdxl|stable[-_ ]?diffusion|image[-_ ]?(?:generation|edit)|text[-_ ]?to[-_ ]?image|txt2img|t2i)\b/i.test(metadata);
+  const isVideoGeneration =
+    explicitCapability === 'video' ||
+    outputModalities.includes('video') ||
+    /\b(?:video|text[-_ ]?to[-_ ]?video|image[-_ ]?to[-_ ]?video|t2v|i2v|seedance|wan)\b/i.test(metadata);
+  const supportsVision =
+    inputModalities.includes('image') ||
+    /(?:vision|multimodal|gpt-4o|gpt-4\.1|omni|vl)\b/i.test(metadata);
+  const isEmbedding =
+    explicitCapability === 'embedding' ||
+    /\b(?:embedding|embed)\b/i.test(metadata);
+  const capability: DiscoveredModel['capability'] = isVideoGeneration
+    ? 'video'
+    : isImageGeneration
+      ? 'image'
+      : isEmbedding
+        ? 'embedding'
+        : supportsVision
+          ? 'multimodal'
+          : 'chat';
+  const modalities: DiscoveredModel['modalities'] =
+    capability === 'video'
+      ? inputModalities.includes('image')
+        ? ['text', 'image', 'video']
+        : ['text', 'video']
+      : capability === 'image'
+        ? inputModalities.includes('image') || /edit|i2i|image[-_ ]?edit/i.test(metadata)
+          ? ['text', 'image']
+          : ['image']
+        : supportsVision
+          ? ['text', 'image']
+          : ['text'];
+
+  return {
+    model_name: id,
+    display_name: displayName,
+    capability,
+    price_input_per_1m: openRouterPriceToPer1m(item.pricing?.prompt),
+    price_output_per_1m: openRouterPriceToPer1m(item.pricing?.completion),
+    price_per_image: null,
+    price_per_video_second: null,
+    modalities,
+    context_length: item.context_length ?? null,
+    supports_vision: supportsVision,
+    supports_tools: capability === 'chat' || capability === 'multimodal',
+  };
+}
+
+async function listOpenAICompatibleModels(
+  baseUrl: string,
+  apiKey: string,
+): Promise<DiscoveredModel[]> {
+  const normalized = baseUrl.replace(/\/$/, '');
+  const res = await timedFetch(`${normalized}/models`, {
+    method: 'GET',
+    headers: { Authorization: `Bearer ${apiKey}` },
+  });
+  if (!res.ok) {
+    const c = classifyProviderError({ status: res.status });
+    throw new Error(c.message);
+  }
+  const body = (await res.json()) as { data?: OpenAIListItem[] };
+  const models = (body.data ?? []).map(inferOpenAICompatibleModel);
+  if (models.length > 0) return models;
+  if (/api\.openai\.com\/v1\/?$/i.test(normalized)) return OPENAI_RECOMMENDED;
+  return [];
 }
 
 export function pickRecommendations(models: DiscoveredModel[]): {
@@ -422,11 +532,13 @@ export async function listProviderModels(args: {
     case 'openrouter':
       return listOpenRouterModels(args.base_url, args.api_key);
     case 'openai':
-      return listOpenAIModels();
+      return listOpenAICompatibleModels(args.base_url, args.api_key);
     case 'volcengine_ark':
       return listVolcengineArkModels(args.base_url, args.api_key);
     case 'huawei_maas':
       return listHuaweiMaasModels(args.base_url, args.api_key);
+    case 'custom':
+      return listOpenAICompatibleModels(args.base_url, args.api_key);
     default:
       return [];
   }
