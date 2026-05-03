@@ -1373,6 +1373,11 @@ function ChatPanel({
   const [promptTemplates, setPromptTemplates] = useState<PromptTemplate[]>([]);
   const [personas, setPersonas] = useState<Persona[]>([]);
   const [selectedPersonaId, setSelectedPersonaId] = useState<string>('');
+  const [promptAssetsLoaded, setPromptAssetsLoaded] = useState(false);
+  const activePersona = useMemo(
+    () => personas.find((p) => p.id === selectedPersonaId) ?? null,
+    [personas, selectedPersonaId],
+  );
   const [templatePickerOpen, setTemplatePickerOpen] = useState(false);
   const [templateVarDraft, setTemplateVarDraft] = useState<{
     template: TemplateLike;
@@ -1621,6 +1626,12 @@ function ChatPanel({
       ]);
       setPromptTemplates(templatesRes.prompt_templates);
       setPersonas(personasRes.personas);
+      setPromptAssetsLoaded(true);
+      setSelectedPersonaId((prev) =>
+        prev && !personasRes.personas.some((persona) => persona.id === prev)
+          ? ''
+          : prev,
+      );
       setPromptAssetsError(null);
     } catch (e) {
       setPromptAssetsError(e instanceof Error ? e.message : String(e));
@@ -1635,6 +1646,11 @@ function ChatPanel({
     window.addEventListener('taori:prompt-assets-changed', onChanged);
     return () => window.removeEventListener('taori:prompt-assets-changed', onChanged);
   }, [loadPromptAssets]);
+
+  useEffect(() => {
+    if (!promptAssetsLoaded || !selectedPersonaId || activePersona) return;
+    setSelectedPersonaId('');
+  }, [activePersona, promptAssetsLoaded, selectedPersonaId]);
 
   useEffect(() => {
     let cancelled = false;
@@ -1804,7 +1820,7 @@ function ChatPanel({
     body: {
       model_id: model.id,
       conversation_id: conversationId ?? undefined,
-      ...(selectedPersonaId ? { persona_id: selectedPersonaId } : {}),
+      ...(activePersona ? { persona_id: activePersona.id } : {}),
     },
     onError: (e) => {
       if ((lastUserStopAtRef.current > 0 || hasUserStopPending()) && isExpectedStopError(e)) {
@@ -2778,10 +2794,6 @@ function ChatPanel({
     && monthlyBudgetUsd > 0
     && realtime != null
     && realtime.month_usd >= monthlyBudgetUsd;
-  const activePersona = useMemo(
-    () => personas.find((p) => p.id === selectedPersonaId) ?? null,
-    [personas, selectedPersonaId],
-  );
   const failureDecisionCount = Object.keys(failureByMsg).length;
   const hasMessageBoundFailure = useMemo(
     () => messages.some((m) => m.role === 'assistant' && Boolean(failureByMsg[m.id])),
@@ -2936,7 +2948,7 @@ function ChatPanel({
           <span className="persona-select-label">Persona</span>
           <select
             className="persona-select"
-            value={selectedPersonaId}
+            value={activePersona ? selectedPersonaId : ''}
             onChange={(e) => void onPersonaChange(e.target.value)}
             data-testid="persona-select"
           >
@@ -2948,17 +2960,17 @@ function ChatPanel({
             ))}
           </select>
           <span
-            className={`scope-chip scope-${selectedPersonaId ? (conversationId ? 'session' : 'pending') : 'none'}`}
+            className={`scope-chip scope-${activePersona ? (conversationId ? 'session' : 'pending') : 'none'}`}
             data-testid="persona-memory-scope"
             title={
-              selectedPersonaId
+              activePersona
                 ? conversationId
                   ? '该 Persona 已作为当前会话的覆盖配置保存。'
                   : '新会话尚未创建；发送第一条消息后会绑定到该会话。'
                 : '当前会话不附加 Persona。'
             }
           >
-            {selectedPersonaId ? (conversationId ? '本会话' : '待绑定') : '未绑定'}
+            {activePersona ? (conversationId ? '本会话' : '待绑定') : '未绑定'}
           </span>
         </label>
         {tier && (
