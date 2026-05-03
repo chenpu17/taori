@@ -3024,6 +3024,10 @@ function ChatPanel({
             setRoundtableDialog({ initialTopic: topic });
           }}
           onLoopback={(loopConvId) => {
+            const roundtableId = activeRoundtableId;
+            conversationIdRef.current = loopConvId;
+            announcedConvIdRef.current = loopConvId;
+            setAssociatedRoundtableId(roundtableId);
             setActiveRoundtableId(null);
             onLoopbackToConversation(loopConvId);
             void loadConversationMessages(loopConvId).catch((e) =>
