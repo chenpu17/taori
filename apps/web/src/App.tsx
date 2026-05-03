@@ -1260,6 +1260,7 @@ function ChatPanel({
   const [pending, setPending] = useState<PendingAttachment[]>([]);
   const [dropping, setDropping] = useState(false);
   const [dropError, setDropError] = useState<string | null>(null);
+  const pendingHasImage = pending.some((p) => p.kind === 'image');
   const [historyLoading, setHistoryLoading] = useState(false);
   // M2.1 — captures `failure_decision` annotations keyed by assistant
   // message id. We render a card below that message; we also use it to
@@ -1281,6 +1282,12 @@ function ChatPanel({
   const [lastFailureMsgId, setLastFailureMsgId] = useState<string | null>(null);
   const preserveFailureForConversationRef = useRef<string | null>(null);
 
+  useEffect(() => {
+    if (!pendingHasImage && dropError?.startsWith('已自动切换至视觉模型')) {
+      setDropError(null);
+    }
+  }, [dropError, pendingHasImage]);
+
   const clearFailureDecisionState = useCallback((): void => {
     setFailureByMsg({});
     setLastFailureMsgId(null);
@@ -1289,6 +1296,7 @@ function ChatPanel({
   const changeModelAndClearFailure = useCallback(
     (id: string): void => {
       clearFailureDecisionState();
+      setDropError(null);
       onModelChange(id);
     },
     [clearFailureDecisionState, onModelChange],
@@ -3021,10 +3029,10 @@ function ChatPanel({
         monthSpentUsd={realtime?.month_usd ?? null}
         inputHasText={input.trim().length > 0}
         inputText={input}
-        pendingHasImage={pending.some((p) => p.kind === 'image')}
+        pendingHasImage={pendingHasImage}
         onOpenModelCenter={onOpenModelCenter}
         onOpenTools={onOpenTools}
-        onSelectModel={(modelId) => onModelChange(modelId)}
+        onSelectModel={changeModelAndClearFailure}
       />
       {activeRoundtableId ? (
         <RoundtablePanel
@@ -3331,7 +3339,7 @@ function ChatPanel({
       <AttachmentBar
         attachments={pending}
         onRemove={(idx) => setPending((p) => p.filter((_, i) => i !== idx))}
-        visionWarning={pending.some((p) => p.kind === 'image') && !model.supports_vision}
+        visionWarning={pendingHasImage && !model.supports_vision}
       />
       {dropError && (
         <div className="vision-warning" data-testid="drop-error" role="alert">{dropError}</div>
@@ -3354,7 +3362,7 @@ function ChatPanel({
           e.preventDefault();
           lastUserStopAtRef.current = 0;
           setUserStopPending(false);
-          if (pending.some((p) => p.kind === 'image') && !model.supports_vision) return;
+          if (pendingHasImage && !model.supports_vision) return;
           const atts = pending.map(({ kind, mime, data_b64, name }) => ({ kind, mime, data_b64, name }));
 
           // M2.2 §3.2 — pre-call confirm modal. Skip if model or conversation
@@ -3369,6 +3377,7 @@ function ChatPanel({
             const fire = (overrideModelId?: string) => {
               clearFailureDecisionState();
               setPending([]);
+              setDropError(null);
               const body = withCurrentConversation({
                 ...(atts.length > 0 ? { attachments: atts } : {}),
                 ...(overrideModelId ? { model_id: overrideModelId } : {}),
@@ -3401,6 +3410,7 @@ function ChatPanel({
             const fire = (overrideModelId?: string) => {
               clearFailureDecisionState();
               setPending([]);
+              setDropError(null);
               const body = withCurrentConversation({
                 ...(atts.length > 0 ? { attachments: atts } : {}),
                 ...(overrideModelId ? { model_id: overrideModelId } : {}),
@@ -3428,6 +3438,7 @@ function ChatPanel({
 
           clearFailureDecisionState();
           setPending([]);
+          setDropError(null);
           const body = withCurrentConversation(atts.length > 0 ? { attachments: atts } : {});
           handleSubmit(e, Object.keys(body).length > 0 ? { body } : undefined);
         }}

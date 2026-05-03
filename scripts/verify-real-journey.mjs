@@ -480,6 +480,20 @@ async function assertRunTimeline(page, expectedTexts, screenshotName) {
   await expectHidden(panel, 'run timeline panel after close', 10_000);
 }
 
+async function assertCostDashboardTab(page, testId, label) {
+  const tab = page.getByTestId(testId);
+  await tab.click();
+  await page.waitForFunction(
+    (id) => document.querySelector(`[data-testid="${id}"]`)?.getAttribute('data-active') === '1',
+    testId,
+    { timeout: 10_000 },
+  ).catch((e) => {
+    fail(`cost dashboard tab did not become active: ${label}`, { label, testId, error: e.message });
+  });
+  await expectVisible(page.getByTestId('cost-dashboard-total'), `cost dashboard total after ${label}`, 10_000);
+  await expectVisible(page.getByTestId('cost-call-log-row').first(), `cost call log after ${label}`, 20_000);
+}
+
 async function runJourney({ env, caps }) {
   fs.mkdirSync(ARTIFACT_DIR, { recursive: true });
   let promptAssets = null;
@@ -631,6 +645,7 @@ async function runJourney({ env, caps }) {
     await sendMessage(page, `${RUN_ID} 请理解这张图，并说明主体是什么`);
     await waitForAssistantTurn(page, 120_000);
     await expectHidden(page.getByTestId('attachments-bar'), 'attachments bar', 15_000);
+    await expectHidden(page.getByTestId('drop-error'), 'stale vision auto-switch notice after image turn', 10_000);
     await assertContextSnapshot(page, promptAssets.persona.name);
     await screenshot(page, '06-vision-understanding');
     await expectNoLayoutOverflow(page, 'vision understanding');
@@ -638,6 +653,7 @@ async function runJourney({ env, caps }) {
 
     log('验证会话级工具策略：关闭 web_fetch 只影响当前会话且前端状态同步');
     await selectModel(page, caps.toolChat);
+    await expectHidden(page.getByTestId('drop-error'), 'stale vision auto-switch notice after returning to tool chat model', 10_000);
     const webFetchChip = page.getByTestId('session-tool-policy-builtin.web_fetch');
     await expectTextContains(webFetchChip, 'web_fetch chip before disable', '抓网页 开', 10_000);
     await webFetchChip.click();
@@ -802,10 +818,25 @@ async function runJourney({ env, caps }) {
     await expectVisible(page.getByTestId('control-center'), 'control center for costs', 10_000);
     await expectVisible(page.getByTestId('cost-dashboard-panel'), 'cost dashboard', 20_000);
     await expectVisible(page.getByTestId('cost-call-log-row').first(), 'cost call log row', 20_000);
+    await assertCostDashboardTab(page, 'cost-dashboard-scope-week', 'week scope');
+    await assertCostDashboardTab(page, 'cost-dashboard-scope-month', 'month scope');
+    await assertCostDashboardTab(page, 'cost-dashboard-group-conversation', 'conversation group');
+    await assertCostDashboardTab(page, 'cost-dashboard-group-feature', 'feature group');
     await screenshot(page, '16-cost-monitoring');
     await expectNoLayoutOverflow(page, 'cost monitoring');
     await page.getByTestId('settings-close').click();
     await expectHidden(page.getByTestId('control-center'), 'control center after costs close', 10_000);
+
+    await page.keyboard.press('Control+K');
+    await expectVisible(page.getByTestId('cmd-palette-input'), 'command palette input', 10_000);
+    await page.getByTestId('cmd-palette-input').fill('成本');
+    await page.getByTestId('cmd-result').filter({ hasText: '打开成本看板' }).first().click();
+    await expectVisible(page.getByTestId('control-center'), 'control center via command palette', 10_000);
+    await expectVisible(page.getByTestId('cost-dashboard-panel'), 'cost dashboard via command palette', 20_000);
+    await screenshot(page, '17-command-palette-costs');
+    await expectNoLayoutOverflow(page, 'command palette costs');
+    await page.getByTestId('settings-close').click();
+    await expectHidden(page.getByTestId('control-center'), 'control center after command palette costs close', 10_000);
     events.steps.push({ name: 'control_settings_monitoring_surfaces', ok: true });
 
     if (events.page_errors.length > 0 || events.console_errors.length > 0) {
