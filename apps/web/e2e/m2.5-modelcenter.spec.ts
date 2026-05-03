@@ -114,7 +114,12 @@ test('model-center: provider library refresh, bulk enable, and import disabled c
     expect(providerRes.ok).toBeTruthy();
     const provider = (await providerRes.json()) as { id: string };
 
-    const create = async (model_name: string, enabled: boolean, isDefault = false) => {
+    const create = async (
+      model_name: string,
+      enabled: boolean,
+      isDefault = false,
+      options: { price?: number; context?: number; tools?: boolean } = {},
+    ) => {
       const res = await authedFetch(env, '/v1/models', {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
@@ -124,14 +129,17 @@ test('model-center: provider library refresh, bulk enable, and import disabled c
           display_name: model_name,
           capability: 'chat',
           is_default_for: isDefault ? 'chat' : null,
+          price_input_per_1m: options.price ?? null,
+          context_length: options.context ?? null,
+          supports_tools: options.tools ?? false,
           enabled,
         }),
       });
       expect(res.ok).toBeTruthy();
       return (await res.json()) as { id: string };
     };
-    const strategy = await create('mock-strategy', true, true);
-    const user = await create('mock-user', false);
+    const strategy = await create('mock-strategy', true, true, { price: 2, context: 32_000 });
+    const user = await create('mock-user', false, false, { price: 1, context: 64_000, tools: true });
 
     await page.goto('/');
     await page.getByTestId('open-model-center').click();
@@ -144,6 +152,19 @@ test('model-center: provider library refresh, bulk enable, and import disabled c
     await page.getByTestId('model-center-select-all').click();
     await page.getByTestId('model-center-bulk-enable').click();
     await expect(page.getByTestId(`model-row-${user.id}`)).toHaveCount(0);
+    await page.getByTestId('model-center-status-filter').selectOption('all');
+    await page.getByTestId('model-center-feature-filter').selectOption('tools');
+    await expect(page.getByTestId(`model-row-${user.id}`)).toBeVisible();
+    await expect(page.getByTestId(`model-row-${strategy.id}`)).toHaveCount(0);
+    await page.getByTestId('model-center-feature-filter').selectOption('default');
+    await expect(page.getByTestId(`model-row-${strategy.id}`)).toBeVisible();
+    await expect(page.getByTestId(`model-row-${user.id}`)).toHaveCount(0);
+    await page.getByTestId('model-center-feature-filter').selectOption('all');
+    await page.getByTestId('model-center-sort').selectOption('context_desc');
+    await expect(page.locator('.model-matrix tbody tr').first()).toHaveAttribute(
+      'data-testid',
+      `model-row-${user.id}`,
+    );
 
     await page.getByTestId(`provider-chip-library-${provider.id}`).click();
     await expect(page.getByTestId('import-drawer')).toBeVisible();
@@ -156,6 +177,9 @@ test('model-center: provider library refresh, bulk enable, and import disabled c
     await page.getByTestId('import-drawer-import-enabled').uncheck();
     await page.getByTestId('import-drawer-confirm').click();
     await expect(page.getByTestId('import-drawer')).toHaveCount(0);
+    await page.getByTestId('model-center-feature-filter').selectOption('unknown_price');
+    await expect(page.getByTestId('model-matrix')).toContainText('mock-tech');
+    await page.getByTestId('model-center-feature-filter').selectOption('all');
 
     const modelsAfterImport = (await (await authedFetch(env, '/v1/models')).json()) as {
       models: Array<{ id: string; model_name: string; enabled: boolean }>;
@@ -235,7 +259,9 @@ test('model-center: provider edit and scoped catalog sync update managed model p
     await page.getByTestId('open-model-center').click();
     await expect(page.getByTestId('model-center')).toBeVisible();
 
-    await page.getByTestId(`provider-chip-edit-${provider.id}`).click();
+    await page.getByTestId(`provider-chip-more-${provider.id}`).click();
+    await expect(page.getByTestId(`provider-chip-menu-${provider.id}`)).toBeVisible();
+    await page.getByTestId(`provider-menu-edit-${provider.id}`).click();
     await expect(page.getByTestId('provider-editor')).toBeVisible();
     await page.getByTestId('provider-editor-name').fill('Renamed Provider');
     await page.getByTestId('provider-editor-api-key').fill('sk-after');
@@ -257,6 +283,9 @@ test('model-center: provider edit and scoped catalog sync update managed model p
     await page.getByTestId('import-drawer-refresh').click();
     await expect(page.getByTestId(`import-drawer-diff-${model.id}`)).toBeVisible();
     await expect(page.getByTestId('import-drawer-managed-sync')).toBeVisible();
+    await page.getByTestId('import-drawer-diff-preview').click();
+    await expect(page.getByTestId('import-drawer-diff-preview')).toContainText('输入价');
+    await expect(page.getByTestId('import-drawer-diff-preview')).toContainText('上下文');
     await page.getByTestId('import-drawer-sync-managed').click();
 
     await expect

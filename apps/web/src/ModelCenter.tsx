@@ -50,6 +50,15 @@ interface SyncSummary {
   }[];
 }
 
+type ModelFeatureFilter = 'all' | 'tools' | 'vision' | 'default' | 'unknown_price';
+type ModelSortKey = 'priority' | 'name' | 'price_low' | 'price_high' | 'context_desc';
+
+interface ManagedModelDiff {
+  model: Model;
+  discovered: DiscoveredModel;
+  changes: string[];
+}
+
 const FAILURE_LABELS: Record<string, string> = {
   rate_limit: '限流',
   quota: '额度耗尽',
@@ -66,21 +75,61 @@ function priceChanged(a: number | null | undefined, b: number | null | undefined
   return Math.abs(a - b) > 0.0000001;
 }
 
-function discoveredDiffersFromManaged(
-  existing: Model | undefined,
-  discovered: DiscoveredModel,
-): boolean {
-  if (!existing) return false;
-  return (
-    priceChanged(existing.price_input_per_1m, discovered.price_input_per_1m) ||
-    priceChanged(existing.price_output_per_1m, discovered.price_output_per_1m) ||
-    priceChanged(existing.price_per_image, discovered.price_per_image) ||
-    priceChanged(existing.price_per_video_second, discovered.price_per_video_second) ||
-    existing.capability !== discovered.capability ||
-    existing.context_length !== discovered.context_length ||
-    existing.supports_vision !== discovered.supports_vision ||
-    (discovered.supports_tools !== undefined && existing.supports_tools !== discovered.supports_tools)
-  );
+function primaryPrice(model: Pick<Model, 'price_input_per_1m' | 'price_output_per_1m' | 'price_per_image' | 'price_per_video_second' | 'price_per_call'>): number | null {
+  const values = [
+    model.price_input_per_1m,
+    model.price_output_per_1m,
+    model.price_per_image,
+    model.price_per_video_second,
+    model.price_per_call,
+  ].filter((v): v is number => v != null && Number.isFinite(v));
+  if (values.length === 0) return null;
+  return Math.min(...values);
+}
+
+function discoveredPrice(discovered: DiscoveredModel): number | null {
+  const values = [
+    discovered.price_input_per_1m,
+    discovered.price_output_per_1m,
+    discovered.price_per_image ?? null,
+    discovered.price_per_video_second ?? null,
+  ].filter((v): v is number => v != null && Number.isFinite(v));
+  if (values.length === 0) return null;
+  return Math.min(...values);
+}
+
+function pricePairLabel(before: number | null | undefined, after: number | null | undefined): string {
+  return `${formatUsd(before ?? null)} -> ${formatUsd(after ?? null)}`;
+}
+
+function managedDiff(existing: Model | undefined, discovered: DiscoveredModel): ManagedModelDiff | null {
+  if (!existing) return null;
+  const changes: string[] = [];
+  if (priceChanged(existing.price_input_per_1m, discovered.price_input_per_1m)) {
+    changes.push(`输入价 ${pricePairLabel(existing.price_input_per_1m, discovered.price_input_per_1m)}`);
+  }
+  if (priceChanged(existing.price_output_per_1m, discovered.price_output_per_1m)) {
+    changes.push(`输出价 ${pricePairLabel(existing.price_output_per_1m, discovered.price_output_per_1m)}`);
+  }
+  if (priceChanged(existing.price_per_image, discovered.price_per_image)) {
+    changes.push(`图片价 ${pricePairLabel(existing.price_per_image, discovered.price_per_image)}`);
+  }
+  if (priceChanged(existing.price_per_video_second, discovered.price_per_video_second)) {
+    changes.push(`视频价 ${pricePairLabel(existing.price_per_video_second, discovered.price_per_video_second)}`);
+  }
+  if (existing.capability !== discovered.capability) {
+    changes.push(`能力 ${existing.capability} -> ${discovered.capability}`);
+  }
+  if (existing.context_length !== discovered.context_length) {
+    changes.push(`上下文 ${existing.context_length ?? '未知'} -> ${discovered.context_length ?? '未知'}`);
+  }
+  if (existing.supports_vision !== discovered.supports_vision) {
+    changes.push(`视觉 ${existing.supports_vision ? '支持' : '不支持'} -> ${discovered.supports_vision ? '支持' : '不支持'}`);
+  }
+  if (discovered.supports_tools !== undefined && existing.supports_tools !== discovered.supports_tools) {
+    changes.push(`工具 ${existing.supports_tools ? '支持' : '不支持'} -> ${discovered.supports_tools ? '支持' : '不支持'}`);
+  }
+  return changes.length > 0 ? { model: existing, discovered, changes } : null;
 }
 
 function formatMetricMs(value: number | null): string {
@@ -126,7 +175,10 @@ export function ModelCenter({
   const [modelQuery, setModelQuery] = useState('');
   const [providerFilter, setProviderFilter] = useState<string>('all');
   const [statusFilter, setStatusFilter] = useState<'all' | 'enabled' | 'disabled'>('all');
+  const [featureFilter, setFeatureFilter] = useState<ModelFeatureFilter>('all');
+  const [sortKey, setSortKey] = useState<ModelSortKey>('priority');
   const [selectedModelIds, setSelectedModelIds] = useState<Set<string>>(new Set());
+  const [providerMenuId, setProviderMenuId] = useState<string | null>(null);
   const syncing = syncingTarget !== null;
 
   const refresh = async (): Promise<void> => {
@@ -204,6 +256,7 @@ export function ModelCenter({
   }, [models]);
 
   const onSync = async (providerId?: string): Promise<void> => {
+    setProviderMenuId(null);
     setSyncingTarget(providerId ?? 'all');
     setError(null);
     try {
@@ -260,6 +313,7 @@ export function ModelCenter({
   };
 
   const onDeleteProvider = async (p: Provider): Promise<void> => {
+    setProviderMenuId(null);
     if (!window.confirm(`删除 Provider “${p.name}”？该 Provider 下的全部模型将一并删除。`)) return;
     try {
       await api.deleteProvider(p.id);
@@ -331,6 +385,7 @@ export function ModelCenter({
   } | null>(null);
 
   const onTestProvider = async (p: Provider): Promise<void> => {
+    setProviderMenuId(null);
     setTestResult(null);
     const firstModel = models.find((m) => m.provider_id === p.id);
     if (!firstModel) {
@@ -392,7 +447,7 @@ export function ModelCenter({
 
   useEffect(() => {
     setSelectedModelIds(new Set());
-  }, [activeTab, modelQuery, providerFilter, statusFilter]);
+  }, [activeTab, modelQuery, providerFilter, statusFilter, featureFilter, sortKey]);
 
   const activeTabModels = (modelsByCap.get(activeTab) ?? [])
     .slice()
@@ -402,6 +457,10 @@ export function ModelCenter({
     if (providerFilter !== 'all' && m.provider_id !== providerFilter) return false;
     if (statusFilter === 'enabled' && !m.enabled) return false;
     if (statusFilter === 'disabled' && m.enabled) return false;
+    if (featureFilter === 'tools' && !m.supports_tools) return false;
+    if (featureFilter === 'vision' && !m.supports_vision) return false;
+    if (featureFilter === 'default' && m.is_default_for !== activeTab) return false;
+    if (featureFilter === 'unknown_price' && primaryPrice(m) !== null) return false;
     if (!query) return true;
     const provider = m.provider_id ? providerById.get(m.provider_id) : null;
     const text = [
@@ -415,6 +474,21 @@ export function ModelCenter({
       .join(' ')
       .toLowerCase();
     return text.includes(query);
+  }).slice().sort((a, b) => {
+    if (sortKey === 'name') {
+      return (a.alias ?? a.display_name ?? a.model_name).localeCompare(b.alias ?? b.display_name ?? b.model_name);
+    }
+    if (sortKey === 'price_low' || sortKey === 'price_high') {
+      const ap = primaryPrice(a);
+      const bp = primaryPrice(b);
+      const an = ap == null ? Number.POSITIVE_INFINITY : ap;
+      const bn = bp == null ? Number.POSITIVE_INFINITY : bp;
+      return sortKey === 'price_low' ? an - bn : bn - an;
+    }
+    if (sortKey === 'context_desc') {
+      return (b.context_length ?? -1) - (a.context_length ?? -1);
+    }
+    return a.fallback_order - b.fallback_order;
   });
   const tab = CAPABILITY_TABS.find((t) => t.id === activeTab)!;
   const activeEnabledCount = activeTabModels.filter((m) => m.enabled).length;
@@ -550,43 +624,68 @@ export function ModelCenter({
                 >
                   模型库
                 </button>
-                <button
-                  type="button"
-                  className="provider-chip__test"
-                  onClick={() => void onSync(p.id)}
-                  disabled={syncing}
-                  data-testid={`provider-chip-sync-${p.id}`}
-                  title="只同步该 Provider 的已管理模型价格与能力"
-                >
-                  {syncingTarget === p.id ? '同步中' : '同步'}
-                </button>
-                <button
-                  type="button"
-                  className="provider-chip__test"
-                  onClick={() => setEditingProvider(p)}
-                  data-testid={`provider-chip-edit-${p.id}`}
-                  title="编辑 Provider 名称、Base URL、API Key 与启停状态"
-                >
-                  编辑
-                </button>
-                <button
-                  type="button"
-                  className="provider-chip__test"
-                  onClick={() => void onTestProvider(p)}
-                  data-testid={`provider-chip-test-${p.id}`}
-                  title="测试连接"
-                >
-                  测试
-                </button>
-                <button
-                  type="button"
-                  className="provider-chip__del"
-                  onClick={() => void onDeleteProvider(p)}
-                  aria-label={`删除 ${p.name}`}
-                  title="删除 Provider"
-                >
-                  ✕
-                </button>
+                <div className="provider-chip__menu-wrap">
+                  <button
+                    type="button"
+                    className="provider-chip__more"
+                    onClick={() => setProviderMenuId((current) => (current === p.id ? null : p.id))}
+                    data-testid={`provider-chip-more-${p.id}`}
+                    aria-expanded={providerMenuId === p.id}
+                    aria-haspopup="menu"
+                    title="更多 Provider 操作"
+                  >
+                    更多
+                  </button>
+                  {providerMenuId === p.id && (
+                    <div
+                      className="provider-chip__menu"
+                      role="menu"
+                      data-testid={`provider-chip-menu-${p.id}`}
+                    >
+                      <button
+                        type="button"
+                        role="menuitem"
+                        onClick={() => void onSync(p.id)}
+                        disabled={syncing}
+                        data-testid={`provider-menu-sync-${p.id}`}
+                        title="只同步该 Provider 的已管理模型价格与能力"
+                      >
+                        {syncingTarget === p.id ? '同步中' : '同步'}
+                      </button>
+                      <button
+                        type="button"
+                        role="menuitem"
+                        onClick={() => {
+                          setProviderMenuId(null);
+                          setEditingProvider(p);
+                        }}
+                        data-testid={`provider-menu-edit-${p.id}`}
+                        title="编辑 Provider 名称、Base URL、API Key 与启停状态"
+                      >
+                        编辑
+                      </button>
+                      <button
+                        type="button"
+                        role="menuitem"
+                        onClick={() => void onTestProvider(p)}
+                        data-testid={`provider-menu-test-${p.id}`}
+                        title="测试连接"
+                      >
+                        测试
+                      </button>
+                      <button
+                        type="button"
+                        role="menuitem"
+                        className="is-danger"
+                        onClick={() => void onDeleteProvider(p)}
+                        data-testid={`provider-menu-delete-${p.id}`}
+                        aria-label={`删除 ${p.name}`}
+                      >
+                        删除
+                      </button>
+                    </div>
+                  )}
+                </div>
                 {testResult && testResult.providerId === p.id && (
                   <span
                     className={`provider-chip__test-result ${testResult.ok ? 'ok' : 'err'}`}
@@ -682,6 +781,34 @@ export function ModelCenter({
               <option value="all">全部状态</option>
               <option value="enabled">只看启用</option>
               <option value="disabled">只看停用</option>
+            </select>
+          </label>
+          <label>
+            特性
+            <select
+              value={featureFilter}
+              onChange={(e) => setFeatureFilter(e.target.value as ModelFeatureFilter)}
+              data-testid="model-center-feature-filter"
+            >
+              <option value="all">全部特性</option>
+              <option value="tools">支持工具调用</option>
+              <option value="vision">支持视觉输入</option>
+              <option value="default">当前默认模型</option>
+              <option value="unknown_price">价格未知</option>
+            </select>
+          </label>
+          <label>
+            排序
+            <select
+              value={sortKey}
+              onChange={(e) => setSortKey(e.target.value as ModelSortKey)}
+              data-testid="model-center-sort"
+            >
+              <option value="priority">兜底优先级</option>
+              <option value="name">模型名称</option>
+              <option value="price_low">价格从低到高</option>
+              <option value="price_high">价格从高到低</option>
+              <option value="context_desc">上下文从大到小</option>
             </select>
           </label>
           <div className="model-center__bulk" data-testid="model-center-bulk-actions">
@@ -1148,13 +1275,14 @@ function ImportDrawer({
       );
   }, [discovered, filter, capability, existingByName, libraryStatus]);
 
-  const changedManagedCount = useMemo(
+  const managedDiffs = useMemo(
     () =>
-      discovered.filter((m) =>
-        discoveredDiffersFromManaged(existingByName.get(m.model_name), m),
-      ).length,
+      discovered
+        .map((m) => managedDiff(existingByName.get(m.model_name), m))
+        .filter((diff): diff is ManagedModelDiff => diff !== null),
     [discovered, existingByName],
   );
+  const changedManagedCount = managedDiffs.length;
 
   const toggle = (name: string): void => {
     setPicked((s) => {
@@ -1241,6 +1369,20 @@ function ImportDrawer({
             <div>
               <strong>发现 {changedManagedCount} 个已管理模型可同步</strong>
               <p className="hint">只更新价格、能力、上下文、视觉/工具支持，不会改别名、默认、启停和排序。</p>
+              <details className="import-drawer__diff-preview" data-testid="import-drawer-diff-preview">
+                <summary>查看变更预览</summary>
+                <ul>
+                  {managedDiffs.slice(0, 20).map((diff) => (
+                    <li key={diff.model.id}>
+                      <span>{diff.model.display_name ?? diff.model.model_name}</span>
+                      <em>{diff.changes.join('；')}</em>
+                    </li>
+                  ))}
+                </ul>
+                {managedDiffs.length > 20 && (
+                  <p className="hint">还有 {managedDiffs.length - 20} 个模型未展开显示。</p>
+                )}
+              </details>
             </div>
             <button
               type="button"
@@ -1330,7 +1472,9 @@ function ImportDrawer({
               const existing = existingByName.get(m.model_name);
               const isExisting = Boolean(existing);
               const isPicked = picked.has(m.model_name);
-              const hasManagedDiff = discoveredDiffersFromManaged(existing, m);
+              const diff = managedDiff(existing, m);
+              const hasManagedDiff = diff !== null;
+              const priceHint = discoveredPrice(m);
               return (
                 <li
                   key={m.model_name}
@@ -1356,6 +1500,7 @@ function ImportDrawer({
                         : m.capability === 'video'
                           ? `每秒 ${formatUsd(m.price_per_video_second ?? null)}`
                           : `输入 ${formatUsd(m.price_input_per_1m ?? null)} · 输出 ${formatUsd(m.price_output_per_1m ?? null)}`}
+                      {priceHint == null ? ' · 价格未知' : ''}
                     </span>
                     {existing ? (
                       <>
@@ -1366,10 +1511,12 @@ function ImportDrawer({
                           <span
                             className="badge badge--price_changed"
                             data-testid={`import-drawer-diff-${existing.id}`}
+                            title={diff.changes.join('；')}
                           >
                             可同步
                           </span>
                         )}
+                        {diff && <span className="import-row__diff">{diff.changes[0]}</span>}
                         <button
                           type="button"
                           className="import-row__toggle"

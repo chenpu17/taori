@@ -445,7 +445,7 @@ async function createTempManagedModel(env, caps) {
     enabled: false,
     price_input_per_1m: 0,
     price_output_per_1m: 0,
-    supports_tools: false,
+    supports_tools: true,
     supports_vision: false,
   }).catch(() => null);
 }
@@ -821,13 +821,23 @@ async function runJourney({ env, caps }) {
       await page.getByTestId('model-center-bulk-enable').click();
       await page.getByTestId('model-center-status-filter').selectOption('enabled');
       await expectVisible(page.getByTestId(`model-row-${tempManagedModel.id}`), 'temporary enabled model row', 20_000);
-      await page.getByTestId(`provider-chip-edit-${caps.toolChat.provider_id}`).click();
+      await page.getByTestId('model-center-feature-filter').selectOption('tools');
+      await expectVisible(page.getByTestId(`model-row-${tempManagedModel.id}`), 'temporary tools-capable model row', 20_000);
+      await page.getByTestId('model-center-sort').selectOption('context_desc');
+      await screenshot(page, '13d-model-filter-sort');
+      await expectNoLayoutOverflow(page, 'model center filter and sort');
+      await page.getByTestId('model-center-feature-filter').selectOption('all');
+      await page.getByTestId(`provider-chip-more-${caps.toolChat.provider_id}`).click();
+      await expectVisible(page.getByTestId(`provider-chip-menu-${caps.toolChat.provider_id}`), 'provider more menu', 10_000);
+      await page.getByTestId(`provider-menu-edit-${caps.toolChat.provider_id}`).click();
       await expectVisible(page.getByTestId('provider-editor'), 'provider editor', 10_000);
       await screenshot(page, '13a-provider-editor');
       await expectNoLayoutOverflow(page, 'provider editor');
       await page.getByTestId('provider-editor-cancel').click();
       await expectHidden(page.getByTestId('provider-editor'), 'provider editor after cancel', 10_000);
-      await page.getByTestId(`provider-chip-sync-${caps.toolChat.provider_id}`).click();
+      await page.getByTestId(`provider-chip-more-${caps.toolChat.provider_id}`).click();
+      await expectVisible(page.getByTestId(`provider-chip-menu-${caps.toolChat.provider_id}`), 'provider more menu for sync', 10_000);
+      await page.getByTestId(`provider-menu-sync-${caps.toolChat.provider_id}`).click();
       await expectVisible(page.getByTestId('model-center-sync-summary'), 'single provider sync summary', 45_000);
       await screenshot(page, '13c-provider-scoped-sync');
       await expectNoLayoutOverflow(page, 'provider scoped sync');

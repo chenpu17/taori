@@ -120,9 +120,7 @@ test('model-center: opens, lists provider chip + chat model row, can disable + d
   // One Provider chip and one chat model row.
   await expect(page.getByTestId('model-center-providers').locator('.provider-chip'))
     .toHaveCount(1);
-  const rows = page.locator(
-    '[data-testid^="model-row-"]:not([data-testid^="model-row-default-"]):not([data-testid^="model-row-up-"]):not([data-testid^="model-row-down-"]):not([data-testid^="model-row-delete-"]):not([data-testid^="model-row-enabled-"])',
-  );
+  const rows = page.locator('.model-matrix tbody > tr:not(.model-health-row)');
   await expect(rows).toHaveCount(1);
 
   // Toggle disable/enable.
@@ -146,8 +144,11 @@ test('model-center: provider chip "测试" reports key_missing for keyless provi
   await seedDefaultModel(env); // no api key → /test reports key_missing
   await page.goto('/');
   await page.getByTestId('open-model-center').click();
-  const testBtn = page.locator('[data-testid^="provider-chip-test-"]').first();
-  await testBtn.click();
+  const providerChip = page.locator('[data-testid^="provider-chip-"]').first();
+  const providerId = (await providerChip.getAttribute('data-testid'))?.replace('provider-chip-', '');
+  expect(providerId).toBeTruthy();
+  await page.getByTestId(`provider-chip-more-${providerId}`).click();
+  await page.getByTestId(`provider-menu-test-${providerId}`).click();
   const result = page.locator('[data-testid^="provider-chip-test-result-"]').first();
   await expect(result).toBeVisible();
   await expect(result).toContainText('✗');
