@@ -181,3 +181,107 @@ test('model-center: provider library refresh, bulk enable, and import disabled c
     await new Promise<void>((resolve) => server.close(() => resolve()));
   }
 });
+
+test('model-center: provider edit and scoped catalog sync update managed model pricing', async ({
+  page,
+}) => {
+  test.setTimeout(90_000);
+  const env = readSidecarEnv();
+  await resetSidecar(env);
+  const server = startMockOpenAI(17932, {
+    models: [
+      {
+        id: 'priced-model',
+        object: 'model',
+        name: 'Priced Model',
+        context_length: 12345,
+        pricing: { prompt: '0.000003', completion: '0.000004' },
+        architecture: { input_modalities: ['text'] },
+      },
+    ],
+  });
+  try {
+    const providerRes = await authedFetch(env, '/v1/providers', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        name: 'Editable Provider',
+        type: 'openrouter',
+        base_url: 'http://127.0.0.1:17932/v1',
+        api_key: 'sk-before',
+      }),
+    });
+    expect(providerRes.ok).toBeTruthy();
+    const provider = (await providerRes.json()) as { id: string };
+
+    const modelRes = await authedFetch(env, '/v1/models', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        provider_id: provider.id,
+        model_name: 'priced-model',
+        display_name: 'Priced Model',
+        capability: 'chat',
+        price_input_per_1m: 1,
+        price_output_per_1m: 2,
+        supports_tools: true,
+        enabled: true,
+      }),
+    });
+    expect(modelRes.ok).toBeTruthy();
+    const model = (await modelRes.json()) as { id: string };
+
+    await page.goto('/');
+    await page.getByTestId('open-model-center').click();
+    await expect(page.getByTestId('model-center')).toBeVisible();
+
+    await page.getByTestId(`provider-chip-edit-${provider.id}`).click();
+    await expect(page.getByTestId('provider-editor')).toBeVisible();
+    await page.getByTestId('provider-editor-name').fill('Renamed Provider');
+    await page.getByTestId('provider-editor-api-key').fill('sk-after');
+    await page.getByTestId('provider-editor-enabled').uncheck();
+    await page.getByTestId('provider-editor-save').click();
+    await expect(page.getByTestId('provider-editor')).toHaveCount(0);
+    await expect(page.getByTestId(`provider-chip-${provider.id}`)).toContainText('Renamed Provider');
+
+    const providerAfter = (await (await authedFetch(env, '/v1/providers')).json()) as {
+      providers: Array<{ id: string; name: string; enabled: boolean }>;
+    };
+    expect(providerAfter.providers.find((p) => p.id === provider.id)).toMatchObject({
+      name: 'Renamed Provider',
+      enabled: false,
+    });
+
+    await page.getByTestId(`provider-chip-library-${provider.id}`).click();
+    await expect(page.getByTestId('import-drawer')).toBeVisible();
+    await page.getByTestId('import-drawer-refresh').click();
+    await expect(page.getByTestId(`import-drawer-diff-${model.id}`)).toBeVisible();
+    await expect(page.getByTestId('import-drawer-managed-sync')).toBeVisible();
+    await page.getByTestId('import-drawer-sync-managed').click();
+
+    await expect
+      .poll(async () => {
+        const body = (await (await authedFetch(env, '/v1/models')).json()) as {
+          models: Array<{
+            id: string;
+            price_input_per_1m: number | null;
+            price_output_per_1m: number | null;
+            context_length: number | null;
+            supports_tools: boolean;
+          }>;
+        };
+        const row = body.models.find((m) => m.id === model.id);
+        return row
+          ? {
+              input: row.price_input_per_1m,
+              output: row.price_output_per_1m,
+              context: row.context_length,
+              tools: row.supports_tools,
+            }
+          : null;
+      })
+      .toEqual({ input: 3, output: 4, context: 12345, tools: false });
+  } finally {
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  }
+});

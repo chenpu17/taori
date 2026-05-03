@@ -167,9 +167,11 @@ C3（Prompt 模板 & Persona 预设）已实现：
 
 - `apps/web/src/ModelCenter.tsx`：模型中心拆成“已管理模型工作台 + 供应商模型库抽屉”。工作台支持按 Provider / 状态 / 关键字筛选，选择当前筛选结果后批量启用或停用；Provider chip 显示已管理 / 启用 / 停用数量，并可直接打开对应供应商模型库。
 - `apps/web/src/ModelCenter.tsx`：供应商模型库支持刷新 discovery 清单，按未管理 / 已启用 / 已停用筛选；已管理模型可在抽屉内直接启停，未管理候选可选择“导入后立即启用”。
+- `apps/web/src/ModelCenter.tsx`：Provider chip 新增编辑与单 Provider 同步入口。编辑弹窗复用既有 `PATCH /v1/providers/:id` 合同，支持改名称 / Base URL / API Key / 启停；单 Provider 同步复用 `POST /v1/catalog/sync { provider_id }`。
+- `apps/web/src/ModelCenter.tsx`：供应商模型库刷新后会对比已管理模型与 discovery 清单，标记价格 / 能力 / 上下文 / 工具视觉支持差异，并可一键同步已管理模型元数据。
 - `packages/shared`：`ModelCreateSchema` 新增可选 `enabled`，支持导入模型但暂不启用。
 - `apps/sidecar`：创建模型时 `enabled` 默认 `true`；停用默认模型会自动清理 `is_default_for`；停用模型不能被设为默认模型。
-- 验证：`apps/web/e2e/m2.5-modelcenter.spec.ts` 覆盖模型库刷新、批量启用、停用导入与抽屉内启用；`apps/sidecar/test/providers.test.ts` 覆盖停用默认绑定清理与停用默认拒绝。
+- 验证：`apps/web/e2e/m2.5-modelcenter.spec.ts` 覆盖模型库刷新、批量启用、停用导入、抽屉内启用、Provider 编辑与单 Provider 价格同步；`apps/sidecar/test/providers.test.ts` 覆盖停用默认绑定清理与停用默认拒绝。
 
 ## 10.4 D1 / D2 完工记录（v0.8）
 

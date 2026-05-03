@@ -821,6 +821,16 @@ async function runJourney({ env, caps }) {
       await page.getByTestId('model-center-bulk-enable').click();
       await page.getByTestId('model-center-status-filter').selectOption('enabled');
       await expectVisible(page.getByTestId(`model-row-${tempManagedModel.id}`), 'temporary enabled model row', 20_000);
+      await page.getByTestId(`provider-chip-edit-${caps.toolChat.provider_id}`).click();
+      await expectVisible(page.getByTestId('provider-editor'), 'provider editor', 10_000);
+      await screenshot(page, '13a-provider-editor');
+      await expectNoLayoutOverflow(page, 'provider editor');
+      await page.getByTestId('provider-editor-cancel').click();
+      await expectHidden(page.getByTestId('provider-editor'), 'provider editor after cancel', 10_000);
+      await page.getByTestId(`provider-chip-sync-${caps.toolChat.provider_id}`).click();
+      await expectVisible(page.getByTestId('model-center-sync-summary'), 'single provider sync summary', 45_000);
+      await screenshot(page, '13c-provider-scoped-sync');
+      await expectNoLayoutOverflow(page, 'provider scoped sync');
       await page.getByTestId(`provider-chip-library-${caps.toolChat.provider_id}`).click();
       await expectVisible(page.getByTestId('import-drawer'), 'provider model library drawer', 20_000);
       await page.getByTestId('import-drawer-refresh').click();
@@ -831,7 +841,7 @@ async function runJourney({ env, caps }) {
       await page.locator('[data-testid="import-drawer"] button[aria-label="关闭"]').click();
       await expectHidden(page.getByTestId('import-drawer'), 'provider model library drawer after close', 10_000);
       events.steps.push({
-        name: 'model_management_library_refresh_and_bulk_toggle',
+        name: 'model_management_provider_edit_sync_library_refresh_and_bulk_toggle',
         ok: true,
         provider_id: caps.toolChat.provider_id,
       });

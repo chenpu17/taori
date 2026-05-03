@@ -33,6 +33,9 @@ interface MockModelListItem {
   status?: string | null;
   created?: number;
   version?: string;
+  context_length?: number;
+  pricing?: { prompt?: string; completion?: string };
+  architecture?: { modality?: string; input_modalities?: string[] };
 }
 
 function textOf(m: ChatMessage): string {

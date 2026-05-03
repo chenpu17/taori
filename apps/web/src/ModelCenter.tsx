@@ -20,8 +20,9 @@ import {
   type Model,
   type ModelHealthRow,
   type ModelCapability,
-  type ModelDiscoveryResponse,
+  type DiscoveredModel,
   type Provider,
+  type ProviderUpdate,
 } from '@taori/shared';
 
 const CAPABILITY_TABS: { id: ModelCapability; label: string; hint: string }[] = [
@@ -59,6 +60,29 @@ const FAILURE_LABELS: Record<string, string> = {
   key_missing: 'Key 缺失',
 };
 
+function priceChanged(a: number | null | undefined, b: number | null | undefined): boolean {
+  if (a == null && b == null) return false;
+  if (a == null || b == null) return true;
+  return Math.abs(a - b) > 0.0000001;
+}
+
+function discoveredDiffersFromManaged(
+  existing: Model | undefined,
+  discovered: DiscoveredModel,
+): boolean {
+  if (!existing) return false;
+  return (
+    priceChanged(existing.price_input_per_1m, discovered.price_input_per_1m) ||
+    priceChanged(existing.price_output_per_1m, discovered.price_output_per_1m) ||
+    priceChanged(existing.price_per_image, discovered.price_per_image) ||
+    priceChanged(existing.price_per_video_second, discovered.price_per_video_second) ||
+    existing.capability !== discovered.capability ||
+    existing.context_length !== discovered.context_length ||
+    existing.supports_vision !== discovered.supports_vision ||
+    (discovered.supports_tools !== undefined && existing.supports_tools !== discovered.supports_tools)
+  );
+}
+
 function formatMetricMs(value: number | null): string {
   if (value == null || !Number.isFinite(value)) return '—';
   return `${Math.round(value)}ms`;
@@ -90,7 +114,7 @@ export function ModelCenter({
   const [providers, setProviders] = useState<Provider[]>([]);
   const [keyStatus, setKeyStatus] = useState<Map<string, boolean>>(new Map());
   const [loading, setLoading] = useState(true);
-  const [syncing, setSyncing] = useState(false);
+  const [syncingTarget, setSyncingTarget] = useState<string | 'all' | null>(null);
   const [syncSummary, setSyncSummary] = useState<SyncSummary | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [healthRows, setHealthRows] = useState<Map<string, ModelHealthRow>>(new Map());
@@ -103,6 +127,7 @@ export function ModelCenter({
   const [providerFilter, setProviderFilter] = useState<string>('all');
   const [statusFilter, setStatusFilter] = useState<'all' | 'enabled' | 'disabled'>('all');
   const [selectedModelIds, setSelectedModelIds] = useState<Set<string>>(new Set());
+  const syncing = syncingTarget !== null;
 
   const refresh = async (): Promise<void> => {
     setLoading(true);
@@ -178,11 +203,11 @@ export function ModelCenter({
     return out;
   }, [models]);
 
-  const onSync = async (): Promise<void> => {
-    setSyncing(true);
+  const onSync = async (providerId?: string): Promise<void> => {
+    setSyncingTarget(providerId ?? 'all');
     setError(null);
     try {
-      const res = await api.catalogSync();
+      const res = await api.catalogSync(providerId);
       const changed = res.diffs.filter((d) => d.change === 'price_changed').length;
       const newCount = res.diffs.filter((d) => d.change === 'new').length;
       setSyncSummary({
@@ -199,7 +224,7 @@ export function ModelCenter({
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
-      setSyncing(false);
+      setSyncingTarget(null);
     }
   };
 
@@ -266,12 +291,25 @@ export function ModelCenter({
   };
 
   const [editing, setEditing] = useState<Model | null>(null);
+  const [editingProvider, setEditingProvider] = useState<Provider | null>(null);
 
   const onSaveEdit = async (patch: import('@taori/shared').ModelUpdate): Promise<void> => {
     if (!editing) return;
     try {
       await api.updateModel(editing.id, patch);
       setEditing(null);
+      await refresh();
+      onChanged?.();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    }
+  };
+
+  const onSaveProviderEdit = async (patch: ProviderUpdate): Promise<void> => {
+    if (!editingProvider) return;
+    try {
+      await api.updateProvider(editingProvider.id, patch);
+      setEditingProvider(null);
       await refresh();
       onChanged?.();
     } catch (e) {
@@ -437,7 +475,7 @@ export function ModelCenter({
             disabled={syncing}
             data-testid="model-center-sync"
           >
-            {syncing ? '同步中…' : '🔄 同步价格'}
+            {syncingTarget === 'all' ? '同步中…' : '🔄 同步价格'}
           </button>
           {!embedded && (
             <button type="button" onClick={onClose} data-testid="model-center-close">
@@ -511,6 +549,25 @@ export function ModelCenter({
                   title="打开供应商模型库并刷新候选清单"
                 >
                   模型库
+                </button>
+                <button
+                  type="button"
+                  className="provider-chip__test"
+                  onClick={() => void onSync(p.id)}
+                  disabled={syncing}
+                  data-testid={`provider-chip-sync-${p.id}`}
+                  title="只同步该 Provider 的已管理模型价格与能力"
+                >
+                  {syncingTarget === p.id ? '同步中' : '同步'}
+                </button>
+                <button
+                  type="button"
+                  className="provider-chip__test"
+                  onClick={() => setEditingProvider(p)}
+                  data-testid={`provider-chip-edit-${p.id}`}
+                  title="编辑 Provider 名称、Base URL、API Key 与启停状态"
+                >
+                  编辑
                 </button>
                 <button
                   type="button"
@@ -850,6 +907,16 @@ export function ModelCenter({
             await refresh();
             onChanged?.();
           }}
+          onProviderSynced={async (providerId) => {
+            await onSync(providerId);
+          }}
+        />
+      )}
+      {editingProvider && (
+        <EditProviderDialog
+          provider={editingProvider}
+          onCancel={() => setEditingProvider(null)}
+          onSave={(patch) => void onSaveProviderEdit(patch)}
         />
       )}
       {editing && (
@@ -973,8 +1040,6 @@ function SyncResult({
 // ----------------------------------------------------------------------------
 // Import drawer — discover models from a Provider and import the picked ones.
 // ----------------------------------------------------------------------------
-type DiscoveredModel = ModelDiscoveryResponse['models'][number];
-
 function ImportDrawer({
   providers,
   existingModels,
@@ -983,6 +1048,7 @@ function ImportDrawer({
   onClose,
   onImported,
   onModelsChanged,
+  onProviderSynced,
 }: {
   providers: Provider[];
   existingModels: Model[];
@@ -991,6 +1057,7 @@ function ImportDrawer({
   onClose: () => void;
   onImported: () => Promise<void>;
   onModelsChanged: () => Promise<void>;
+  onProviderSynced: (providerId: string) => Promise<void>;
 }): JSX.Element {
   const [providerId, setProviderId] = useState<string | null>(initialProviderId);
   const [capability, setCapability] = useState<ModelCapability>(initialCapability);
@@ -1002,6 +1069,7 @@ function ImportDrawer({
   const [picked, setPicked] = useState<Set<string>>(new Set());
   const [err, setErr] = useState<string | null>(null);
   const [importEnabled, setImportEnabled] = useState(true);
+  const [syncingManaged, setSyncingManaged] = useState(false);
 
   const discover = async (): Promise<void> => {
     if (!providerId) return;
@@ -1080,6 +1148,14 @@ function ImportDrawer({
       );
   }, [discovered, filter, capability, existingByName, libraryStatus]);
 
+  const changedManagedCount = useMemo(
+    () =>
+      discovered.filter((m) =>
+        discoveredDiffersFromManaged(existingByName.get(m.model_name), m),
+      ).length,
+    [discovered, existingByName],
+  );
+
   const toggle = (name: string): void => {
     setPicked((s) => {
       const next = new Set(s);
@@ -1130,6 +1206,20 @@ function ImportDrawer({
     }
   };
 
+  const onSyncManaged = async (): Promise<void> => {
+    if (!providerId) return;
+    setErr(null);
+    setSyncingManaged(true);
+    try {
+      await onProviderSynced(providerId);
+      await discover();
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : String(e));
+    } finally {
+      setSyncingManaged(false);
+    }
+  };
+
   return (
     <div
       className="import-drawer-overlay"
@@ -1145,6 +1235,23 @@ function ImportDrawer({
           <h3>导入模型</h3>
           <button type="button" onClick={onClose} aria-label="关闭">✕</button>
         </header>
+
+        {changedManagedCount > 0 && (
+          <div className="import-drawer__sync" data-testid="import-drawer-managed-sync">
+            <div>
+              <strong>发现 {changedManagedCount} 个已管理模型可同步</strong>
+              <p className="hint">只更新价格、能力、上下文、视觉/工具支持，不会改别名、默认、启停和排序。</p>
+            </div>
+            <button
+              type="button"
+              onClick={() => void onSyncManaged()}
+              disabled={!providerId || syncingManaged}
+              data-testid="import-drawer-sync-managed"
+            >
+              {syncingManaged ? '同步中…' : '同步已管理模型'}
+            </button>
+          </div>
+        )}
 
         <div className="import-drawer__filters">
           <label>
@@ -1223,6 +1330,7 @@ function ImportDrawer({
               const existing = existingByName.get(m.model_name);
               const isExisting = Boolean(existing);
               const isPicked = picked.has(m.model_name);
+              const hasManagedDiff = discoveredDiffersFromManaged(existing, m);
               return (
                 <li
                   key={m.model_name}
@@ -1254,6 +1362,14 @@ function ImportDrawer({
                         <span className={`badge ${existing.enabled ? 'badge--default' : ''}`}>
                           {existing.enabled ? '已启用' : '已停用'}
                         </span>
+                        {hasManagedDiff && (
+                          <span
+                            className="badge badge--price_changed"
+                            data-testid={`import-drawer-diff-${existing.id}`}
+                          >
+                            可同步
+                          </span>
+                        )}
                         <button
                           type="button"
                           className="import-row__toggle"
@@ -1300,6 +1416,106 @@ function ImportDrawer({
             {importing ? '导入中…' : `导入 ${picked.size} 个模型`}
           </button>
         </footer>
+      </div>
+    </div>
+  );
+}
+
+// ----------------------------------------------------------------------------
+// EditProviderDialog — provider metadata, endpoint, key refresh and enablement.
+// ----------------------------------------------------------------------------
+function EditProviderDialog({
+  provider,
+  onCancel,
+  onSave,
+}: {
+  provider: Provider;
+  onCancel: () => void;
+  onSave: (patch: ProviderUpdate) => void;
+}): JSX.Element {
+  const [name, setName] = useState(provider.name);
+  const [baseUrl, setBaseUrl] = useState(provider.base_url);
+  const [apiKey, setApiKey] = useState('');
+  const [enabled, setEnabled] = useState(provider.enabled);
+
+  const submit = (e: FormEvent): void => {
+    e.preventDefault();
+    const patch: ProviderUpdate = {
+      name: name.trim() || provider.name,
+      base_url: baseUrl.trim() || provider.base_url,
+      enabled,
+    };
+    if (apiKey.trim()) {
+      patch.api_key = apiKey.trim();
+    }
+    onSave(patch);
+  };
+
+  return (
+    <div className="modal-backdrop" onClick={onCancel} data-testid="provider-editor-backdrop">
+      <div
+        className="modal-card provider-editor"
+        onClick={(e) => e.stopPropagation()}
+        data-testid="provider-editor"
+        role="dialog"
+        aria-modal="true"
+        aria-label="编辑 Provider"
+      >
+        <header className="modal-card__head">
+          <div>
+            <h3>编辑 Provider</h3>
+            <p className="hint">{provider.type}</p>
+          </div>
+          <button type="button" onClick={onCancel} aria-label="关闭">
+            ✕
+          </button>
+        </header>
+        <form onSubmit={submit} className="model-editor__body">
+          <label className="field">
+            <span>名称</span>
+            <input
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+              data-testid="provider-editor-name"
+            />
+          </label>
+          <label className="field">
+            <span>Base URL</span>
+            <input
+              type="url"
+              value={baseUrl}
+              onChange={(e) => setBaseUrl(e.target.value)}
+              data-testid="provider-editor-base-url"
+            />
+          </label>
+          <label className="field">
+            <span>API Key（留空则保持当前 Key）</span>
+            <input
+              type="password"
+              value={apiKey}
+              onChange={(e) => setApiKey(e.target.value)}
+              placeholder={provider.api_key_ref ? '已配置，输入新 Key 可替换' : '未配置，请输入 Key'}
+              data-testid="provider-editor-api-key"
+            />
+          </label>
+          <label className="field-inline">
+            <input
+              type="checkbox"
+              checked={enabled}
+              onChange={(e) => setEnabled(e.target.checked)}
+              data-testid="provider-editor-enabled"
+            />
+            <span>启用该 Provider（关闭后不参与全局价格同步，已导入模型仍可管理）</span>
+          </label>
+          <footer className="model-editor__foot">
+            <button type="button" onClick={onCancel} data-testid="provider-editor-cancel">
+              取消
+            </button>
+            <button type="submit" className="btn-primary" data-testid="provider-editor-save">
+              保存
+            </button>
+          </footer>
+        </form>
       </div>
     </div>
   );
