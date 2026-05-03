@@ -10,6 +10,7 @@
  */
 import { createRequire } from 'node:module';
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -264,6 +265,11 @@ async function expectNoLayoutOverflow(page, label) {
       '[data-testid="context-snapshot-card"]',
       '[data-testid="tool-trace-timeline"]',
       '[data-testid="control-center"]',
+      '[data-testid="settings-mcp"]',
+      '[data-testid="model-center"]',
+      '[data-testid="model-editor"]',
+      '[data-testid="roundtable-panel"]',
+      '[data-testid^="roundtable-tool-traces-"]',
       '[data-testid="run-timeline-panel"]',
     ];
     const viewportWidth = document.documentElement.clientWidth;
@@ -434,6 +440,72 @@ async function cleanupTempModel(env, model) {
   await authedFetch(env, `/v1/models/${model.id}`, { method: 'DELETE' }).catch(() => null);
 }
 
+async function cleanupTempMcpServer(env, server) {
+  if (server?.id) {
+    await authedFetch(env, `/v1/mcp/servers/${server.id}`, { method: 'DELETE' }).catch(() => null);
+  }
+  if (server?.tmpDir) {
+    fs.rmSync(server.tmpDir, { recursive: true, force: true });
+  }
+}
+
+function mockMcpServerSource() {
+  return `
+let buffer = Buffer.alloc(0);
+function send(id, result) {
+  const payload = Buffer.from(JSON.stringify({ jsonrpc: '2.0', id, result }), 'utf8');
+  process.stdout.write('Content-Length: ' + payload.byteLength + '\\r\\n\\r\\n');
+  process.stdout.write(payload);
+}
+function handle(message) {
+  if (!message.id) return;
+  if (message.method === 'initialize') {
+    send(message.id, { protocolVersion: '2024-11-05', capabilities: { tools: {} }, serverInfo: { name: 'real-journey-local', version: '1' } });
+  } else if (message.method === 'tools/list') {
+    send(message.id, { tools: [{ name: 'evidence', description: 'Real Journey Local Evidence', inputSchema: { type: 'object' } }] });
+  } else if (message.method === 'tools/call') {
+    send(message.id, { content: [{ type: 'text', text: 'local evidence:' + (message.params?.arguments?.text ?? '${RUN_ID}') }] });
+  }
+}
+process.stdin.on('data', (chunk) => {
+  buffer = Buffer.concat([buffer, chunk]);
+  while (true) {
+    const sep = buffer.indexOf('\\r\\n\\r\\n');
+    if (sep < 0) return;
+    const header = buffer.slice(0, sep).toString('utf8');
+    const match = /content-length:\\s*(\\d+)/i.exec(header);
+    if (!match) return;
+    const len = Number(match[1]);
+    const start = sep + 4;
+    const end = start + len;
+    if (buffer.byteLength < end) return;
+    const payload = buffer.slice(start, end).toString('utf8');
+    buffer = buffer.slice(end);
+    handle(JSON.parse(payload));
+  }
+});
+`;
+}
+
+async function createTempMcpServer(env) {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'taori-real-mcp-'));
+  const scriptPath = path.join(tmpDir, 'real-journey-mcp-server.mjs');
+  fs.writeFileSync(scriptPath, mockMcpServerSource(), 'utf8');
+  const created = await postJson(env, '/v1/mcp/servers', {
+    name: `${RUN_ID} Local Evidence MCP`,
+    command: process.execPath,
+    args: [scriptPath],
+    enabled: true,
+  });
+  const refreshed = await jsonFetch(env, `/v1/mcp/servers/${created.server.id}/refresh`, {
+    method: 'POST',
+  });
+  if (!refreshed.ok || refreshed.server?.health_status !== 'ok' || refreshed.server?.tools_count < 1) {
+    fail('temporary MCP server did not refresh successfully', { refreshed });
+  }
+  return { ...refreshed.server, tmpDir };
+}
+
 async function createTempManagedModel(env, caps) {
   const providerId = caps.toolChat.provider_id;
   if (!providerId) return null;
@@ -519,6 +591,7 @@ async function runJourney({ env, caps }) {
   fs.mkdirSync(ARTIFACT_DIR, { recursive: true });
   let promptAssets = null;
   let tempManagedModel = null;
+  let tempMcpServer = null;
   const browser = await chromium.launch({ headless: process.env.HEADED !== '1' });
   const context = await browser.newContext({
     viewport: { width: 1440, height: 1000 },
@@ -575,11 +648,18 @@ async function runJourney({ env, caps }) {
 
     promptAssets = await createPromptAssetsFromUi(page, env);
     tempManagedModel = await createTempManagedModel(env, caps);
+    tempMcpServer = await createTempMcpServer(env);
     events.steps.push({
       name: 'create_prompt_assets_from_ui',
       ok: true,
       template_id: promptAssets.template.id,
       persona_id: promptAssets.persona.id,
+    });
+    events.steps.push({
+      name: 'create_local_mcp_server',
+      ok: true,
+      server_id: tempMcpServer.id,
+      tools_count: tempMcpServer.tools_count,
     });
 
     log(`选择工具聊天模型：${modelLabel(caps.toolChat, caps.providerById)}`);
@@ -826,6 +906,32 @@ async function runJourney({ env, caps }) {
       await page.getByTestId('model-center-sort').selectOption('context_desc');
       await screenshot(page, '13d-model-filter-sort');
       await expectNoLayoutOverflow(page, 'model center filter and sort');
+      await page.getByTestId(`model-edit-${tempManagedModel.id}`).click();
+      await expectVisible(page.getByTestId('model-editor'), 'temporary model editor', 10_000);
+      await page.getByTestId('model-editor-pricing-meta').fill(
+        JSON.stringify(
+          {
+            version: 1,
+            unit: 'call',
+            tiers: [{ label: RUN_ID, match: { journey: 'real' }, price_usd: 0.001 }],
+            notes: `${RUN_ID} real journey pricing_meta`,
+          },
+          null,
+          2,
+        ),
+      );
+      await screenshot(page, '13e-pricing-meta-editor');
+      await expectNoLayoutOverflow(page, 'pricing meta editor');
+      await page.getByTestId('model-editor-save').click();
+      await expectHidden(page.getByTestId('model-editor'), 'temporary model editor after save', 10_000);
+      await expectVisible(
+        page.locator(`[data-testid="model-row-${tempManagedModel.id}"] .badge--price_changed`).first(),
+        'pricing meta badge on temporary model row',
+        10_000,
+      );
+      await screenshot(page, '13f-pricing-meta-badge');
+      await expectNoLayoutOverflow(page, 'pricing meta badge in model matrix');
+      events.steps.push({ name: 'pricing_meta_edit_from_model_center', ok: true, model_id: tempManagedModel.id });
       await page.getByTestId('model-center-feature-filter').selectOption('all');
       await page.getByTestId(`provider-chip-more-${caps.toolChat.provider_id}`).click();
       await expectVisible(page.getByTestId(`provider-chip-menu-${caps.toolChat.provider_id}`), 'provider more menu', 10_000);
@@ -868,6 +974,19 @@ async function runJourney({ env, caps }) {
     await expectVisible(page.getByTestId('settings-tools'), 'tools settings', 20_000);
     for (const tool of EXPECTED_TOOLS) {
       await expectVisible(page.getByTestId(`tool-toggle-${tool}`), `tool toggle ${tool}`, 10_000);
+    }
+    if (tempMcpServer) {
+      await page.locator('.control-center__content').evaluate((el) => {
+        el.scrollTop = el.scrollHeight;
+      });
+      await expectVisible(page.getByTestId(`mcp-server-${tempMcpServer.id}`), 'temporary MCP server row', 10_000);
+      await expectTextContains(page.getByTestId(`mcp-server-${tempMcpServer.id}`), 'temporary MCP server health', '健康：ok', 10_000);
+      await expectVisible(
+        page.getByTestId(`tool-toggle-mcp.${tempMcpServer.id}.evidence`),
+        'temporary MCP tool toggle',
+        10_000,
+      );
+      events.steps.push({ name: 'mcp_server_visible_in_tools_settings', ok: true, server_id: tempMcpServer.id });
     }
     await screenshot(page, '14-tools-settings');
     await expectNoLayoutOverflow(page, 'tools settings');
@@ -917,6 +1036,7 @@ async function runJourney({ env, caps }) {
   } finally {
     await cleanupPromptAssets(env, promptAssets);
     await cleanupTempModel(env, tempManagedModel);
+    await cleanupTempMcpServer(env, tempMcpServer);
     fs.writeFileSync(
       path.join(ARTIFACT_DIR, 'events.json'),
       JSON.stringify(events, null, 2),

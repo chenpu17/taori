@@ -1,4 +1,4 @@
-import { test, expect, type Page } from '@playwright/test';
+import { test, expect, type Page, type TestInfo } from '@playwright/test';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -87,12 +87,84 @@ async function addMcpServerFromUi(page: Page): Promise<void> {
   });
 }
 
-test('web UI adds MCP server, refreshes tools, and edits pricing_meta JSON', async ({ page }) => {
+async function attachFullPage(page: Page, testInfo: TestInfo, name: string): Promise<void> {
+  await testInfo.attach(name, {
+    body: await page.screenshot({ fullPage: true }),
+    contentType: 'image/png',
+  });
+}
+
+async function expectNoFeatureLayoutOverflow(page: Page, label: string): Promise<void> {
+  const problems = await page.evaluate(() => {
+    const selectors = [
+      '[data-testid="control-center"]',
+      '[data-testid="settings-tools"]',
+      '[data-testid="settings-mcp"]',
+      '[data-testid="model-center"]',
+      '[data-testid="model-editor"]',
+      '[data-testid="roundtable-panel"]',
+      '[data-testid="roundtable-grid"]',
+      '[data-testid^="roundtable-tool-traces-"]',
+    ];
+    const viewportWidth = document.documentElement.clientWidth;
+    const result: Array<Record<string, unknown>> = [];
+    const bodyOverflow = document.documentElement.scrollWidth - viewportWidth;
+    if (bodyOverflow > 3) {
+      result.push({ selector: 'document', issue: 'horizontal_overflow', overflow: bodyOverflow });
+    }
+    for (const selector of selectors) {
+      for (const el of document.querySelectorAll(selector)) {
+        const rect = el.getBoundingClientRect();
+        if (rect.width <= 0 || rect.height <= 0) continue;
+        const style = window.getComputedStyle(el);
+        if (style.display === 'none' || style.visibility === 'hidden') continue;
+        if (rect.left < -3 || rect.right > viewportWidth + 3) {
+          result.push({ selector, issue: 'outside_viewport', left: rect.left, right: rect.right, viewportWidth });
+        }
+        if (el.scrollWidth - el.clientWidth > 3 && style.overflowX === 'visible') {
+          result.push({ selector, issue: 'unmanaged_horizontal_overflow', overflow: el.scrollWidth - el.clientWidth });
+        }
+      }
+    }
+    return result;
+  });
+  expect(problems, label).toEqual([]);
+}
+
+test('web UI adds MCP server, refreshes tools, and edits pricing_meta JSON', async ({ page }, testInfo) => {
   const [modelId] = await seedToolModels();
   await page.goto('/');
   await expect(page.getByTestId('chat-panel')).toBeVisible({ timeout: 10_000 });
 
   await addMcpServerFromUi(page);
+  await page.locator('.control-center__content').evaluate((el) => {
+    el.scrollTop = el.scrollHeight;
+  });
+  const mcpMetrics = await page.evaluate(() => {
+    const controls = [...document.querySelectorAll('.settings-mcp-form input, .settings-mcp-form button')].map((el) => {
+      const rect = (el as HTMLElement).getBoundingClientRect();
+      return { height: rect.height, width: rect.width, text: (el as HTMLInputElement).value || el.textContent || '' };
+    });
+    const serverCard = document.querySelector('[data-testid^="mcp-server-mcp_"]') as HTMLElement | null;
+    return {
+      controls,
+      serverCard: serverCard
+        ? {
+            width: serverCard.getBoundingClientRect().width,
+            scrollWidth: serverCard.scrollWidth,
+          }
+        : null,
+    };
+  });
+  expect(mcpMetrics.controls.length).toBe(4);
+  for (const control of mcpMetrics.controls) {
+    expect(control.height).toBeGreaterThanOrEqual(26);
+    expect(control.height).toBeLessThanOrEqual(44);
+  }
+  expect(mcpMetrics.serverCard?.scrollWidth).toBeLessThanOrEqual((mcpMetrics.serverCard?.width ?? 0) + 3);
+  await expectNoFeatureLayoutOverflow(page, 'MCP settings layout');
+  await attachFullPage(page, testInfo, 'mcp-settings-visible');
+
   await page.getByTestId('control-center-nav-models').click();
   await expect(page.getByTestId('model-center')).toBeVisible();
   await page.getByTestId(`model-edit-${modelId}`).click();
@@ -109,15 +181,76 @@ test('web UI adds MCP server, refreshes tools, and edits pricing_meta JSON', asy
       2,
     ),
   );
+  const editorMetrics = await page.evaluate(() => {
+    const editor = document.querySelector('[data-testid="model-editor"]') as HTMLElement | null;
+    const textarea = document.querySelector('[data-testid="model-editor-pricing-meta"]') as HTMLElement | null;
+    return {
+      editor: editor
+        ? {
+            width: editor.getBoundingClientRect().width,
+            height: editor.getBoundingClientRect().height,
+            scrollHeight: editor.scrollHeight,
+          }
+        : null,
+      textarea: textarea
+        ? {
+            width: textarea.getBoundingClientRect().width,
+            height: textarea.getBoundingClientRect().height,
+            fontFamily: getComputedStyle(textarea).fontFamily,
+          }
+        : null,
+    };
+  });
+  expect(editorMetrics.editor?.height).toBeLessThanOrEqual(900);
+  expect(editorMetrics.textarea?.height).toBeGreaterThanOrEqual(160);
+  expect(editorMetrics.textarea?.fontFamily.toLowerCase()).toContain('mono');
+  await expectNoFeatureLayoutOverflow(page, 'pricing_meta editor layout');
+  await attachFullPage(page, testInfo, 'pricing-meta-editor-visible');
   await page.getByTestId('model-editor-save').click();
   await expect(page.getByTestId('model-editor')).toHaveCount(0);
+  await expect(page.getByTestId('model-matrix')).toBeVisible();
+  await expect(page.locator('.badge--price_changed').filter({ hasText: 'pricing_meta' }).first()).toBeVisible();
+  const matrixMetrics = await page.evaluate(() => {
+    const scroller = document.querySelector('.model-matrix-scroll') as HTMLElement | null;
+    const header = [...document.querySelectorAll('.model-matrix th')].find((el) => el.textContent?.includes('复杂价格')) as HTMLElement | undefined;
+    const badge = [...document.querySelectorAll('.badge--price_changed')].find((el) => el.textContent?.includes('pricing_meta')) as HTMLElement | undefined;
+    return {
+      scroller: scroller
+        ? {
+            width: scroller.getBoundingClientRect().width,
+            scrollWidth: scroller.scrollWidth,
+            overflowX: getComputedStyle(scroller).overflowX,
+          }
+        : null,
+      header: header
+        ? {
+            width: header.getBoundingClientRect().width,
+            height: header.getBoundingClientRect().height,
+          }
+        : null,
+      badge: badge
+        ? {
+            width: badge.getBoundingClientRect().width,
+            height: badge.getBoundingClientRect().height,
+            whiteSpace: getComputedStyle(badge).whiteSpace,
+          }
+        : null,
+    };
+  });
+  expect(matrixMetrics.scroller?.overflowX).toMatch(/auto|scroll/);
+  expect(matrixMetrics.header?.width).toBeGreaterThanOrEqual(96);
+  expect(matrixMetrics.badge?.width).toBeGreaterThanOrEqual(72);
+  expect(matrixMetrics.badge?.height).toBeLessThanOrEqual(24);
+  expect(matrixMetrics.badge?.whiteSpace).toBe('nowrap');
+  await expectNoFeatureLayoutOverflow(page, 'model matrix complex pricing column');
+  await attachFullPage(page, testInfo, 'model-matrix-pricing-meta-visible');
 
   const modelsRes = await authedFetch(env, '/v1/models');
   const models = ((await modelsRes.json()) as { models: Array<{ id: string; pricing_meta?: { notes?: string } | null }> }).models;
   expect(models.find((m) => m.id === modelId)?.pricing_meta?.notes).toBe('E2E complex pricing');
 });
 
-test('roundtable participant uses MCP tool and renders tool trace in web panel', async ({ page }) => {
+test('roundtable participant uses MCP tool and renders tool trace in web panel', async ({ page }, testInfo) => {
   test.setTimeout(120_000);
   await seedToolModels();
   await page.goto('/');
@@ -140,6 +273,36 @@ test('roundtable participant uses MCP tool and renders tool trace in web panel',
     timeout: 30_000,
   });
   await expect(panel.locator('[data-testid^="roundtable-tool-traces-"]').first()).toContainText('E2E Echo');
+  await expect(panel.getByTestId('roundtable-action-next-round')).toBeVisible({ timeout: 40_000 });
+  await expect(panel.locator('[data-testid^="roundtable-tool-traces-"]').first()).toContainText('完成');
+  const traceMetrics = await page.evaluate(() => {
+    return [...document.querySelectorAll('[data-testid^="roundtable-tool-traces-"]')].map((el) => {
+      const rect = (el as HTMLElement).getBoundingClientRect();
+      return {
+        width: rect.width,
+        height: rect.height,
+        text: (el.textContent ?? '').slice(0, 160),
+        scrollWidth: (el as HTMLElement).scrollWidth,
+      };
+    });
+  });
+  expect(traceMetrics.length).toBeGreaterThanOrEqual(3);
+  for (const item of traceMetrics) {
+    expect(item.width).toBeGreaterThan(250);
+    expect(item.height).toBeGreaterThan(40);
+    expect(item.scrollWidth).toBeLessThanOrEqual(item.width + 3);
+    expect(item.text).toContain('MCP');
+  }
+  await expectNoFeatureLayoutOverflow(page, 'roundtable MCP tool trace layout');
+  await attachFullPage(page, testInfo, 'roundtable-mcp-tool-traces-visible');
+
+  await panel.getByTestId('roundtable-action-next-round').click();
+  await expect(panel.locator('[data-testid^="roundtable-tool-traces-"][data-testid$="-1"]').first()).toBeVisible({
+    timeout: 30_000,
+  });
+  await expect(panel.locator('[data-testid^="roundtable-tool-traces-"]').first()).toContainText('MCP');
+  await expectNoFeatureLayoutOverflow(page, 'roundtable second round keeps first round tool traces');
+  await attachFullPage(page, testInfo, 'roundtable-second-round-traces-visible');
 });
 
 function mockMcpServerSource(): string {
