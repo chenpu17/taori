@@ -15,6 +15,7 @@ import {
   conversations,
   messages,
   cost_records,
+  mcp_servers,
   run_events,
   memories,
   prompt_templates,
@@ -51,6 +52,10 @@ import {
   type ModelCreate,
   type ModelUpdate,
   type ModelCapability,
+  type McpServer,
+  type McpServerCreate,
+  type McpServerUpdate,
+  PricingMetaSchema,
 } from '@taori/shared';
 
 type ProviderRow = typeof providers.$inferSelect;
@@ -58,6 +63,7 @@ type ModelRow = typeof models.$inferSelect;
 type PromptTemplateRow = typeof prompt_templates.$inferSelect;
 type PersonaRow = typeof personas.$inferSelect;
 type RunEventRow = typeof run_events.$inferSelect;
+type McpServerRow = typeof mcp_servers.$inferSelect;
 
 function toProvider(row: ProviderRow): Provider {
   return {
@@ -105,6 +111,7 @@ function toModel(row: ModelRow): Model {
     price_per_image: row.price_per_image ?? null,
     price_per_video_second: row.price_per_video_second ?? null,
     price_currency: row.price_currency,
+    pricing_meta: parsePricingMeta(row.pricing_meta),
     modalities,
     price_synced_at: row.price_synced_at ?? null,
     context_length: row.context_length,
@@ -117,6 +124,67 @@ function toModel(row: ModelRow): Model {
     demoted: row.demoted ?? false,
     disabled_until: row.disabled_until ?? null,
     failure_count_24h: row.failure_count_24h ?? 0,
+  };
+}
+
+function parsePricingMeta(raw: string | null): Model['pricing_meta'] {
+  if (!raw) return null;
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    const result = PricingMetaSchema.safeParse(parsed);
+    return result.success ? result.data : null;
+  } catch {
+    return null;
+  }
+}
+
+function stringifyPricingMeta(value: Model['pricing_meta'] | undefined): string | null | undefined {
+  if (value === undefined) return undefined;
+  if (value === null) return null;
+  return JSON.stringify(value);
+}
+
+function parseStringArray(raw: string | null): string[] {
+  if (!raw) return [];
+  try {
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed)
+      ? parsed.filter((item): item is string => typeof item === 'string')
+      : [];
+  } catch {
+    return [];
+  }
+}
+
+function parseStringRecord(raw: string | null): Record<string, string> {
+  if (!raw) return {};
+  try {
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return {};
+    const out: Record<string, string> = {};
+    for (const [key, value] of Object.entries(parsed)) {
+      if (typeof value === 'string') out[key] = value;
+    }
+    return out;
+  } catch {
+    return {};
+  }
+}
+
+function toMcpServer(row: McpServerRow): McpServer {
+  return {
+    id: row.id,
+    name: row.name,
+    transport: 'stdio',
+    command: row.command,
+    args: parseStringArray(row.args),
+    env: parseStringRecord(row.env),
+    enabled: row.enabled,
+    health_status: row.enabled ? (row.health_status as McpServer['health_status']) : 'disabled',
+    last_error: row.last_error,
+    tools_count: row.tools_count ?? 0,
+    created_at: row.created_at,
+    updated_at: row.updated_at,
   };
 }
 
@@ -372,6 +440,7 @@ export class ModelsRepo {
         price_per_image: input.price_per_image ?? null,
         price_per_video_second: input.price_per_video_second ?? null,
         price_currency: input.price_currency ?? 'USD',
+        pricing_meta: stringifyPricingMeta(input.pricing_meta) ?? null,
         price_synced_at: null,
         modalities: input.modalities
           ? JSON.stringify(input.modalities)
@@ -414,6 +483,7 @@ export class ModelsRepo {
       context_length?: number | null;
       supports_vision?: boolean;
       supports_tools?: boolean;
+      pricing_meta?: Model['pricing_meta'];
     },
   ): Model | null {
     const now = Date.now();
@@ -434,6 +504,9 @@ export class ModelsRepo {
         }),
         ...(patch.price_per_video_second !== undefined && {
           price_per_video_second: patch.price_per_video_second,
+        }),
+        ...(patch.pricing_meta !== undefined && {
+          pricing_meta: stringifyPricingMeta(patch.pricing_meta) ?? null,
         }),
         ...(patch.modalities !== undefined && {
           modalities: JSON.stringify(patch.modalities),
@@ -501,6 +574,9 @@ export class ModelsRepo {
         }),
         ...(patch.price_currency !== undefined && {
           price_currency: patch.price_currency,
+        }),
+        ...(patch.pricing_meta !== undefined && {
+          pricing_meta: stringifyPricingMeta(patch.pricing_meta) ?? null,
         }),
         ...(patch.modalities !== undefined && {
           modalities: JSON.stringify(patch.modalities),
@@ -667,6 +743,101 @@ export class ModelsRepo {
 
   delete(id: string): boolean {
     const res = this.db.delete(models).where(eq(models.id, id)).run();
+    return res.changes > 0;
+  }
+}
+
+export class McpServersRepo {
+  constructor(private db: Db) {}
+
+  list(): McpServer[] {
+    return this.db
+      .select()
+      .from(mcp_servers)
+      .orderBy(asc(mcp_servers.created_at))
+      .all()
+      .map(toMcpServer);
+  }
+
+  get(id: string): McpServer | null {
+    const row = this.db
+      .select()
+      .from(mcp_servers)
+      .where(eq(mcp_servers.id, id))
+      .get();
+    return row ? toMcpServer(row) : null;
+  }
+
+  create(input: McpServerCreate): McpServer {
+    const now = Date.now();
+    const row = this.db
+      .insert(mcp_servers)
+      .values({
+        id: makeId('mcp_server'),
+        name: input.name,
+        transport: 'stdio',
+        command: input.command,
+        args: JSON.stringify(input.args ?? []),
+        env: JSON.stringify(input.env ?? {}),
+        enabled: input.enabled ?? true,
+        health_status: input.enabled === false ? 'disabled' : 'unknown',
+        last_error: null,
+        tools_count: 0,
+        created_at: now,
+        updated_at: now,
+      })
+      .returning()
+      .get();
+    return toMcpServer(row);
+  }
+
+  update(id: string, patch: McpServerUpdate): McpServer | null {
+    const existing = this.get(id);
+    if (!existing) return null;
+    const nextEnabled = patch.enabled ?? existing.enabled;
+    const row = this.db
+      .update(mcp_servers)
+      .set({
+        ...(patch.name !== undefined && { name: patch.name }),
+        ...(patch.command !== undefined && { command: patch.command }),
+        ...(patch.args !== undefined && { args: JSON.stringify(patch.args) }),
+        ...(patch.env !== undefined && { env: JSON.stringify(patch.env) }),
+        ...(patch.enabled !== undefined && {
+          enabled: patch.enabled,
+          health_status: patch.enabled ? 'unknown' : 'disabled',
+          last_error: patch.enabled ? null : existing.last_error,
+        }),
+        ...(patch.command !== undefined || patch.args !== undefined || patch.env !== undefined
+          ? { health_status: nextEnabled ? 'unknown' : 'disabled', last_error: null, tools_count: 0 }
+          : {}),
+        updated_at: Date.now(),
+      })
+      .where(eq(mcp_servers.id, id))
+      .returning()
+      .get();
+    return row ? toMcpServer(row) : null;
+  }
+
+  setHealth(
+    id: string,
+    input: { health_status: McpServer['health_status']; last_error?: string | null; tools_count?: number },
+  ): McpServer | null {
+    const row = this.db
+      .update(mcp_servers)
+      .set({
+        health_status: input.health_status,
+        last_error: input.last_error ?? null,
+        ...(input.tools_count !== undefined && { tools_count: input.tools_count }),
+        updated_at: Date.now(),
+      })
+      .where(eq(mcp_servers.id, id))
+      .returning()
+      .get();
+    return row ? toMcpServer(row) : null;
+  }
+
+  delete(id: string): boolean {
+    const res = this.db.delete(mcp_servers).where(eq(mcp_servers.id, id)).run();
     return res.changes > 0;
   }
 }

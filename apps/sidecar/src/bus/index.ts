@@ -82,6 +82,14 @@ export class CapabilityBus {
     this.tools.set(tool.name, tool as ToolDescriptor<unknown, unknown>);
   }
 
+  unregisterBySource(source: ToolDescriptor['source'], sourceId: string): void {
+    for (const [name, tool] of this.tools) {
+      if (tool.source === source && tool.source_id === sourceId) {
+        this.tools.delete(name);
+      }
+    }
+  }
+
   list(): Tool[] {
     return [...this.tools.values()].map((t) => ({
       name: t.name,

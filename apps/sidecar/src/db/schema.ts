@@ -50,6 +50,7 @@ export const models = sqliteTable(
     price_per_image: real('price_per_image'),
     price_per_video_second: real('price_per_video_second'),
     price_currency: text('price_currency').notNull().default('USD'),
+    pricing_meta: text('pricing_meta'),
     price_synced_at: integer('price_synced_at'),
     /** JSON array of Modality strings ('text'|'image'|'audio'|'video'). */
     modalities: text('modalities'),
@@ -227,6 +228,21 @@ export const cost_records = sqliteTable(
     sourceIdx: index('cost_records_source_idx').on(t.source_type, t.source_id),
   }),
 );
+
+export const mcp_servers = sqliteTable('mcp_servers', {
+  id: text('id').primaryKey(),
+  name: text('name').notNull(),
+  transport: text('transport').notNull().default('stdio'),
+  command: text('command').notNull(),
+  args: text('args'),
+  env: text('env'),
+  enabled: integer('enabled', { mode: 'boolean' }).notNull().default(true),
+  health_status: text('health_status').notNull().default('unknown'),
+  last_error: text('last_error'),
+  tools_count: integer('tools_count').notNull().default(0),
+  created_at: integer('created_at').notNull(),
+  updated_at: integer('updated_at').notNull(),
+});
 
 export const run_events = sqliteTable(
   'run_events',

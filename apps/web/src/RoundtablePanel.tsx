@@ -38,6 +38,19 @@ interface ColumnState {
   errors: Map<number, { classification: string; message: string } | null>;
   /** Round-1 retry attempts (UI-side counter; sidecar enforces hard limit). */
   retries: Map<number, number>;
+  toolTraces: Map<
+    number,
+    Array<{
+      call_id: string;
+      tool: string;
+      label: string;
+      event: 'start' | 'finish';
+      input?: string;
+      output?: string;
+      ok?: boolean;
+      duration_ms?: number;
+    }>
+  >;
 }
 
 function emptyColumn(): ColumnState {
@@ -46,6 +59,7 @@ function emptyColumn(): ColumnState {
     status: new Map(),
     errors: new Map(),
     retries: new Map(),
+    toolTraces: new Map(),
   };
 }
 
@@ -127,7 +141,14 @@ export function RoundtablePanel(props: RoundtablePanelProps): ReactElement {
       if (!mountedRef.current) return null;
       setRt(r.roundtable);
       setMessages(r.messages);
-      setCols(applyMessages(r.roundtable.participants, r.messages));
+      setCols((prev) => {
+        const next = applyMessages(r.roundtable.participants, r.messages);
+        return next.map((col, index) => ({
+          ...col,
+          toolTraces: new Map(prev[index]?.toolTraces ?? []),
+          retries: new Map(prev[index]?.retries ?? col.retries),
+        }));
+      });
       setTotalCost(r.total_cost_usd);
       const s = r.roundtable.summary;
       if (s && typeof s === 'object' && 'fallback' in s && s.fallback) {
@@ -205,6 +226,7 @@ export function RoundtablePanel(props: RoundtablePanelProps): ReactElement {
           status: new Map(c.status),
           errors: new Map(c.errors),
           retries: new Map(c.retries),
+          toolTraces: new Map(c.toolTraces),
         }));
         for (let i = 0; i < ann.participants_total; i++) {
           if (!next[i]) continue;
@@ -225,6 +247,7 @@ export function RoundtablePanel(props: RoundtablePanelProps): ReactElement {
           status: new Map(c.status),
           errors: new Map(c.errors),
           retries: new Map(c.retries),
+          toolTraces: new Map(c.toolTraces),
         };
         cloned.content.set(
           round,
@@ -245,6 +268,7 @@ export function RoundtablePanel(props: RoundtablePanelProps): ReactElement {
           status: new Map(c.status),
           errors: new Map(c.errors),
           retries: new Map(c.retries),
+          toolTraces: new Map(c.toolTraces),
         };
         cloned.content.set(round, ann.content);
         cloned.status.set(round, 'complete');
@@ -263,12 +287,42 @@ export function RoundtablePanel(props: RoundtablePanelProps): ReactElement {
           status: new Map(c.status),
           errors: new Map(c.errors),
           retries: new Map(c.retries),
+          toolTraces: new Map(c.toolTraces),
         };
         cloned.status.set(round, 'failed');
         cloned.errors.set(round, {
           classification: ann.classification,
           message: ann.message,
         });
+        next[ann.participant_index] = cloned;
+        return next;
+      });
+    } else if (ann.type === 'rt.tool_trace') {
+      setCols((prev) => {
+        const next = prev.slice();
+        const c = next[ann.participant_index];
+        if (!c) return prev;
+        const cloned: ColumnState = {
+          content: new Map(c.content),
+          status: new Map(c.status),
+          errors: new Map(c.errors),
+          retries: new Map(c.retries),
+          toolTraces: new Map(c.toolTraces),
+        };
+        const list = cloned.toolTraces.get(ann.round) ?? [];
+        cloned.toolTraces.set(ann.round, [
+          ...list.filter((item) => !(item.call_id === ann.call_id && item.event === ann.event)),
+          {
+            call_id: ann.call_id,
+            tool: ann.tool,
+            label: ann.label,
+            event: ann.event,
+            input: ann.input,
+            output: ann.output,
+            ok: ann.ok,
+            duration_ms: ann.duration_ms,
+          },
+        ]);
         next[ann.participant_index] = cloned;
         return next;
       });
@@ -365,6 +419,7 @@ export function RoundtablePanel(props: RoundtablePanelProps): ReactElement {
         status: new Map(c.status),
         errors: new Map(c.errors),
         retries: new Map(c.retries),
+        toolTraces: new Map(c.toolTraces),
       };
       cloned.retries.set(round, (cloned.retries.get(round) ?? 0) + 1);
       cloned.status.set(round, 'pending');
@@ -717,6 +772,7 @@ function ParticipantColumn({
         const content = column.content.get(round) ?? '';
         const err = column.errors.get(round);
         const retries = column.retries.get(round) ?? 0;
+        const traces = column.toolTraces.get(round) ?? [];
         const showOptions = optionsOpen === round;
         return (
           <div
@@ -850,12 +906,32 @@ function ParticipantColumn({
                 ) : null}
               </div>
             ) : (
-              <pre
-                className="roundtable-cell-body"
-                data-testid={`roundtable-cell-body-${participantIndex}-${round}`}
-              >
-                {content}
-              </pre>
+              <>
+                {traces.length > 0 && (
+                  <div
+                    className="roundtable-tool-traces"
+                    data-testid={`roundtable-tool-traces-${participantIndex}-${round}`}
+                  >
+                    {traces.map((trace) => (
+                      <div
+                        key={`${trace.call_id}-${trace.event}`}
+                        className={`roundtable-tool-trace ${trace.ok === false ? 'is-failed' : ''}`}
+                      >
+                        <span>{trace.event === 'start' ? '调用' : trace.ok === false ? '失败' : '完成'}</span>
+                        <strong>{trace.label}</strong>
+                        {trace.event === 'start' && trace.input ? <em>{trace.input}</em> : null}
+                        {trace.event === 'finish' && trace.output ? <em>{trace.output}</em> : null}
+                      </div>
+                    ))}
+                  </div>
+                )}
+                <pre
+                  className="roundtable-cell-body"
+                  data-testid={`roundtable-cell-body-${participantIndex}-${round}`}
+                >
+                  {content}
+                </pre>
+              </>
             )}
           </div>
         );

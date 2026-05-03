@@ -78,6 +78,29 @@ export const ProviderTestResponseSchema = z.object({
 });
 export type ProviderTestResponse = z.infer<typeof ProviderTestResponseSchema>;
 
+export const PricingMetaTierSchema = z.object({
+  label: z.string().min(1).max(120),
+  unit: z
+    .enum(['token', 'image', 'video_second', 'second', 'minute', 'call'])
+    .optional(),
+  match: z.record(z.unknown()).optional(),
+  price_usd: z.number().nonnegative(),
+});
+export type PricingMetaTier = z.infer<typeof PricingMetaTierSchema>;
+
+export const PricingMetaSchema = z
+  .object({
+    version: z.literal(1).default(1),
+    unit: z.enum(['token', 'image', 'video_second', 'second', 'minute', 'call']),
+    tiers: z.array(PricingMetaTierSchema).max(100).optional(),
+    minimum_usd: z.number().nonnegative().optional(),
+    notes: z.string().max(4_000).optional(),
+    source_url: z.string().url().optional(),
+    updated_at: z.number().int().optional(),
+  })
+  .strict();
+export type PricingMeta = z.infer<typeof PricingMetaSchema>;
+
 export const ModelSchema = z.object({
   id: z.string(),
   alias: z.string().nullable(),
@@ -92,6 +115,7 @@ export const ModelSchema = z.object({
   price_per_image: z.number().nullable(),
   price_per_video_second: z.number().nullable(),
   price_currency: z.string(),
+  pricing_meta: PricingMetaSchema.nullable(),
   // M2.5 — declared output modalities, e.g. ['text','image'] for a multimodal
   // model. Independent of `capability` bucket; defaults to ['text'] for chat.
   modalities: z.array(ModalitySchema),
@@ -122,6 +146,7 @@ export const ModelCreateSchema = z.object({
   price_per_image: z.number().nonnegative().nullable().optional(),
   price_per_video_second: z.number().nonnegative().nullable().optional(),
   price_currency: z.string().length(3).optional(),
+  pricing_meta: PricingMetaSchema.nullable().optional(),
   modalities: z.array(ModalitySchema).optional(),
   context_length: z.number().int().positive().nullable().optional(),
   supports_vision: z.boolean().optional(),
@@ -146,6 +171,7 @@ export const ModelUpdateSchema = z.object({
   price_per_image: z.number().nonnegative().nullable().optional(),
   price_per_video_second: z.number().nonnegative().nullable().optional(),
   price_currency: z.string().length(3).optional(),
+  pricing_meta: PricingMetaSchema.nullable().optional(),
   modalities: z.array(ModalitySchema).optional(),
   context_length: z.number().int().positive().nullable().optional(),
   supports_vision: z.boolean().optional(),
@@ -181,6 +207,7 @@ export const DiscoveredModelSchema = z.object({
   price_output_per_1m: z.number().nullable(),
   price_per_image: z.number().nullable().optional(),
   price_per_video_second: z.number().nullable().optional(),
+  pricing_meta: PricingMetaSchema.nullable().optional(),
   modalities: z.array(ModalitySchema).optional(),
   context_length: z.number().int().nullable(),
   supports_vision: z.boolean(),
@@ -243,6 +270,59 @@ export const CatalogSyncResponseSchema = z.object({
   ),
 });
 export type CatalogSyncResponse = z.infer<typeof CatalogSyncResponseSchema>;
+
+export const McpTransportSchema = z.enum(['stdio']);
+export type McpTransport = z.infer<typeof McpTransportSchema>;
+
+export const McpHealthStatusSchema = z.enum(['unknown', 'ok', 'error', 'disabled']);
+export type McpHealthStatus = z.infer<typeof McpHealthStatusSchema>;
+
+export const McpServerSchema = z.object({
+  id: z.string(),
+  name: z.string(),
+  transport: McpTransportSchema,
+  command: z.string(),
+  args: z.array(z.string()),
+  env: z.record(z.string()),
+  enabled: z.boolean(),
+  health_status: McpHealthStatusSchema,
+  last_error: z.string().nullable(),
+  tools_count: z.number().int().nonnegative(),
+  created_at: z.number().int(),
+  updated_at: z.number().int(),
+});
+export type McpServer = z.infer<typeof McpServerSchema>;
+
+export const McpServerCreateSchema = z.object({
+  name: z.string().min(1).max(100),
+  transport: McpTransportSchema.default('stdio').optional(),
+  command: z.string().min(1).max(1000),
+  args: z.array(z.string().max(1000)).max(50).optional(),
+  env: z.record(z.string().max(4000)).optional(),
+  enabled: z.boolean().optional(),
+});
+export type McpServerCreate = z.infer<typeof McpServerCreateSchema>;
+
+export const McpServerUpdateSchema = z.object({
+  name: z.string().min(1).max(100).optional(),
+  command: z.string().min(1).max(1000).optional(),
+  args: z.array(z.string().max(1000)).max(50).optional(),
+  env: z.record(z.string().max(4000)).optional(),
+  enabled: z.boolean().optional(),
+});
+export type McpServerUpdate = z.infer<typeof McpServerUpdateSchema>;
+
+export const McpServerRefreshResponseSchema = z.object({
+  ok: z.boolean(),
+  server: McpServerSchema,
+  tools: z.array(
+    z.object({
+      name: z.string(),
+      description: z.string(),
+    }),
+  ),
+});
+export type McpServerRefreshResponse = z.infer<typeof McpServerRefreshResponseSchema>;
 
 export const PromptTemplateSchema = z.object({
   id: z.string(),
@@ -320,6 +400,7 @@ export const BackupModelRecordSchema = z.object({
   price_per_image: z.number().nullable(),
   price_per_video_second: z.number().nullable(),
   price_currency: z.string(),
+  pricing_meta: PricingMetaSchema.nullable(),
   price_synced_at: z.number().int().nullable(),
   modalities: z.string().nullable(),
   context_length: z.number().int().nullable(),

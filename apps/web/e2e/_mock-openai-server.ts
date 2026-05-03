@@ -339,6 +339,17 @@ function shouldMockWebTool(body: ChatRequest): boolean {
   return wantsFetch ? names.has('web_fetch') : names.has('web_search');
 }
 
+function pickMcpToolCall(body: ChatRequest): { name: string; args: Record<string, unknown> } | null {
+  if (!Array.isArray(body.tools) || body.tools.length === 0 || hasToolResult(body.messages)) {
+    return null;
+  }
+  const lastUser = [...body.messages].reverse().find((m) => m.role === 'user');
+  const text = lastUser ? textOf(lastUser).toLowerCase() : '';
+  if (!/mcp|工具|tool/.test(text)) return null;
+  const name = [...availableToolNames(body)].find((item) => item.startsWith('mcp_'));
+  return name ? { name, args: { text: 'roundtable mcp evidence' } } : null;
+}
+
 function pickWebToolCall(body: ChatRequest): {
   name: 'web_search' | 'web_fetch';
   args: Record<string, unknown>;
@@ -381,6 +392,7 @@ export function startMockOpenAI(
     fixedReply?: string;
     imageToolCalls?: boolean;
     webToolCalls?: boolean;
+    mcpToolCalls?: boolean;
     models?: MockModelListItem[];
     onChatRequest?: (body: ChatRequest) => void;
   } = {},
@@ -534,6 +546,53 @@ export function startMockOpenAI(
         });
         res.write(sseNamedToolCallStart(body.model, name));
         res.write(sseNamedToolCallArgs(body.model, JSON.stringify(args)));
+        res.write(sseNamedToolCallFinal(body.model));
+        res.write('data: [DONE]\n\n');
+        res.end();
+        return;
+      }
+
+      const mcpCall = opts.mcpToolCalls ? pickMcpToolCall(body) : null;
+      if (mcpCall) {
+        if (!body.stream) {
+          res.writeHead(200, { 'content-type': 'application/json' });
+          res.end(
+            JSON.stringify({
+              id: 'chatcmpl-mock-mcp-tool',
+              object: 'chat.completion',
+              created: Math.floor(Date.now() / 1000),
+              model: body.model,
+              choices: [
+                {
+                  index: 0,
+                  message: {
+                    role: 'assistant',
+                    content: null,
+                    tool_calls: [
+                      {
+                        id: `call_${mcpCall.name}_1`,
+                        type: 'function',
+                        function: {
+                          name: mcpCall.name,
+                          arguments: JSON.stringify(mcpCall.args),
+                        },
+                      },
+                    ],
+                  },
+                  finish_reason: 'tool_calls',
+                },
+              ],
+            }),
+          );
+          return;
+        }
+        res.writeHead(200, {
+          'content-type': 'text/event-stream',
+          'cache-control': 'no-cache',
+          connection: 'keep-alive',
+        });
+        res.write(sseNamedToolCallStart(body.model, mcpCall.name));
+        res.write(sseNamedToolCallArgs(body.model, JSON.stringify(mcpCall.args)));
         res.write(sseNamedToolCallFinal(body.model));
         res.write('data: [DONE]\n\n');
         res.end();

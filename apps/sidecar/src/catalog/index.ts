@@ -48,6 +48,7 @@ function catalogPatch(dm: DiscoveredModel): Parameters<ModelsRepo['patchPricing'
     price_output_per_1m: dm.price_output_per_1m,
     price_per_image: dm.price_per_image ?? null,
     price_per_video_second: dm.price_per_video_second ?? null,
+    pricing_meta: dm.pricing_meta ?? null,
     modalities: dm.modalities,
     capability: dm.capability,
     context_length: dm.context_length,
@@ -154,7 +155,8 @@ export async function syncCatalog(
       const changed =
         priceChanged(cur.price_input_per_1m, dm.price_input_per_1m) ||
         priceChanged(cur.price_output_per_1m, dm.price_output_per_1m) ||
-        priceChanged(cur.price_per_image, dm.price_per_image ?? null);
+        priceChanged(cur.price_per_image, dm.price_per_image ?? null) ||
+        JSON.stringify(cur.pricing_meta ?? null) !== JSON.stringify(dm.pricing_meta ?? null);
 
       if (!changed) {
         diffs.push({

@@ -18,6 +18,7 @@ export const ID_PREFIXES = {
   run: 'run_',
   run_event: 'runev_',
   memory: 'mem_',
+  mcp_server: 'mcp_',
   prompt_template: 'ptpl_',
   persona: 'per_',
 } as const;

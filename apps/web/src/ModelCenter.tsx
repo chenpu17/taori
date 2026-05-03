@@ -840,27 +840,29 @@ export function ModelCenter({
             当前筛选下没有 <strong>{tab.label}</strong> 模型。可以调整筛选，或点击右上“+ 导入模型”刷新供应商模型库。
           </p>
         ) : (
-          <table className="model-matrix" data-testid="model-matrix">
-            <thead>
-              <tr>
-                <th className="model-matrix__select">
-                  <input
-                    type="checkbox"
-                    checked={visibleModels.length > 0 && visibleModels.every((m) => selectedModelIds.has(m.id))}
-                    onChange={toggleSelectAllVisible}
-                    aria-label="选择当前筛选下全部模型"
-                    data-testid="model-center-select-all"
-                  />
-                </th>
-                <th>模型</th>
-                <th>Provider</th>
-                <th>价格（USD/1M tok 或单次）</th>
-                <th>状态</th>
-                <th>操作</th>
-              </tr>
-            </thead>
-            <tbody>
-              {visibleModels.map((m) => {
+          <div className="model-matrix-scroll">
+            <table className="model-matrix" data-testid="model-matrix">
+              <thead>
+                <tr>
+                  <th className="model-matrix__select">
+                    <input
+                      type="checkbox"
+                      checked={visibleModels.length > 0 && visibleModels.every((m) => selectedModelIds.has(m.id))}
+                      onChange={toggleSelectAllVisible}
+                      aria-label="选择当前筛选下全部模型"
+                      data-testid="model-center-select-all"
+                    />
+                  </th>
+                  <th>模型</th>
+                  <th>Provider</th>
+                  <th>价格（USD/1M tok 或单次）</th>
+                  <th>复杂价格</th>
+                  <th>状态</th>
+                  <th>操作</th>
+                </tr>
+              </thead>
+              <tbody>
+                {visibleModels.map((m) => {
                 const prov = m.provider_id ? providerById.get(m.provider_id) : undefined;
                 const isDefault = m.is_default_for === activeTab;
                 const priceCell =
@@ -913,6 +915,13 @@ export function ModelCenter({
                         )}
                       </td>
                       <td>{priceCell}</td>
+                      <td>
+                        {m.pricing_meta ? (
+                          <span className="badge badge--price_changed" title={m.pricing_meta.notes ?? '已配置复杂价格规则'}>
+                            pricing_meta
+                          </span>
+                        ) : null}
+                      </td>
                       <td>
                         <label className="switch">
                           <input
@@ -998,7 +1007,7 @@ export function ModelCenter({
                     </tr>
                     {modelProbe?.modelId === m.id && modelProbe.status === 'done' && (
                       <tr className="model-health-row" data-testid={`model-tools-probe-result-${m.id}`}>
-                        <td colSpan={6}>
+                        <td colSpan={7}>
                           <div className={`model-probe-result ${modelProbe.ok ? 'ok' : 'bad'}`}>
                             {modelProbe.note}
                           </div>
@@ -1007,16 +1016,17 @@ export function ModelCenter({
                     )}
                     {expandedModelId === m.id && (
                       <tr className="model-health-row" data-testid={`model-health-panel-${m.id}`}>
-                        <td colSpan={6}>
+                        <td colSpan={7}>
                           <ModelHealthPanel health={healthRows.get(m.id) ?? null} />
                         </td>
                       </tr>
                     )}
                   </Fragment>
                 );
-              })}
-            </tbody>
-          </table>
+                })}
+              </tbody>
+            </table>
+          </div>
         )}
       </section>
 
@@ -1312,6 +1322,7 @@ function ImportDrawer({
           price_output_per_1m: m.price_output_per_1m ?? null,
           price_per_image: m.price_per_image ?? null,
           price_per_video_second: m.price_per_video_second ?? null,
+          pricing_meta: m.pricing_meta ?? null,
           context_length: m.context_length ?? null,
           supports_vision: m.supports_vision ?? false,
           supports_tools: m.supports_tools ?? false,
@@ -1712,6 +1723,10 @@ function EditModelDialog(props: {
   );
   const [pCall, setPCall] = useState<string>(model.price_per_call?.toString() ?? '');
   const [currency, setCurrency] = useState<string>(model.price_currency ?? 'USD');
+  const [pricingMetaText, setPricingMetaText] = useState<string>(
+    model.pricing_meta ? JSON.stringify(model.pricing_meta, null, 2) : '',
+  );
+  const [pricingMetaError, setPricingMetaError] = useState<string | null>(null);
 
   const parseNum = (s: string): number | null => {
     const t = s.trim();
@@ -1722,6 +1737,38 @@ function EditModelDialog(props: {
 
   const submit = (e: FormEvent): void => {
     e.preventDefault();
+    let pricingMeta: import('@taori/shared').PricingMeta | null = null;
+    const pricingMetaRaw = pricingMetaText.trim();
+    if (pricingMetaRaw) {
+      try {
+        const parsed = JSON.parse(pricingMetaRaw) as unknown;
+        if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+          setPricingMetaError('pricing_meta 必须是 JSON object。');
+          return;
+        }
+        const obj = parsed as Record<string, unknown>;
+        if (obj.version !== undefined && obj.version !== 1) {
+          setPricingMetaError('version 当前只支持 1。');
+          return;
+        }
+        if (typeof obj.unit !== 'string') {
+          setPricingMetaError('pricing_meta.unit 必填，例如 image / video_second / call。');
+          return;
+        }
+        if (obj.tiers !== undefined && !Array.isArray(obj.tiers)) {
+          setPricingMetaError('pricing_meta.tiers 必须是数组。');
+          return;
+        }
+        pricingMeta = {
+          ...(obj as import('@taori/shared').PricingMeta),
+          version: 1,
+        };
+      } catch (err) {
+        setPricingMetaError(err instanceof Error ? err.message : String(err));
+        return;
+      }
+    }
+    setPricingMetaError(null);
     const patch: import('@taori/shared').ModelUpdate = {
       alias: alias.trim() || model.alias || model.display_name,
       display_name: displayName.trim() || model.display_name,
@@ -1734,6 +1781,7 @@ function EditModelDialog(props: {
       price_per_video_second: parseNum(pVideo),
       price_per_call: parseNum(pCall),
       price_currency: currency.trim() || 'USD',
+      pricing_meta: pricingMeta,
     };
     if (capability !== model.capability && model.is_default_for) {
       patch.is_default_for = null;
@@ -1891,8 +1939,24 @@ function EditModelDialog(props: {
                 style={{ maxWidth: 120 }}
               />
             </label>
+            <label className="field">
+              <span>pricing_meta（复杂分级规则 JSON）</span>
+              <textarea
+                value={pricingMetaText}
+                onChange={(e) => setPricingMetaText(e.target.value)}
+                rows={8}
+                spellCheck={false}
+                placeholder={'{"version":1,"unit":"image","tiers":[{"label":"1024x1024","match":{"size":"1024x1024"},"price_usd":0.04}]}'}
+                data-testid="model-editor-pricing-meta"
+              />
+            </label>
+            {pricingMetaError && (
+              <p className="field-warn" data-testid="model-editor-pricing-meta-error">
+                {pricingMetaError}
+              </p>
+            )}
             <p className="hint">
-              提示：分辨率分级 / 时长分级 等更复杂计费规则尚未支持，将在 v0.8 引入 pricing_meta。
+              pricing_meta 用于记录分辨率、时长、质量档位等复杂价格；当前成本估算仍优先使用上方基础价格字段。
             </p>
           </fieldset>
 

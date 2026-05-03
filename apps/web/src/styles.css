@@ -592,6 +592,9 @@ header h1::before {
 @media (max-width: 760px) {
   .capability-preflight { padding: 8px 14px; }
   .preflight-chip { white-space: normal; }
+  .settings-mcp-form { grid-template-columns: 1fr; }
+  .settings-mcp-actions { justify-content: flex-start; }
+  .roundtable-tool-trace { grid-template-columns: 1fr; }
 }
 
 .model-pill, .price-badge, .vision-pill {
@@ -1600,6 +1603,26 @@ header h1::before {
   flex-wrap: wrap;
   color: var(--muted-2);
   font-size: 12px;
+}
+.settings-mcp {
+  margin-top: 18px;
+  display: grid;
+  gap: 12px;
+}
+.settings-mcp-form {
+  display: grid;
+  grid-template-columns: minmax(120px, 1fr) minmax(140px, 1fr) minmax(180px, 2fr) auto;
+  gap: 8px;
+  align-items: center;
+}
+.settings-mcp-form input {
+  min-width: 0;
+}
+.settings-mcp-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
 }
 .tool-toggle {
   flex: 0 0 auto;
@@ -2921,6 +2944,37 @@ header h1::before {
 .roundtable-cell-pending { opacity: 0.55; }
 .roundtable-cell-streaming { background: rgba(99, 102, 241, 0.04); }
 .roundtable-cell-failed { background: rgba(239, 68, 68, 0.04); }
+.roundtable-tool-traces {
+  display: grid;
+  gap: 6px;
+}
+.roundtable-tool-trace {
+  display: grid;
+  grid-template-columns: auto minmax(90px, max-content) 1fr;
+  gap: 8px;
+  align-items: center;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: rgba(14, 165, 233, 0.08);
+  padding: 6px 8px;
+  font-size: 11px;
+  color: var(--muted);
+}
+.roundtable-tool-trace.is-failed {
+  background: rgba(239, 68, 68, 0.08);
+  color: var(--bad);
+}
+.roundtable-tool-trace strong {
+  color: var(--fg-soft);
+  font-weight: 600;
+}
+.roundtable-tool-trace em {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-style: normal;
+}
 .roundtable-cell-error {
   display: flex; gap: 6px; align-items: center;
   font-size: 11px;
@@ -3335,8 +3389,14 @@ header h1::before {
 }
 .model-matrix {
   width: 100%;
+  min-width: 980px;
   border-collapse: collapse;
   font-size: 13px;
+}
+.model-matrix-scroll {
+  width: 100%;
+  overflow-x: auto;
+  padding-bottom: 2px;
 }
 .model-matrix th,
 .model-matrix td {
@@ -3352,13 +3412,19 @@ header h1::before {
   text-transform: uppercase;
   letter-spacing: 0.04em;
 }
-.model-matrix th:nth-child(5),
-.model-matrix td:nth-child(5) {
-  min-width: 72px;
-}
 .model-matrix th:nth-child(6),
 .model-matrix td:nth-child(6) {
-  min-width: 340px;
+  min-width: 76px;
+  white-space: nowrap;
+}
+.model-matrix th:nth-child(7),
+.model-matrix td:nth-child(7) {
+  min-width: 280px;
+}
+.model-matrix th:nth-child(5),
+.model-matrix td:nth-child(5) {
+  min-width: 104px;
+  white-space: nowrap;
 }
 .model-cell-name {
   display: flex;
@@ -3631,7 +3697,7 @@ header h1::before {
   align-items: center;
   flex-wrap: wrap;
   gap: 6px;
-  min-width: 320px;
+  min-width: 280px;
 }
 .model-cell-actions button {
   min-width: 34px;
@@ -3749,6 +3815,10 @@ header h1::before {
   font-size: 10px;
   padding: 1px 6px;
   border-radius: 8px;
+  display: inline-flex;
+  align-items: center;
+  line-height: 1.5;
+  white-space: nowrap;
 }
 
 /* Import drawer */
@@ -3980,7 +4050,8 @@ header h1::before {
 .model-editor__body .field { display: flex; flex-direction: column; gap: 4px; }
 .model-editor__body .field > span { font-size: 12px; color: var(--muted); font-weight: 500; }
 .model-editor__body .field input,
-.model-editor__body .field select {
+.model-editor__body .field select,
+.model-editor__body .field textarea {
   padding: 7px 10px;
   border: 1px solid var(--border);
   background: var(--surface);
@@ -3989,8 +4060,15 @@ header h1::before {
   font-size: 13px;
   font-family: inherit;
 }
+.model-editor__body .field textarea {
+  min-height: 168px;
+  resize: vertical;
+  font-family: var(--font-mono, ui-monospace, "SF Mono", Menlo, monospace);
+  line-height: 1.5;
+}
 .model-editor__body .field input:focus,
-.model-editor__body .field select:focus {
+.model-editor__body .field select:focus,
+.model-editor__body .field textarea:focus {
   outline: none;
   border-color: var(--accent);
   box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 20%, transparent);

@@ -173,6 +173,16 @@ C3（Prompt 模板 & Persona 预设）已实现：
 - `apps/sidecar`：创建模型时 `enabled` 默认 `true`；停用默认模型会自动清理 `is_default_for`；停用模型不能被设为默认模型。
 - 验证：`apps/web/e2e/m2.5-modelcenter.spec.ts` 覆盖模型库刷新、批量启用、停用导入、抽屉内启用、Provider 编辑与单 Provider 价格同步；`apps/sidecar/test/providers.test.ts` 覆盖停用默认绑定清理与停用默认拒绝。
 
+## 10.13 MCP / Pricing Meta / 圆桌工具（v0.9）
+
+- `packages/shared`：新增 `PricingMetaSchema`、`McpServer*` schema、`mcp_server` ID 前缀；`ModelCreate/Update/DiscoveredModel/BackupModel` 扩展 `pricing_meta`；`RoundtableAnnotation` 新增 `rt.tool_trace`。
+- `apps/sidecar`：新增 `mcp_servers` 表、`src/mcp` stdio JSON-RPC 客户端、`/v1/mcp/servers*` 路由；Capability Bus 支持按 MCP Server 替换注册工具；admin clear 会清除 MCP 配置和 Bus 中的 MCP 工具。
+- `apps/sidecar`：`models.pricing_meta` additive migration 落地；`ModelsRepo.create/update/patchPricing` 支持复杂价格元数据。
+- `apps/sidecar`：圆桌 `round-runner` 为支持 tools 的参与者注入内置 web 工具和 MCP 工具，流式输出 `rt.tool_trace`。
+- `apps/web`：控制中心工具页新增 MCP Server 添加/刷新/启停/删除；模型编辑器新增 `pricing_meta` JSON 编辑；圆桌列内展示工具调用痕迹并在回合刷新后保留。
+- 合同文档：新增 `apps/sidecar/MODULE.md`、`apps/web/MODULE.md`、`packages/shared/MODULE.md`。
+- 验证：`apps/sidecar/test/mcp-pricing-meta.test.ts` 覆盖 MCP stdio 刷新/调用和 `pricing_meta` 持久化；`apps/web/e2e/mcp-pricing-roundtable-tools.spec.ts` 覆盖真实 Web UI 的 MCP 添加、模型复杂价格编辑、圆桌 MCP 工具痕迹。
+
 ## 10.4 D1 / D2 完工记录（v0.8）
 
 D1 / D2（成本看板 / 月度预算）已实现：

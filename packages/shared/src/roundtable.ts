@@ -221,6 +221,19 @@ export type RoundtableAnnotation =
       message: string;
     }
   | {
+      type: 'rt.tool_trace';
+      participant_index: number;
+      round: number;
+      call_id: string;
+      tool: string;
+      label: string;
+      event: 'start' | 'finish';
+      input?: string;
+      output?: string;
+      ok?: boolean;
+      duration_ms?: number;
+    }
+  | {
       type: 'rt.round_done';
       round: number;
       completed_indices: number[];

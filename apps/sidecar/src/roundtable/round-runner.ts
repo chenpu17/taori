@@ -15,8 +15,9 @@
  */
 
 import type { PassThrough } from 'node:stream';
-import { streamText } from 'ai';
+import { streamText, tool } from 'ai';
 import { createOpenAI } from '@ai-sdk/openai';
+import { z } from 'zod';
 import {
   calculateCostUsd,
   type Participant,
@@ -32,9 +33,11 @@ import type {
   RoundtableRow,
   RoundtablesRepo,
   ProvidersRepo,
+  MemoriesRepo,
 } from '../db/repos/index.js';
 import type { KeyStore } from '../keystore.js';
 import { classifyProviderError } from '../providers/registry.js';
+import type { CapabilityBus } from '../bus/index.js';
 
 export interface RoundRunnerDeps {
   modelsRepo: ModelsRepo;
@@ -43,6 +46,8 @@ export interface RoundRunnerDeps {
   rtRepo: RoundtablesRepo;
   rtMsgRepo: RoundtableMessagesRepo;
   keystore: KeyStore;
+  bus?: CapabilityBus | null;
+  memoriesRepo?: MemoriesRepo | null;
   log: { info: (...a: unknown[]) => void; warn: (...a: unknown[]) => void; error: (...a: unknown[]) => void };
 }
 
@@ -109,6 +114,100 @@ function buildPromptForParticipant(args: {
   };
 }
 
+function summarizeToolValue(value: unknown): string {
+  if (value == null) return '';
+  if (typeof value === 'string') return value.slice(0, 220);
+  try {
+    return JSON.stringify(value).slice(0, 220);
+  } catch {
+    return String(value).slice(0, 220);
+  }
+}
+
+function safeAiToolName(busName: string, used: Set<string>): string {
+  const base = busName.replace(/^builtin\./, '').replace(/[^A-Za-z0-9_-]/g, '_').slice(0, 58) || 'tool';
+  let name = base;
+  let i = 2;
+  while (used.has(name)) {
+    name = `${base.slice(0, 54)}_${i++}`;
+  }
+  used.add(name);
+  return name;
+}
+
+function buildToolsForParticipant(args: {
+  deps: RoundRunnerDeps;
+  rt: RoundtableRow;
+  round: 1 | 2;
+  participantIndex: number;
+  msgRow: RoundtableMessageRow;
+  model: Model;
+  stream: PassThrough;
+}): { tools?: Record<string, any>; instruction: string | null } {
+  const bus = args.deps.bus;
+  if (!bus || !args.model.supports_tools) return { instruction: null };
+  const used = new Set<string>();
+  const exposed: Record<string, any> = {};
+  const allowed = bus
+    .list()
+    .filter((item) => item.enabled)
+    .filter(
+      (item) =>
+        item.name === 'builtin.web_search' ||
+        item.name === 'builtin.web_fetch' ||
+        item.source === 'mcp',
+    );
+  for (const item of allowed) {
+    const aiName = safeAiToolName(item.name, used);
+    exposed[aiName] = tool({
+      description: item.description,
+      parameters: z.record(z.unknown()),
+      execute: async (input) => {
+        const callId = `${args.msgRow.id}:${aiName}:${Date.now()}`;
+        const startedAt = Date.now();
+        writeAnnotation(args.stream, [
+          {
+            type: 'rt.tool_trace',
+            participant_index: args.participantIndex,
+            round: args.round,
+            call_id: callId,
+            tool: item.name,
+            label: item.source === 'mcp' ? `MCP · ${item.description}` : item.description,
+            event: 'start',
+            input: summarizeToolValue(input),
+          },
+        ]);
+        const result = await bus.invoke(item.name, input, {
+          conversationId: args.rt.conversation_id,
+          sourceMessageId: args.msgRow.id,
+        });
+        const output = result.ok ? result.output : result.error?.message;
+        writeAnnotation(args.stream, [
+          {
+            type: 'rt.tool_trace',
+            participant_index: args.participantIndex,
+            round: args.round,
+            call_id: callId,
+            tool: item.name,
+            label: item.source === 'mcp' ? `MCP · ${item.description}` : item.description,
+            event: 'finish',
+            ok: result.ok,
+            output: summarizeToolValue(output),
+            duration_ms: Date.now() - startedAt,
+          },
+        ]);
+        return result.ok ? result.output : { ok: false, error: result.error };
+      },
+    });
+  }
+  if (Object.keys(exposed).length === 0) return { instruction: null };
+  return {
+    tools: exposed,
+    instruction:
+      '你可以使用可用工具辅助发言。需要最新网页信息时使用 web_search/web_fetch；需要本地扩展能力时使用 MCP 工具。工具结果必须整合进你的观点，避免只复述工具输出。',
+  };
+}
+
 interface ParticipantRunResult {
   index: number;
   ok: boolean;
@@ -146,13 +245,23 @@ async function runOneParticipant(
       baseURL: provider.base_url.replace(/\/$/, ''),
       apiKey,
     });
+    const roundtableTools = buildToolsForParticipant({
+      deps,
+      rt,
+      round,
+      participantIndex: index,
+      msgRow,
+      model,
+      stream,
+    });
     const result = await streamText({
       model: aiProvider.chat(model.model_name),
-      system,
+      system: roundtableTools.instruction ? `${system}\n\n${roundtableTools.instruction}` : system,
       prompt,
       maxTokens: 800,
       temperature: 0.6,
       maxRetries: 0,
+      ...(roundtableTools.tools ? { tools: roundtableTools.tools, maxSteps: 3 } : {}),
       abortSignal: signal,
     });
 

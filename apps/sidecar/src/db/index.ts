@@ -34,6 +34,7 @@ CREATE TABLE IF NOT EXISTS models (
   price_per_image REAL,
   price_per_video_second REAL,
   price_currency TEXT NOT NULL DEFAULT 'USD',
+  pricing_meta TEXT,
   price_synced_at INTEGER,
   modalities TEXT,
   context_length INTEGER,
@@ -118,6 +119,21 @@ CREATE TABLE IF NOT EXISTS cost_records (
 CREATE INDEX IF NOT EXISTS cost_records_conv_idx ON cost_records(conversation_id, created_at);
 CREATE INDEX IF NOT EXISTS cost_records_model_idx ON cost_records(model_id, created_at);
 CREATE INDEX IF NOT EXISTS cost_records_source_idx ON cost_records(source_type, source_id);
+
+CREATE TABLE IF NOT EXISTS mcp_servers (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  transport TEXT NOT NULL DEFAULT 'stdio',
+  command TEXT NOT NULL,
+  args TEXT,
+  env TEXT,
+  enabled INTEGER NOT NULL DEFAULT 1,
+  health_status TEXT NOT NULL DEFAULT 'unknown',
+  last_error TEXT,
+  tools_count INTEGER NOT NULL DEFAULT 0,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+);
 
 CREATE TABLE IF NOT EXISTS run_events (
   id TEXT PRIMARY KEY,
@@ -243,6 +259,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS memories_scope_key_uniq_v2
   const additive: Array<[string, string]> = [
     ['price_per_image', 'REAL'],
     ['price_per_video_second', 'REAL'],
+    ['pricing_meta', 'TEXT'],
     ['price_synced_at', 'INTEGER'],
     ['modalities', 'TEXT'],
   ];

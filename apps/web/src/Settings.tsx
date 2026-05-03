@@ -15,7 +15,7 @@
 
 import { useEffect, useRef, useState } from 'react';
 import { api } from './api.js';
-import type { BackupConflictStrategy, Persona, PromptTemplate, Tool } from '@taori/shared';
+import type { BackupConflictStrategy, McpServer, Persona, PromptTemplate, Tool } from '@taori/shared';
 
 const MAX_BACKUP_IMPORT_BYTES = 25 * 1024 * 1024;
 
@@ -159,16 +159,24 @@ function notifyBudgetSettingsChanged(): void {
 
 function ToolsSection({ onChanged }: { onChanged: () => void }): JSX.Element {
   const [tools, setTools] = useState<Tool[]>([]);
+  const [mcpServers, setMcpServers] = useState<McpServer[]>([]);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [mcpName, setMcpName] = useState('');
+  const [mcpCommand, setMcpCommand] = useState('');
+  const [mcpArgs, setMcpArgs] = useState('');
 
   const load = async (): Promise<void> => {
     setLoading(true);
     setError(null);
     try {
-      const res = await api.listTools();
+      const [res, mcpRes] = await Promise.all([
+        api.listTools(),
+        api.listMcpServers().catch(() => ({ servers: [] })),
+      ]);
       setTools(res.data);
+      setMcpServers(mcpRes.servers);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
@@ -194,6 +202,77 @@ function ToolsSection({ onChanged }: { onChanged: () => void }): JSX.Element {
     }
   };
 
+  const addMcpServer = async (): Promise<void> => {
+    if (!mcpCommand.trim()) {
+      setError('请输入 MCP server command。');
+      return;
+    }
+    setSaving('mcp:add');
+    setError(null);
+    try {
+      const created = await api.createMcpServer({
+        name: mcpName.trim() || mcpCommand.trim(),
+        command: mcpCommand.trim(),
+        args: mcpArgs.split(/\s+/).map((item) => item.trim()).filter(Boolean),
+        env: {},
+        enabled: true,
+      });
+      await api.refreshMcpServer(created.server.id);
+      setMcpName('');
+      setMcpCommand('');
+      setMcpArgs('');
+      await load();
+      onChanged();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setSaving(null);
+    }
+  };
+
+  const toggleMcpServer = async (server: McpServer): Promise<void> => {
+    setSaving(server.id);
+    setError(null);
+    try {
+      await api.updateMcpServer(server.id, { enabled: !server.enabled });
+      await load();
+      onChanged();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setSaving(null);
+    }
+  };
+
+  const refreshMcpServer = async (server: McpServer): Promise<void> => {
+    setSaving(`${server.id}:refresh`);
+    setError(null);
+    try {
+      await api.refreshMcpServer(server.id);
+      await load();
+      onChanged();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setSaving(null);
+    }
+  };
+
+  const deleteMcpServer = async (server: McpServer): Promise<void> => {
+    if (!window.confirm(`删除 MCP Server “${server.name}”？`)) return;
+    setSaving(`${server.id}:delete`);
+    setError(null);
+    try {
+      await api.deleteMcpServer(server.id);
+      await load();
+      onChanged();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setSaving(null);
+    }
+  };
+
   return (
     <section className="settings-section" data-testid="settings-tools">
       <div className="settings-section-head">
@@ -206,32 +285,117 @@ function ToolsSection({ onChanged }: { onChanged: () => void }): JSX.Element {
       {loading ? (
         <p className="hint">加载工具列表…</p>
       ) : (
-        <div className="settings-tool-list">
-          {tools.map((tool) => (
-            <article className="settings-tool-card" key={tool.name} data-testid={`settings-tool-${tool.name}`}>
-              <div>
-                <div className="settings-tool-title">
-                  <strong>{toolLabel(tool.name)}</strong>
-                  <code>{tool.name}</code>
+        <>
+          <div className="settings-tool-list">
+            {tools.map((tool) => (
+              <article className="settings-tool-card" key={tool.name} data-testid={`settings-tool-${tool.name}`}>
+                <div>
+                  <div className="settings-tool-title">
+                    <strong>{toolLabel(tool.name)}</strong>
+                    <code>{tool.name}</code>
+                  </div>
+                  <p>{toolDescription(tool)}</p>
+                  <div className="settings-tool-meta">
+                    <span>能力：{capabilityLabel(tool.capability)}</span>
+                    <span>来源：{tool.source === 'builtin' ? '内置' : 'MCP'}</span>
+                  </div>
                 </div>
-                <p>{toolDescription(tool)}</p>
-                <div className="settings-tool-meta">
-                  <span>能力：{capabilityLabel(tool.capability)}</span>
-                  <span>来源：{tool.source === 'builtin' ? '内置' : 'MCP'}</span>
-                </div>
-              </div>
+                <button
+                  type="button"
+                  className={tool.enabled ? 'tool-toggle enabled' : 'tool-toggle'}
+                  disabled={saving === tool.name || tool.source === 'mcp'}
+                  data-testid={`tool-toggle-${tool.name}`}
+                  onClick={() => void toggle(tool)}
+                  title={tool.source === 'mcp' ? '请在 MCP Server 层启停' : undefined}
+                >
+                  {saving === tool.name ? '保存中…' : tool.enabled ? '已启用' : '已关闭'}
+                </button>
+              </article>
+            ))}
+          </div>
+
+          <div className="settings-mcp" data-testid="settings-mcp">
+            <div className="settings-section-head">
+              <h3>MCP 本地 Server</h3>
+            </div>
+            <div className="settings-mcp-form">
+              <input
+                value={mcpName}
+                onChange={(e) => setMcpName(e.target.value)}
+                placeholder="名称，例如 Filesystem"
+                data-testid="mcp-server-name"
+              />
+              <input
+                value={mcpCommand}
+                onChange={(e) => setMcpCommand(e.target.value)}
+                placeholder="command，例如 node"
+                data-testid="mcp-server-command"
+              />
+              <input
+                value={mcpArgs}
+                onChange={(e) => setMcpArgs(e.target.value)}
+                placeholder="args，以空格分隔"
+                data-testid="mcp-server-args"
+              />
               <button
                 type="button"
-                className={tool.enabled ? 'tool-toggle enabled' : 'tool-toggle'}
-                disabled={saving === tool.name}
-                data-testid={`tool-toggle-${tool.name}`}
-                onClick={() => void toggle(tool)}
+                className="btn-primary"
+                onClick={() => void addMcpServer()}
+                disabled={saving === 'mcp:add'}
+                data-testid="mcp-server-add"
               >
-                {saving === tool.name ? '保存中…' : tool.enabled ? '已启用' : '已关闭'}
+                {saving === 'mcp:add' ? '添加中…' : '添加并刷新'}
               </button>
-            </article>
-          ))}
-        </div>
+            </div>
+            {mcpServers.length === 0 ? (
+              <p className="hint">尚未添加 MCP Server。首版支持本地 stdio 传输。</p>
+            ) : (
+              <div className="settings-tool-list">
+                {mcpServers.map((server) => (
+                  <article className="settings-tool-card" key={server.id} data-testid={`mcp-server-${server.id}`}>
+                    <div>
+                      <div className="settings-tool-title">
+                        <strong>{server.name}</strong>
+                        <code>{server.command} {server.args.join(' ')}</code>
+                      </div>
+                      <p>
+                        状态：{server.enabled ? '启用' : '停用'} · 健康：{server.health_status} · 工具 {server.tools_count} 个
+                      </p>
+                      {server.last_error && <p className="err">{server.last_error}</p>}
+                    </div>
+                    <div className="settings-mcp-actions">
+                      <button
+                        type="button"
+                        onClick={() => void refreshMcpServer(server)}
+                        disabled={saving === `${server.id}:refresh`}
+                        data-testid={`mcp-server-refresh-${server.id}`}
+                      >
+                        {saving === `${server.id}:refresh` ? '刷新中…' : '刷新清单'}
+                      </button>
+                      <button
+                        type="button"
+                        className={server.enabled ? 'tool-toggle enabled' : 'tool-toggle'}
+                        onClick={() => void toggleMcpServer(server)}
+                        disabled={saving === server.id}
+                        data-testid={`mcp-server-toggle-${server.id}`}
+                      >
+                        {server.enabled ? '已启用' : '已停用'}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => void deleteMcpServer(server)}
+                        disabled={saving === `${server.id}:delete`}
+                        data-testid={`mcp-server-delete-${server.id}`}
+                      >
+                        删除
+                      </button>
+                    </div>
+                  </article>
+                ))}
+              </div>
+            )}
+          </div>
+        </>
       )}
       {error && <p className="err" data-testid="settings-tools-error">{error}</p>}
     </section>

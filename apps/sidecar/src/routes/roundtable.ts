@@ -705,6 +705,8 @@ export function registerRoundtableRoute(
             rtRepo,
             rtMsgRepo,
             keystore: deps.keystore,
+            bus: deps.bus ?? null,
+            memoriesRepo,
             log: req.log,
           },
           {
@@ -1008,6 +1010,8 @@ export function registerRoundtableRoute(
             rtRepo,
             rtMsgRepo,
             keystore: deps.keystore,
+            bus: deps.bus ?? null,
+            memoriesRepo,
             log: req.log,
           },
           {

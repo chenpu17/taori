@@ -37,6 +37,9 @@ import type {
   EffectiveTool,
   ConversationProfile,
   RunEvent,
+  McpServer,
+  McpServerCreate,
+  McpServerUpdate,
 } from '@taori/shared';
 
 async function json<T>(res: Response): Promise<T> {
@@ -522,6 +525,34 @@ export const api = {
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ conversation_id: conversationId, enabled }),
     }).then((r) => json<{ ok: boolean; data: EffectiveTool }>(r)),
+  listMcpServers: () =>
+    authedFetch('/v1/mcp/servers').then((r) =>
+      json<{ ok: boolean; servers: McpServer[] }>(r),
+    ),
+  createMcpServer: (input: McpServerCreate) =>
+    authedFetch('/v1/mcp/servers', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(input),
+    }).then((r) => json<{ ok: boolean; server: McpServer }>(r)),
+  updateMcpServer: (id: string, patch: McpServerUpdate) =>
+    authedFetch(`/v1/mcp/servers/${id}`, {
+      method: 'PATCH',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(patch),
+    }).then((r) => json<{ ok: boolean; server: McpServer }>(r)),
+  deleteMcpServer: (id: string) =>
+    authedFetch(`/v1/mcp/servers/${id}`, { method: 'DELETE' }).then((r) =>
+      json<void>(r),
+    ),
+  refreshMcpServer: (id: string) =>
+    authedFetch(`/v1/mcp/servers/${id}/refresh`, { method: 'POST' }).then((r) =>
+      json<{
+        ok: boolean;
+        server: McpServer;
+        tools: Array<{ name: string; description: string }>;
+      }>(r),
+    ),
   invokeTool: (
     name: string,
     input: unknown,

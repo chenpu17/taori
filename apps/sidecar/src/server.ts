@@ -29,6 +29,7 @@ import { registerAdminRoute } from './routes/admin.js';
 import { registerToolsRoute, toolEnabledKey } from './routes/tools.js';
 import { registerRoundtableRoute } from './routes/roundtable.js';
 import { registerCatalogRoute } from './routes/catalog.js';
+import { registerMcpRoute, restoreMcpToolsAtStartup } from './routes/mcp.js';
 import { registerTemplatesPersonasRoute } from './routes/templates-personas.js';
 import { scheduleCatalogSync } from './catalog/index.js';
 import { CapabilityBus } from './bus/index.js';
@@ -166,6 +167,7 @@ export function buildServer(args: BuildServerArgs): FastifyInstance {
       }),
     );
   }
+  void restoreMcpToolsAtStartup({ db: args.db, bus, config: args.config, log: app.log });
   for (const tool of bus.list()) {
     const persisted = memories.get('global', null, toolEnabledKey(tool.name));
     if (persisted === 'true' || persisted === 'false') {
@@ -184,6 +186,7 @@ export function buildServer(args: BuildServerArgs): FastifyInstance {
   registerTemplatesPersonasRoute(app, argsWithBus);
 
   registerToolsRoute(app, { bus, memories });
+  registerMcpRoute(app, { ...argsWithBus, bus });
   registerRoundtableRoute(app, argsWithBus);
   registerCatalogRoute(app, { ...argsWithBus, keystore: args.keystore });
 

@@ -25,6 +25,7 @@ import {
   type BackupPackage,
   TaoriError,
   makeId,
+  PricingMetaSchema,
 } from '@taori/shared';
 import type { BuildServerArgs } from '../server.js';
 import {
@@ -37,6 +38,7 @@ import {
   prompt_templates,
   personas,
   cost_records,
+  mcp_servers,
   roundtables,
   roundtable_messages,
 } from '../db/schema.js';
@@ -222,7 +224,10 @@ async function collectBackup(deps: BuildServerArgs): Promise<BackupPackage> {
       type: row.type as BackupProviderRecord['type'],
       had_api_key: !!api_key_ref,
     })),
-    models: modelRows,
+    models: modelRows.map((row) => ({
+      ...row,
+      pricing_meta: parsePricingMetaBackup(row.pricing_meta),
+    })),
     conversations: conversationRows,
     messages: messageRows,
     files: exportedFiles,
@@ -258,6 +263,17 @@ async function collectBackup(deps: BuildServerArgs): Promise<BackupPackage> {
   };
 }
 
+function parsePricingMetaBackup(raw: string | null): BackupData['models'][number]['pricing_meta'] {
+  if (!raw) return null;
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    const result = PricingMetaSchema.safeParse(parsed);
+    return result.success ? result.data : null;
+  } catch {
+    return null;
+  }
+}
+
 async function wipeAllData(deps: BuildServerArgs): Promise<{
   keystoreEntriesRemoved: number;
   keystoreFailures: string[];
@@ -277,6 +293,7 @@ async function wipeAllData(deps: BuildServerArgs): Promise<{
   deps.db.delete(roundtable_messages).where(sql`1=1`).run();
   deps.db.delete(roundtables).where(sql`1=1`).run();
   deps.db.delete(cost_records).where(sql`1=1`).run();
+  deps.db.delete(mcp_servers).where(sql`1=1`).run();
   deps.db.delete(files).where(sql`1=1`).run();
   deps.db.delete(messages).where(sql`1=1`).run();
   deps.db.delete(memories).where(sql`1=1`).run();
@@ -319,6 +336,9 @@ async function wipeAllData(deps: BuildServerArgs): Promise<{
 export function registerAdminRoute(app: FastifyInstance, deps: BuildServerArgs): void {
   app.post('/v1/admin/clear-all-data', async () => {
     const cleared = await wipeAllData(deps);
+    for (const tool of deps.bus?.list().filter((item) => item.source === 'mcp') ?? []) {
+      deps.bus?.unregisterBySource('mcp', tool.source_id);
+    }
     for (const tool of deps.bus?.list() ?? []) {
       deps.bus?.setEnabled(tool.name, true);
     }
@@ -624,6 +644,7 @@ export function registerAdminRoute(app: FastifyInstance, deps: BuildServerArgs):
         price_per_image: row.price_per_image,
         price_per_video_second: row.price_per_video_second,
         price_currency: row.price_currency,
+        pricing_meta: row.pricing_meta ? JSON.stringify(row.pricing_meta) : null,
         price_synced_at: row.price_synced_at,
         modalities: row.modalities,
         context_length: row.context_length,
