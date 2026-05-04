@@ -134,8 +134,30 @@ interface ToolTraceStep {
   durationMs: number | null;
 }
 
+interface GeneratedImage {
+  file_id: string;
+  content_type: string;
+  width: number;
+  height: number;
+  prompt?: string;
+  data_b64?: string;
+}
+
 function formatTokenCount(value: number | null): string {
   return value == null ? '—' : value.toLocaleString();
+}
+
+function imageDataUrl(img: Pick<GeneratedImage, 'content_type' | 'data_b64'>): string {
+  return img.data_b64 ? `data:${img.content_type || 'image/png'};base64,${img.data_b64}` : '';
+}
+
+function generatedImageFilename(img: Pick<GeneratedImage, 'file_id' | 'prompt' | 'content_type'>): string {
+  const raw = (img.prompt || img.file_id || 'generated-image')
+    .slice(0, 48)
+    .replace(/[\s/\\:*?"<>|]+/g, '-')
+    .replace(/^-+|-+$/g, '');
+  const ext = img.content_type.includes('jpeg') ? 'jpg' : img.content_type.includes('webp') ? 'webp' : 'png';
+  return `${raw || 'generated-image'}.${ext}`;
 }
 
 function currentBudgetMonthKey(now = new Date()): string {
@@ -1240,18 +1262,12 @@ function ChatPanel({
   // turn, the sidecar streams a `tool_image_result` annotation we use to
   // render the produced image inline beneath the assistant bubble.
   const [imagesByMsg, setImagesByMsg] = useState<
-    Record<
-      string,
-      Array<{
-        file_id: string;
-        content_type: string;
-        width: number;
-        height: number;
-        prompt?: string;
-        data_b64?: string;
-      }>
-    >
+    Record<string, GeneratedImage[]>
   >({});
+  const [imageViewer, setImageViewer] = useState<{
+    img: GeneratedImage;
+    zoom: number;
+  } | null>(null);
   const [realtime, setRealtime] = useState<{
     current_conversation_usd: number;
     current_conversation_calls: number;
@@ -1359,6 +1375,10 @@ function ChatPanel({
   } | null>(null);
   const [imagePickerError, setImagePickerError] = useState<string | null>(null);
   const [imagePickerSubmitting, setImagePickerSubmitting] = useState(false);
+  const [imageGenerationStatus, setImageGenerationStatus] = useState<{
+    prompt: string;
+    modelId: string;
+  } | null>(null);
   const [imageModels, setImageModels] = useState<Model[]>([]);
   const [effectiveTools, setEffectiveTools] = useState<EffectiveTool[]>(
     () => tools.map((t) => ({ ...t, session_enabled: null, effective_enabled: t.enabled })),
@@ -2119,6 +2139,7 @@ function ChatPanel({
     sourceMessageId: string | null,
   ) => {
     setImagePickerSubmitting(true);
+    setImageGenerationStatus({ prompt, modelId });
     setImagePickerError(null);
     try {
       const res = await api.invokeTool(
@@ -2159,6 +2180,7 @@ function ChatPanel({
       setImagePickerError((e as Error).message ?? '请求失败');
     } finally {
       setImagePickerSubmitting(false);
+      setImageGenerationStatus(null);
     }
   }, [setMessages, refreshRunTimeline]); // refreshRealtime is hoisted via useCallback below.
 
@@ -2278,6 +2300,43 @@ function ChatPanel({
     );
     window.requestAnimationFrame(() => composerRef.current?.focus());
   }, [chatModels, model, onModelChange, providers, setInput]);
+
+  const saveGeneratedImage = useCallback((img: GeneratedImage): void => {
+    if (!img.data_b64) {
+      setDropError('图片数据仍在加载，请稍后再试。');
+      return;
+    }
+    const anchor = document.createElement('a');
+    anchor.href = imageDataUrl(img);
+    anchor.download = generatedImageFilename(img);
+    document.body.appendChild(anchor);
+    anchor.click();
+    anchor.remove();
+  }, []);
+
+  useEffect(() => {
+    if (!imageViewer) return;
+    const onKey = (e: KeyboardEvent): void => {
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        setImageViewer(null);
+      }
+      if ((e.key === '+' || e.key === '=') && (e.metaKey || e.ctrlKey)) {
+        e.preventDefault();
+        setImageViewer((current) =>
+          current ? { ...current, zoom: Math.min(3, current.zoom + 0.25) } : current,
+        );
+      }
+      if (e.key === '-' && (e.metaKey || e.ctrlKey)) {
+        e.preventDefault();
+        setImageViewer((current) =>
+          current ? { ...current, zoom: Math.max(0.5, current.zoom - 0.25) } : current,
+        );
+      }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [imageViewer]);
 
   // Wire the forward-ref so openImagePicker can auto-fire submit when the
   // session-memory shortcut applies (spec §7 step 7).
@@ -3158,30 +3217,44 @@ function ChatPanel({
                 <div className="msg-tool-images" data-testid="msg-tool-images">
                   {imagesByMsg[m.id]!.map((img) => (
                     <figure key={img.file_id} className="tool-image">
-                      <img
-                        src={
-                          img.data_b64
-                            ? `data:${img.content_type};base64,${img.data_b64}`
-                            : ''
-                        }
-                        alt={img.prompt ?? 'generated image'}
-                        loading="lazy"
-                      />
-	                      {img.prompt && (
-	                        <figcaption>{img.prompt}</figcaption>
-	                      )}
-	                      <div className="tool-image-actions">
-	                        <button
-	                          type="button"
-	                          data-testid="tool-image-understand"
-	                          disabled={!img.data_b64}
-	                          onClick={() => attachGeneratedImageForVision(img)}
-	                        >
-	                          理解这张图
-	                        </button>
-	                      </div>
-	                    </figure>
-	                  ))}
+                      <button
+                        type="button"
+                        className="tool-image-preview"
+                        disabled={!img.data_b64}
+                        onClick={() => setImageViewer({ img, zoom: 1 })}
+                        data-testid="tool-image-open"
+                        title="打开大图预览"
+                      >
+                        <img
+                          src={imageDataUrl(img)}
+                          alt={img.prompt ?? 'generated image'}
+                          loading="lazy"
+                        />
+                        <span>点击放大</span>
+                      </button>
+                      {img.prompt && (
+                        <figcaption>{img.prompt}</figcaption>
+                      )}
+                      <div className="tool-image-actions">
+                        <button
+                          type="button"
+                          data-testid="tool-image-save"
+                          disabled={!img.data_b64}
+                          onClick={() => saveGeneratedImage(img)}
+                        >
+                          保存图片
+                        </button>
+                        <button
+                          type="button"
+                          data-testid="tool-image-understand"
+                          disabled={!img.data_b64}
+                          onClick={() => attachGeneratedImageForVision(img)}
+                        >
+                          理解这张图
+                        </button>
+                      </div>
+                    </figure>
+                  ))}
                 </div>
               )}
               {m.role === 'assistant' && toolTraceSteps.length > 0 && (
@@ -3598,6 +3671,16 @@ function ChatPanel({
           onUpdatePrefs={(next) => setConfirmPrefs((p) => ({ ...p, ...next }))}
         />
       )}
+      {imageGenerationStatus && !pendingConfirm && (
+        <ImageGenerationProgress
+          prompt={imageGenerationStatus.prompt}
+          modelName={
+            imageModels.find((m) => m.id === imageGenerationStatus.modelId)
+              ? modelDisplayWithProvider(imageModels.find((m) => m.id === imageGenerationStatus.modelId)!, providers)
+              : '图像模型'
+          }
+        />
+      )}
       {costPanelScope && (
         <SessionCostPanel
           scope={costPanelScope}
@@ -3631,6 +3714,16 @@ function ChatPanel({
           }
           onSubmit={() => void submitImagePicker()}
           onCancel={() => setImagePicker(null)}
+        />
+      )}
+      {imageViewer && (
+        <ImageLightbox
+          img={imageViewer.img}
+          zoom={imageViewer.zoom}
+          onZoom={(zoom) => setImageViewer((current) => (current ? { ...current, zoom } : current))}
+          onSave={() => saveGeneratedImage(imageViewer.img)}
+          onAttach={() => attachGeneratedImageForVision(imageViewer.img)}
+          onClose={() => setImageViewer(null)}
         />
       )}
       {templatePickerOpen && (
@@ -4715,6 +4808,15 @@ function ImagePickerDialog({
         {errorMsg && (
           <div className="error" data-testid="image-picker-error">{errorMsg}</div>
         )}
+        {submitting && (
+          <div className="image-generation-progress" data-testid="image-picker-progress" aria-live="polite">
+            <span className="image-generation-progress__spinner" aria-hidden="true" />
+            <div>
+              <strong>正在生成并保存到当前对话</strong>
+              <span>请求已发送给图像模型，完成后会自动插入消息并支持大图预览。</span>
+            </div>
+          </div>
+        )}
         <div className="modal-actions">
           <button
             type="button"
@@ -4733,6 +4835,102 @@ function ImagePickerDialog({
           </button>
         </div>
       </div>
+    </div>
+  );
+}
+
+function ImageGenerationProgress({
+  prompt,
+  modelName,
+}: {
+  prompt: string;
+  modelName: string;
+}): JSX.Element {
+  return (
+    <div className="image-generation-float" data-testid="image-generation-progress" role="status" aria-live="polite">
+      <span className="image-generation-progress__spinner" aria-hidden="true" />
+      <div>
+        <strong>正在生成图片</strong>
+        <span>{modelName} · {prompt.slice(0, 72)}{prompt.length > 72 ? '…' : ''}</span>
+      </div>
+    </div>
+  );
+}
+
+function ImageLightbox({
+  img,
+  zoom,
+  onZoom,
+  onSave,
+  onAttach,
+  onClose,
+}: {
+  img: GeneratedImage;
+  zoom: number;
+  onZoom: (zoom: number) => void;
+  onSave: () => void;
+  onAttach: () => void;
+  onClose: () => void;
+}): JSX.Element {
+  const safeZoom = Math.max(0.5, Math.min(3, zoom));
+  const zoomLabel = `${Math.round(safeZoom * 100)}%`;
+  return (
+    <div
+      className="image-lightbox"
+      data-testid="image-lightbox"
+      role="dialog"
+      aria-modal="true"
+      aria-label="图片预览"
+      onClick={(e) => {
+        if (e.target === e.currentTarget) onClose();
+      }}
+    >
+      <div className="image-lightbox__chrome">
+        <div className="image-lightbox__meta">
+          <strong>生成图片</strong>
+          <span>{img.width && img.height ? `${img.width} x ${img.height}` : img.content_type}</span>
+        </div>
+        <div className="image-lightbox__actions">
+          <button
+            type="button"
+            onClick={() => onZoom(Math.max(0.5, safeZoom - 0.25))}
+            data-testid="image-lightbox-zoom-out"
+          >
+            缩小
+          </button>
+          <button
+            type="button"
+            onClick={() => onZoom(1)}
+            data-testid="image-lightbox-zoom-reset"
+          >
+            {zoomLabel}
+          </button>
+          <button
+            type="button"
+            onClick={() => onZoom(Math.min(3, safeZoom + 0.25))}
+            data-testid="image-lightbox-zoom-in"
+          >
+            放大
+          </button>
+          <button type="button" onClick={onSave} data-testid="image-lightbox-save">
+            保存图片
+          </button>
+          <button type="button" onClick={onAttach} data-testid="image-lightbox-understand">
+            理解这张图
+          </button>
+          <button type="button" onClick={onClose} data-testid="image-lightbox-close" aria-label="关闭">
+            关闭
+          </button>
+        </div>
+      </div>
+      <div className="image-lightbox__stage">
+        <img
+          src={imageDataUrl(img)}
+          alt={img.prompt ?? 'generated image'}
+          style={{ width: `${safeZoom * 100}%` }}
+        />
+      </div>
+      {img.prompt && <p className="image-lightbox__caption">{img.prompt}</p>}
     </div>
   );
 }

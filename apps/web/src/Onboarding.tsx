@@ -62,8 +62,15 @@ const PROVIDER_PRESETS: Partial<
   },
 };
 
+function defaultProviderName(type: ProviderType): string {
+  const presetLabel = PROVIDER_PRESETS[type]?.label ?? type;
+  return presetLabel.replace(/（.+?）/g, '').trim() || '自定义 Provider';
+}
+
 export function Onboarding({ onDone, onSkip }: OnboardingProps): JSX.Element {
   const [type, setType] = useState<ProviderType>('openrouter');
+  const [providerName, setProviderName] = useState(defaultProviderName('openrouter'));
+  const [providerNameTouched, setProviderNameTouched] = useState(false);
   const [baseUrl, setBaseUrl] = useState(
     PROVIDER_PRESETS.openrouter?.default_base_url ?? '',
   );
@@ -93,14 +100,24 @@ export function Onboarding({ onDone, onSkip }: OnboardingProps): JSX.Element {
   const [chosenSet, setChosenSet] = useState<Set<string>>(new Set());
 
   const onTypeChange = (t: ProviderType): void => {
+    const previousDefault = defaultProviderName(type);
     setType(t);
     const preset = PROVIDER_PRESETS[t];
     if (preset) setBaseUrl(preset.default_base_url);
+    if (!providerNameTouched || providerName.trim() === previousDefault) {
+      setProviderName(defaultProviderName(t));
+      setProviderNameTouched(false);
+    }
   };
 
   const submitKey = async (e: React.FormEvent): Promise<void> => {
     e.preventDefault();
     setError(null);
+    const trimmedProviderName = providerName.trim();
+    if (!trimmedProviderName) {
+      setError('请输入供应商名称');
+      return;
+    }
     if (!apiKey.trim()) {
       setError('请输入 API Key');
       return;
@@ -115,7 +132,7 @@ export function Onboarding({ onDone, onSkip }: OnboardingProps): JSX.Element {
       }
       // Test passed → create the provider (this writes the key to the keystore)
       const provider = await api.createProvider({
-        name: (PROVIDER_PRESETS[type]?.label ?? type).replace(/（.+?）/g, ''),
+        name: trimmedProviderName,
         type,
         base_url: baseUrl,
         api_key: apiKey,
@@ -254,6 +271,20 @@ export function Onboarding({ onDone, onSkip }: OnboardingProps): JSX.Element {
             </select>
           </label>
           <p className="hint">{PROVIDER_PRESETS[type]?.help ?? ''}</p>
+          <label>
+            供应商名称
+            <input
+              value={providerName}
+              onChange={(e) => {
+                setProviderName(e.target.value);
+                setProviderNameTouched(true);
+              }}
+              maxLength={100}
+              spellCheck={false}
+              placeholder={defaultProviderName(type)}
+              data-testid="onb-provider-name"
+            />
+          </label>
           <label>
             Base URL
             <input

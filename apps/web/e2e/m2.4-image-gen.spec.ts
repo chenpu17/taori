@@ -109,6 +109,7 @@ test('M2.4 explicit image command → picker opens → force=success → assista
       ...route.request().headers(),
       'x-test-force-image-result': 'success',
     };
+    await new Promise((resolve) => setTimeout(resolve, 250));
     await route.continue({ headers });
   });
 
@@ -129,6 +130,7 @@ test('M2.4 explicit image command → picker opens → force=success → assista
   const confirm = page.getByTestId('cost-confirm-dialog');
   await expect(confirm).toBeVisible({ timeout: 10_000 });
   await confirm.getByTestId('cost-confirm-continue').click();
+  await expect(page.getByTestId('image-generation-progress')).toBeVisible({ timeout: 10_000 });
 
   // Picker closes once the tool succeeds + history reload completes.
   await expect(dialog).toBeHidden({ timeout: 10_000 });
@@ -136,6 +138,21 @@ test('M2.4 explicit image command → picker opens → force=success → assista
   // Inserted assistant message should be visible in the chat panel.
   const assistant = page.locator('.msg.assistant').last();
   await expect(assistant).toContainText(/Generated with|DALL-E/i, { timeout: 10_000 });
+  await expect(page.getByTestId('msg-tool-images')).toBeVisible({ timeout: 10_000 });
+  await expect(page.getByTestId('tool-image-open')).toBeVisible();
+
+  await page.getByTestId('tool-image-open').click();
+  const lightbox = page.getByTestId('image-lightbox');
+  await expect(lightbox).toBeVisible();
+  await expect(lightbox.locator('.image-lightbox__stage img')).toBeVisible();
+  await lightbox.getByTestId('image-lightbox-zoom-in').click();
+  await expect(lightbox.getByTestId('image-lightbox-zoom-reset')).toContainText('125%');
+  const downloadPromise = page.waitForEvent('download');
+  await lightbox.getByTestId('image-lightbox-save').click();
+  const download = await downloadPromise;
+  expect(download.suggestedFilename()).toMatch(/\.(png|jpg|jpeg|webp)$/i);
+  await lightbox.getByTestId('image-lightbox-close').click();
+  await expect(lightbox).toHaveCount(0);
 });
 
 test('M2.4 explicit /image command opens picker', async ({ page }) => {

@@ -56,7 +56,10 @@ test('Ark onboarding preserves discovered tool/image/vision capabilities and the
 
   await page.goto('/');
   await expect(page.getByTestId('onboarding')).toBeVisible({ timeout: 10_000 });
+  await expect(page.getByTestId('onb-provider-name')).toHaveValue('OpenRouter');
   await page.getByTestId('onb-provider-type').selectOption('volcengine_ark');
+  await expect(page.getByTestId('onb-provider-name')).toHaveValue('火山方舟');
+  await page.getByTestId('onb-provider-name').fill('PackyAPI 主账号');
   await page.getByTestId('onb-base-url').fill(MOCK_BASE_URL);
   await page.getByTestId('onb-api-key').fill('sk-ark-test');
   await page.getByTestId('onb-submit').click();
@@ -80,6 +83,18 @@ test('Ark onboarding preserves discovered tool/image/vision capabilities and the
   await page.getByTestId('onb-finish').click();
 
   await expect(page.getByTestId('chat-panel')).toBeVisible({ timeout: 15_000 });
+
+  const providersRes = await authedFetch(env, '/v1/providers');
+  const providersBody = (await providersRes.json()) as {
+    providers: Array<{ name: string; type: string; base_url: string }>;
+  };
+  expect(providersBody.providers).toContainEqual(
+    expect.objectContaining({
+      name: 'PackyAPI 主账号',
+      type: 'volcengine_ark',
+      base_url: MOCK_BASE_URL,
+    }),
+  );
 
   const modelsRes = await authedFetch(env, '/v1/models');
   const body = (await modelsRes.json()) as {
