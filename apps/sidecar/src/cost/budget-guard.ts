@@ -9,6 +9,7 @@ import type { CostsRepo, MemoriesRepo } from '../db/repos/index.js';
 
 export type BudgetDecisionKind = 'allow' | 'confirm' | 'block';
 export type BudgetReason = 'threshold' | 'budget';
+export type BudgetPeriod = 'month' | 'day';
 
 export interface BudgetGuardInput {
   confirmed: boolean;
@@ -23,6 +24,8 @@ export interface BudgetGuardInput {
   disabledConversationsKey?: string;
   monthlyBudgetKey?: string;
   hardLimitKey?: string;
+  dailyBudgetKey?: string;
+  dailyHardLimitKey?: string;
   defaultThresholdUsd?: number;
   defaultOutputTokens?: number;
   softBudgetEnabled?: boolean;
@@ -31,10 +34,14 @@ export interface BudgetGuardInput {
 export interface BudgetDecision {
   kind: BudgetDecisionKind;
   reason: BudgetReason | null;
+  /** Which period a budget breach is on. Only meaningful when reason === 'budget'. */
+  period: BudgetPeriod | null;
   estimate_usd: number;
   threshold_usd: number | null;
   monthly_budget_usd: number | null;
   month_spent_usd: number;
+  daily_budget_usd: number | null;
+  day_spent_usd: number;
   hard_limit: boolean;
 }
 
@@ -85,6 +92,8 @@ export function evaluateBudgetGuard(input: BudgetGuardInput): BudgetDecision {
     input.disabledConversationsKey ?? 'cost_confirm_disabled_conversations';
   const monthlyBudgetKey = input.monthlyBudgetKey ?? 'monthly_budget_usd';
   const hardLimitKey = input.hardLimitKey ?? 'monthly_budget_hard_limit';
+  const dailyBudgetKey = input.dailyBudgetKey ?? 'daily_budget_usd';
+  const dailyHardLimitKey = input.dailyHardLimitKey ?? 'daily_budget_hard_limit';
 
   const disabledModels = parseStringArray(
     input.memoriesRepo.getEffective(input.conversationId, disabledModelsKey),
@@ -113,22 +122,56 @@ export function evaluateBudgetGuard(input: BudgetGuardInput): BudgetDecision {
     input.memoriesRepo.getEffective(null, monthlyBudgetKey),
     null,
   );
-  const hardLimit = parseBoolean(input.memoriesRepo.getEffective(null, hardLimitKey), false);
+  const monthlyHardLimit = parseBoolean(input.memoriesRepo.getEffective(null, hardLimitKey), false);
+  const dailyBudgetUsd = parseNumber(
+    input.memoriesRepo.getEffective(null, dailyBudgetKey),
+    null,
+  );
+  const dailyHardLimit = parseBoolean(
+    input.memoriesRepo.getEffective(null, dailyHardLimitKey),
+    false,
+  );
   const softBudgetEnabled = input.softBudgetEnabled ?? true;
-  const monthSpentUsd = input.costsRepo.realtime(input.conversationId).month_usd;
-  const wouldExceedBudget =
+  const realtime = input.costsRepo.realtime(input.conversationId);
+  const monthSpentUsd = realtime.month_usd;
+  const daySpentUsd = realtime.today_usd;
+
+  const wouldExceedMonthly =
     monthlyBudgetUsd != null &&
     monthlyBudgetUsd > 0 &&
     monthSpentUsd + estimateUsd >= monthlyBudgetUsd;
+  const wouldExceedDaily =
+    dailyBudgetUsd != null &&
+    dailyBudgetUsd > 0 &&
+    daySpentUsd + estimateUsd >= dailyBudgetUsd;
 
-  if (wouldExceedBudget && hardLimit) {
+  const baseSnapshot = {
+    estimate_usd: estimateUsd,
+    threshold_usd: thresholdUsd,
+    monthly_budget_usd: monthlyBudgetUsd,
+    month_spent_usd: monthSpentUsd,
+    daily_budget_usd: dailyBudgetUsd,
+    day_spent_usd: daySpentUsd,
+  };
+
+  // Hard limits are enforced regardless of `confirmed`. Daily is checked first
+  // because it's the tighter window — exceeding the day implicitly means we
+  // also can't safely promise to honour the month.
+  if (wouldExceedDaily && dailyHardLimit) {
     return {
       kind: 'block',
       reason: 'budget',
-      estimate_usd: estimateUsd,
-      threshold_usd: thresholdUsd,
-      monthly_budget_usd: monthlyBudgetUsd,
-      month_spent_usd: monthSpentUsd,
+      period: 'day',
+      ...baseSnapshot,
+      hard_limit: true,
+    };
+  }
+  if (wouldExceedMonthly && monthlyHardLimit) {
+    return {
+      kind: 'block',
+      reason: 'budget',
+      period: 'month',
+      ...baseSnapshot,
       hard_limit: true,
     };
   }
@@ -137,22 +180,27 @@ export function evaluateBudgetGuard(input: BudgetGuardInput): BudgetDecision {
     return {
       kind: 'allow',
       reason: null,
-      estimate_usd: estimateUsd,
-      threshold_usd: thresholdUsd,
-      monthly_budget_usd: monthlyBudgetUsd,
-      month_spent_usd: monthSpentUsd,
-      hard_limit: hardLimit,
+      period: null,
+      ...baseSnapshot,
+      hard_limit: monthlyHardLimit || dailyHardLimit,
     };
   }
 
-  if (wouldExceedBudget && softBudgetEnabled) {
+  if (wouldExceedDaily && softBudgetEnabled) {
     return {
       kind: 'confirm',
       reason: 'budget',
-      estimate_usd: estimateUsd,
-      threshold_usd: thresholdUsd,
-      monthly_budget_usd: monthlyBudgetUsd,
-      month_spent_usd: monthSpentUsd,
+      period: 'day',
+      ...baseSnapshot,
+      hard_limit: false,
+    };
+  }
+  if (wouldExceedMonthly && softBudgetEnabled) {
+    return {
+      kind: 'confirm',
+      reason: 'budget',
+      period: 'month',
+      ...baseSnapshot,
       hard_limit: false,
     };
   }
@@ -166,22 +214,18 @@ export function evaluateBudgetGuard(input: BudgetGuardInput): BudgetDecision {
     return {
       kind: 'confirm',
       reason: 'threshold',
-      estimate_usd: estimateUsd,
-      threshold_usd: thresholdUsd,
-      monthly_budget_usd: monthlyBudgetUsd,
-      month_spent_usd: monthSpentUsd,
-      hard_limit: hardLimit,
+      period: null,
+      ...baseSnapshot,
+      hard_limit: monthlyHardLimit || dailyHardLimit,
     };
   }
 
   return {
     kind: 'allow',
     reason: null,
-    estimate_usd: estimateUsd,
-    threshold_usd: thresholdUsd,
-    monthly_budget_usd: monthlyBudgetUsd,
-    month_spent_usd: monthSpentUsd,
-    hard_limit: hardLimit,
+    period: null,
+    ...baseSnapshot,
+    hard_limit: monthlyHardLimit || dailyHardLimit,
   };
 }
 
@@ -191,16 +235,20 @@ export function throwIfBudgetBlockedOrNeedsConfirmation(
   const decision = evaluateBudgetGuard(input);
   if (decision.kind === 'allow') return decision;
 
+  const periodLabel = decision.period === 'day' ? '今日' : '本月';
+  const message =
+    decision.kind === 'block'
+      ? `${periodLabel}硬预算上限将被超过，请先调整预算后再继续。`
+      : decision.reason === 'budget'
+        ? `本次调用将达到或超过${periodLabel}预算，请确认后再继续。`
+        : '本次调用预估费用超过确认阈值，请确认后再继续。';
+
   throw new TaoriError({
     code: 'cost_confirmation_required',
-    message:
-      decision.kind === 'block'
-        ? '本月硬预算上限将被超过，请先调整预算后再继续。'
-        : decision.reason === 'budget'
-          ? '本次调用将达到或超过本月预算，请确认后再继续。'
-          : '本次调用预估费用超过确认阈值，请确认后再继续。',
+    message,
     details: {
       reason: decision.reason ?? 'threshold',
+      period: decision.period ?? undefined,
       estimate_usd: decision.estimate_usd,
       model_id: input.model.id,
       model_name: input.model.display_name ?? input.model.model_name,
@@ -208,6 +256,8 @@ export function throwIfBudgetBlockedOrNeedsConfirmation(
       threshold_usd: decision.threshold_usd,
       monthly_budget_usd: decision.monthly_budget_usd,
       month_spent_usd: decision.month_spent_usd,
+      daily_budget_usd: decision.daily_budget_usd,
+      day_spent_usd: decision.day_spent_usd,
       hard_limit: decision.hard_limit,
       blocked: decision.kind === 'block',
     } satisfies CostConfirmationRequiredDetails & {

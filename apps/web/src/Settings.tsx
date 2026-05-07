@@ -118,6 +118,7 @@ export function SettingsContent({
           <AutoFallbackSection />
           <StreamRecoverySection />
           <MonthlyBudgetSection />
+          <DailyBudgetSection />
           <MemoryDrawerSection />
           <section className="settings-section">
             <div className="settings-section-head">
@@ -730,6 +731,126 @@ function MonthlyBudgetSection(): JSX.Element {
         启用硬上限：超过预算后不允许继续确认绕过
       </label>
       {msg && <p className="hint" data-testid="monthly-budget-message">{msg}</p>}
+    </section>
+  );
+}
+
+function DailyBudgetSection(): JSX.Element {
+  const [value, setValue] = useState('');
+  const [hardLimit, setHardLimit] = useState(false);
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [msg, setMsg] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const [budgetRes, hardRes] = await Promise.all([
+          api.getMemoryEffective('daily_budget_usd'),
+          api.getMemoryEffective('daily_budget_hard_limit'),
+        ]);
+        if (!cancelled) {
+          setValue(budgetRes.data.value ?? '');
+          setHardLimit(hardRes.data.value === 'true');
+        }
+      } catch (e) {
+        if (!cancelled) setMsg(e instanceof Error ? e.message : String(e));
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const save = async (nextValue: string): Promise<void> => {
+    const trimmed = nextValue.trim();
+    if (trimmed) {
+      const parsed = Number(trimmed);
+      if (!Number.isFinite(parsed) || parsed <= 0) {
+        setMsg('请输入大于 0 的 USD 金额，或清空以关闭日预算。');
+        return;
+      }
+    }
+    setSaving(true);
+    setMsg(null);
+    try {
+      if (trimmed) {
+        await api.putMemory('global', 'daily_budget_usd', trimmed);
+        await api.putMemory('global', 'daily_budget_hard_limit', hardLimit ? 'true' : 'false');
+      } else {
+        await api.deleteMemory('global', 'daily_budget_usd');
+        await api.deleteMemory('global', 'daily_budget_hard_limit');
+      }
+      await api.deleteMemory('global', 'daily_budget_alert_state');
+      setValue(trimmed);
+      setMsg(
+        trimmed
+          ? hardLimit
+            ? '日硬上限已保存。今天达到后会阻止模型调用，直到你调整预算。'
+            : '日软预算已保存。阈值提醒将从今天重新计算。'
+          : '已关闭日软预算和硬上限。',
+      );
+      notifyBudgetSettingsChanged();
+    } catch (e) {
+      setMsg(e instanceof Error ? e.message : String(e));
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <section className="settings-section" data-testid="settings-daily-budget">
+      <div className="settings-section-head">
+        <h3>日预算</h3>
+      </div>
+      <p className="hint">
+        配置每日预算（USD）。软预算达到 100% 后继续发送前要求确认；硬上限会直接阻止模型调用，直到次日或你调整预算。日预算与月度预算独立计算，更紧的窗口会先触发。
+      </p>
+      <div className="settings-inline-form">
+        <input
+          type="number"
+          min="0"
+          step="0.01"
+          inputMode="decimal"
+          value={value}
+          onChange={(e) => setValue(e.target.value)}
+          placeholder="例如 2"
+          disabled={loading || saving}
+          data-testid="daily-budget-input"
+        />
+        <button
+          type="button"
+          className="settings-action-btn settings-action-btn--primary"
+          onClick={() => void save(value)}
+          disabled={loading || saving}
+          data-testid="daily-budget-save"
+        >
+          {saving ? '保存中…' : '保存预算'}
+        </button>
+        <button
+          type="button"
+          className="settings-action-btn settings-action-btn--secondary"
+          onClick={() => void save('')}
+          disabled={loading || saving || value.trim().length === 0}
+          data-testid="daily-budget-clear"
+        >
+          清除
+        </button>
+      </div>
+      <label className="settings-check">
+        <input
+          type="checkbox"
+          checked={hardLimit}
+          onChange={(e) => setHardLimit(e.target.checked)}
+          disabled={loading || saving || value.trim().length === 0}
+          data-testid="daily-budget-hard-limit"
+        />
+        启用硬上限：超过日预算后不允许继续确认绕过
+      </label>
+      {msg && <p className="hint" data-testid="daily-budget-message">{msg}</p>}
     </section>
   );
 }

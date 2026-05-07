@@ -233,6 +233,10 @@ function currentBudgetMonthKey(now = new Date()): string {
   return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
 }
 
+function currentBudgetDayKey(now = new Date()): string {
+  return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
+}
+
 function extractTemplateVariables(content: string): string[] {
   const seen = new Set<string>();
   const out: string[] = [];
@@ -1709,6 +1713,9 @@ function ChatPanel({
     budget?: {
       monthly_budget_usd: number;
       month_spent_usd: number;
+      daily_budget_usd?: number;
+      day_spent_usd?: number;
+      period?: 'month' | 'day';
     };
     onContinue: () => void;
     onCheaper: () => void;
@@ -1767,10 +1774,17 @@ function ChatPanel({
     month: string;
     seen: number[];
   }>({ month: currentBudgetMonthKey(), seen: [] });
+  const [dailyBudgetUsd, setDailyBudgetUsd] = useState<number | null>(null);
+  const [dailyBudgetHardLimit, setDailyBudgetHardLimit] = useState(false);
+  const [dailyBudgetAlertState, setDailyBudgetAlertState] = useState<{
+    day: string;
+    seen: number[];
+  }>({ day: currentBudgetDayKey(), seen: [] });
   const [budgetToast, setBudgetToast] = useState<{
     threshold: 50 | 80 | 100;
-    monthlyBudgetUsd: number;
-    monthSpentUsd: number;
+    period: 'month' | 'day';
+    budgetUsd: number;
+    spentUsd: number;
   } | null>(null);
 
   // M2.4 — image picker (capability_route trigger). When set, modal is open.
@@ -3116,10 +3130,20 @@ function ChatPanel({
 
   const loadBudgetPrefs = useCallback(async (): Promise<void> => {
     try {
-      const [budgetRes, alertRes, hardRes] = await Promise.all([
+      const [
+        budgetRes,
+        alertRes,
+        hardRes,
+        dailyBudgetRes,
+        dailyAlertRes,
+        dailyHardRes,
+      ] = await Promise.all([
         api.getMemoryEffective('monthly_budget_usd', null),
         api.getMemoryEffective('monthly_budget_alert_state', null),
         api.getMemoryEffective('monthly_budget_hard_limit', null),
+        api.getMemoryEffective('daily_budget_usd', null),
+        api.getMemoryEffective('daily_budget_alert_state', null),
+        api.getMemoryEffective('daily_budget_hard_limit', null),
       ]);
       const rawBudget = budgetRes.data.value;
       const parsedBudget = rawBudget == null ? Number.NaN : Number(rawBudget);
@@ -3146,9 +3170,37 @@ function ChatPanel({
         }
       }
       setBudgetAlertState(nextState);
+
+      const rawDaily = dailyBudgetRes.data.value;
+      const parsedDaily = rawDaily == null ? Number.NaN : Number(rawDaily);
+      setDailyBudgetUsd(Number.isFinite(parsedDaily) && parsedDaily > 0 ? parsedDaily : null);
+      setDailyBudgetHardLimit(dailyHardRes.data.value === 'true');
+      const currentDay = currentBudgetDayKey();
+      let nextDailyState = { day: currentDay, seen: [] as number[] };
+      if (dailyAlertRes.data.value) {
+        try {
+          const parsed = JSON.parse(dailyAlertRes.data.value) as {
+            day?: string;
+            seen?: number[];
+          };
+          nextDailyState = {
+            day: typeof parsed.day === 'string' ? parsed.day : currentDay,
+            seen: Array.isArray(parsed.seen)
+              ? parsed.seen
+                  .map((value) => Number(value))
+                  .filter((value) => value === 50 || value === 80 || value === 100)
+              : [],
+          };
+        } catch {
+          nextDailyState = { day: currentDay, seen: [] };
+        }
+      }
+      setDailyBudgetAlertState(nextDailyState);
     } catch {
       setMonthlyBudgetUsd(null);
       setBudgetAlertState({ month: currentBudgetMonthKey(), seen: [] });
+      setDailyBudgetUsd(null);
+      setDailyBudgetAlertState({ day: currentBudgetDayKey(), seen: [] });
     }
   }, []);
 
@@ -3201,13 +3253,48 @@ function ChatPanel({
     setBudgetAlertState(nextState);
     setBudgetToast({
       threshold,
-      monthlyBudgetUsd,
-      monthSpentUsd: realtime.month_usd,
+      period: 'month',
+      budgetUsd: monthlyBudgetUsd,
+      spentUsd: realtime.month_usd,
     });
     void api
       .putMemory('global', 'monthly_budget_alert_state', JSON.stringify(nextState))
       .catch(() => {});
   }, [realtime, monthlyBudgetUsd, budgetAlertState]);
+
+  useEffect(() => {
+    if (!realtime || dailyBudgetUsd == null || dailyBudgetUsd <= 0) return;
+    const currentDay = currentBudgetDayKey();
+    const normalizedState =
+      dailyBudgetAlertState.day === currentDay
+        ? dailyBudgetAlertState
+        : { day: currentDay, seen: [] as number[] };
+    const ratio = realtime.today_usd / dailyBudgetUsd;
+    const threshold = ([100, 80, 50] as const).find(
+      (value) => ratio >= value / 100 && !normalizedState.seen.includes(value),
+    );
+    if (dailyBudgetAlertState.day !== normalizedState.day && normalizedState.seen.length === 0) {
+      setDailyBudgetAlertState(normalizedState);
+    }
+    if (!threshold) return;
+    const reachedThresholds = ([50, 80, 100] as const).filter(
+      (value) => ratio >= value / 100,
+    );
+    const nextState = {
+      day: currentDay,
+      seen: Array.from(new Set([...normalizedState.seen, ...reachedThresholds])).sort((a, b) => a - b),
+    };
+    setDailyBudgetAlertState(nextState);
+    setBudgetToast({
+      threshold,
+      period: 'day',
+      budgetUsd: dailyBudgetUsd,
+      spentUsd: realtime.today_usd,
+    });
+    void api
+      .putMemory('global', 'daily_budget_alert_state', JSON.stringify(nextState))
+      .catch(() => {});
+  }, [realtime, dailyBudgetUsd, dailyBudgetAlertState]);
 
   useEffect(() => {
     if (!budgetToast) return;
@@ -3525,6 +3612,11 @@ function ChatPanel({
     && monthlyBudgetUsd > 0
     && realtime != null
     && realtime.month_usd >= monthlyBudgetUsd;
+  const overDailyBudget =
+    dailyBudgetUsd != null
+    && dailyBudgetUsd > 0
+    && realtime != null
+    && realtime.today_usd >= dailyBudgetUsd;
   const failureDecisionCount = Object.keys(failureByMsg).length;
   const hasMessageBoundFailure = useMemo(
     () => messages.some((m) => m.role === 'assistant' && Boolean(failureByMsg[m.id])),
@@ -3632,6 +3724,9 @@ function ChatPanel({
               ? {
                   monthly_budget_usd: e.details.monthly_budget_usd ?? 0,
                   month_spent_usd: e.details.month_spent_usd ?? 0,
+                  daily_budget_usd: e.details.daily_budget_usd ?? undefined,
+                  day_spent_usd: e.details.day_spent_usd ?? undefined,
+                  period: e.details.period,
                 }
               : undefined,
             onContinue: () => {
@@ -3826,6 +3921,9 @@ function ChatPanel({
             ? {
                 monthly_budget_usd: e.details.monthly_budget_usd ?? 0,
                 month_spent_usd: e.details.month_spent_usd ?? 0,
+                daily_budget_usd: e.details.daily_budget_usd ?? undefined,
+                day_spent_usd: e.details.day_spent_usd ?? undefined,
+                period: e.details.period,
               }
             : undefined,
           onContinue: () => {
@@ -3941,6 +4039,9 @@ function ChatPanel({
               ? {
                   monthly_budget_usd: e.details.monthly_budget_usd ?? 0,
                   month_spent_usd: e.details.month_spent_usd ?? 0,
+                  daily_budget_usd: e.details.daily_budget_usd ?? undefined,
+                  day_spent_usd: e.details.day_spent_usd ?? undefined,
+                  period: e.details.period,
                 }
               : undefined,
             onContinue: () => {
@@ -4691,7 +4792,8 @@ function ChatPanel({
           const isImage = model.capability === 'image';
           const exceedsThreshold = (estimate.point ?? 0) > confirmPrefs.threshold;
           const triggersImage = isImage && confirmPrefs.imageAlways;
-          if (overBudget && monthlyBudgetUsd != null && realtime) {
+          if ((overDailyBudget || overBudget) && realtime) {
+            const isDailyBreach = overDailyBudget;
             const fire = (overrideModelId?: string) => {
               clearFailureDecisionState();
               setPending([]);
@@ -4705,10 +4807,13 @@ function ChatPanel({
             setPendingConfirm({
               estimate: estimate.point ?? 0,
               reason: 'budget',
-              blocked: monthlyBudgetHardLimit,
+              blocked: isDailyBreach ? dailyBudgetHardLimit : monthlyBudgetHardLimit,
               budget: {
-                monthly_budget_usd: monthlyBudgetUsd,
+                monthly_budget_usd: monthlyBudgetUsd ?? 0,
                 month_spent_usd: realtime.month_usd,
+                daily_budget_usd: dailyBudgetUsd ?? undefined,
+                day_spent_usd: realtime.today_usd,
+                period: isDailyBreach ? 'day' : 'month',
               },
               onContinue: () => { setPendingConfirm(null); fire(); },
               onCheaper: () => {
@@ -4894,11 +4999,11 @@ function ChatPanel({
           data-testid="budget-toast"
           role="status"
         >
-          本月预算已用到 {budgetToast.threshold}%：
+          {budgetToast.period === 'day' ? '今日预算' : '本月预算'}已用到 {budgetToast.threshold}%：
           {' '}
-          {formatUsd(budgetToast.monthSpentUsd)}
+          {formatUsd(budgetToast.spentUsd)}
           {' / '}
-          {formatUsd(budgetToast.monthlyBudgetUsd)}
+          {formatUsd(budgetToast.budgetUsd)}
         </div>
       )}
       <CostStatusBar
@@ -6269,6 +6374,9 @@ function CostConfirmDialog({
   budget?: {
     monthly_budget_usd: number;
     month_spent_usd: number;
+    daily_budget_usd?: number;
+    day_spent_usd?: number;
+    period?: 'month' | 'day';
   };
   blocked?: boolean;
   onContinue: () => void;
@@ -6281,11 +6389,15 @@ function CostConfirmDialog({
 }): JSX.Element {
   const [skipModel, setSkipModel] = useState(false);
   const [skipConv, setSkipConv] = useState(false);
+  const isDaily = reason === 'budget' && budget?.period === 'day';
+  const periodLabel = isDaily ? '今日' : '本月';
+  const breachBudget = isDaily ? (budget?.daily_budget_usd ?? 0) : (budget?.monthly_budget_usd ?? 0);
+  const breachSpent = isDaily ? (budget?.day_spent_usd ?? 0) : (budget?.month_spent_usd ?? 0);
   const reasonLabel =
     reason === 'image'
       ? '图像模型按次计费确认'
       : reason === 'budget'
-        ? '本月预算已达到或超过上限'
+        ? `${periodLabel}预算已达到或超过上限`
         : '预估费用超过确认阈值';
   const scopeLabel = conversationId ? '当前会话 + 全局偏好' : '新会话 + 全局偏好';
   const nextStepLabel = hasCheaperPeer
@@ -6340,8 +6452,8 @@ function CostConfirmDialog({
         <h3>
           {reason === 'budget'
               ? blocked
-                ? `本月硬预算上限已达 ${formatUsd(budget?.monthly_budget_usd ?? 0)}`
-                : `本月预算已达 ${formatUsd(budget?.monthly_budget_usd ?? 0)}`
+                ? `${periodLabel}硬预算上限已达 ${formatUsd(breachBudget)}`
+                : `${periodLabel}预算已达 ${formatUsd(breachBudget)}`
             : `本次调用预估 ≈ ${formatUsd(estimate)}`}
         </h3>
         <p className="hint">
@@ -6349,8 +6461,8 @@ function CostConfirmDialog({
             ? `图像模型「${modelLabel}」每次调用都会按设置确认。`
             : reason === 'budget'
               ? blocked
-                ? `本月已消费 ${formatUsd(budget?.month_spent_usd ?? 0)}。硬上限模式下不能继续确认绕过。`
-                : `本月已消费 ${formatUsd(budget?.month_spent_usd ?? 0)}。继续使用模型「${modelLabel}」前请再次确认。`
+                ? `${periodLabel}已消费 ${formatUsd(breachSpent)}。硬上限模式下不能继续确认绕过。`
+                : `${periodLabel}已消费 ${formatUsd(breachSpent)}。继续使用模型「${modelLabel}」前请再次确认。`
               : `模型「${modelLabel}」此次预估超过阈值，请确认是否继续。`}
         </p>
         <div className="decision-rationale" data-testid="cost-confirm-rationale">

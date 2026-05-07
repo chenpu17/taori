@@ -89,4 +89,31 @@ describe('budget guard', () => {
     expect(decision.kind).toBe('confirm');
     expect(decision.reason).toBe('budget');
   });
+
+  it('confirms when soft daily budget would be exceeded', () => {
+    memoriesRepo.set('global', null, 'daily_budget_usd', '0.01');
+    const decision = decide();
+    expect(decision.kind).toBe('confirm');
+    expect(decision.reason).toBe('budget');
+    expect(decision.period).toBe('day');
+    expect(decision.daily_budget_usd).toBe(0.01);
+  });
+
+  it('blocks confirmed calls when hard daily budget would be exceeded', () => {
+    memoriesRepo.set('global', null, 'daily_budget_usd', '0.01');
+    memoriesRepo.set('global', null, 'daily_budget_hard_limit', 'true');
+    const decision = decide({ confirmed: true });
+    expect(decision.kind).toBe('block');
+    expect(decision.reason).toBe('budget');
+    expect(decision.period).toBe('day');
+    expect(decision.hard_limit).toBe(true);
+  });
+
+  it('daily breach takes priority over monthly when both apply', () => {
+    memoriesRepo.set('global', null, 'daily_budget_usd', '0.01');
+    memoriesRepo.set('global', null, 'monthly_budget_usd', '0.01');
+    const decision = decide();
+    expect(decision.kind).toBe('confirm');
+    expect(decision.period).toBe('day');
+  });
 });

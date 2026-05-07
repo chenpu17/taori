@@ -214,6 +214,13 @@ export type RunResumeStateResponse = z.infer<typeof RunResumeStateResponseSchema
 
 export const CostConfirmationRequiredDetailsSchema = z.object({
   reason: z.enum(['threshold', 'budget']),
+  /**
+   * For `reason === 'budget'` only: which period the breach is on.
+   * - `'month'`: monthly_budget_usd would be exceeded
+   * - `'day'`: daily_budget_usd would be exceeded
+   * Older clients that don't read this field still get reason='budget'.
+   */
+  period: z.enum(['month', 'day']).optional(),
   estimate_usd: z.number(),
   model_id: z.string(),
   model_name: z.string(),
@@ -221,6 +228,8 @@ export const CostConfirmationRequiredDetailsSchema = z.object({
   threshold_usd: z.number().nullable().optional(),
   monthly_budget_usd: z.number().nullable().optional(),
   month_spent_usd: z.number().nullable().optional(),
+  daily_budget_usd: z.number().nullable().optional(),
+  day_spent_usd: z.number().nullable().optional(),
   hard_limit: z.boolean().optional(),
   blocked: z.boolean().optional(),
 });
