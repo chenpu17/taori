@@ -5366,8 +5366,11 @@ function runEventMeta(event: RunEvent): string {
   }
   if (event.kind.startsWith('memory.')) {
     const ids = Array.isArray(payload.memory_ids) ? `${payload.memory_ids.length} 条` : null;
-    const types = Array.isArray(payload.memory_types)
-      ? [...new Set(payload.memory_types.filter((type): type is string => typeof type === 'string'))]
+    const memoryTypes = Array.isArray(payload.memory_types)
+      ? payload.memory_types.filter((type): type is string => typeof type === 'string')
+      : [];
+    const types = memoryTypes.length > 0
+      ? [...new Set(memoryTypes)]
           .map((type) => memoryEventTypeLabel(type))
           .join(' / ')
       : null;
