@@ -35,13 +35,13 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
-      - name: Typecheck workspace
-        run: pnpm typecheck
-
       - name: Build shared and sidecar
         run: pnpm build:npm
         env:
           TAORI_BUNDLE_ENGINE: bun
+
+      - name: Typecheck workspace
+        run: pnpm typecheck
 
       - name: Dry-run npm pack
         run: cd packages/npm && npm pack --dry-run
