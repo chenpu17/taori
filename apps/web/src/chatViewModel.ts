@@ -15,6 +15,17 @@ export interface QuickCompareUiOutput {
   content: string;
   status: 'streaming' | 'complete' | 'failed';
   error?: string;
+  firstTokenMs: number | null;
+  durationMs: number | null;
+  toolTraces: Array<{
+    callId: string;
+    tool: string;
+    label: string;
+    input: string | null;
+    output: string | null;
+    status: 'running' | 'ok' | 'error';
+    durationMs: number | null;
+  }>;
 }
 
 export interface QuickCompareUiState {
@@ -159,6 +170,9 @@ export function applyQuickCompareAnnotation(
       modelId: ann.model_id,
       content: '',
       status: 'streaming',
+      firstTokenMs: null,
+      durationMs: null,
+      toolTraces: [],
     });
   } else if (ann.type === 'qc.participant_delta') {
     const current = outputs.get(ann.output_id) ?? {
@@ -167,25 +181,66 @@ export function applyQuickCompareAnnotation(
       modelId: ann.model_id,
       content: '',
       status: 'streaming' as const,
+      firstTokenMs: null,
+      durationMs: null,
+      toolTraces: [],
     };
     outputs.set(ann.output_id, { ...current, content: current.content + ann.text_chunk });
   } else if (ann.type === 'qc.participant_done') {
+    const current = outputs.get(ann.output_id);
     outputs.set(ann.output_id, {
       outputId: ann.output_id,
       index: ann.index,
       modelId: ann.model_id,
       content: ann.content,
       status: 'complete',
+      error: current?.error,
+      firstTokenMs: ann.first_token_ms ?? current?.firstTokenMs ?? null,
+      durationMs: ann.duration_ms ?? current?.durationMs ?? null,
+      toolTraces: current?.toolTraces ?? [],
     });
   } else if (ann.type === 'qc.participant_failed') {
+    const current = outputs.get(ann.output_id);
     outputs.set(ann.output_id, {
       outputId: ann.output_id,
       index: ann.index,
       modelId: ann.model_id,
-      content: outputs.get(ann.output_id)?.content ?? '',
+      content: current?.content ?? '',
       status: 'failed',
       error: ann.message,
+      firstTokenMs: current?.firstTokenMs ?? null,
+      durationMs: current?.durationMs ?? null,
+      toolTraces: current?.toolTraces ?? [],
     });
+  } else if (ann.type === 'qc.tool_trace') {
+    const current = outputs.get(ann.output_id) ?? {
+      outputId: ann.output_id,
+      index: ann.index,
+      modelId: ann.model_id,
+      content: '',
+      status: 'streaming' as const,
+      firstTokenMs: null,
+      durationMs: null,
+      toolTraces: [],
+    };
+    const traces = new Map(current.toolTraces.map((trace) => [trace.callId, trace]));
+    const next = traces.get(ann.call_id) ?? {
+      callId: ann.call_id,
+      tool: ann.tool,
+      label: ann.label,
+      input: null,
+      output: null,
+      status: 'running' as const,
+      durationMs: null,
+    };
+    if (typeof ann.input === 'string') next.input = ann.input;
+    if (typeof ann.output === 'string') next.output = ann.output;
+    if (ann.event === 'finish') next.status = ann.ok === false ? 'error' : 'ok';
+    if (typeof ann.duration_ms === 'number' && Number.isFinite(ann.duration_ms)) {
+      next.durationMs = ann.duration_ms;
+    }
+    traces.set(ann.call_id, next);
+    outputs.set(ann.output_id, { ...current, toolTraces: [...traces.values()] });
   } else if (ann.type === 'qc.done') {
     compareId = ann.compare_id;
     running = false;

@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import type { Model, ModelHealthRow, Provider, Tool, ToolHealthRow } from '@taori/shared';
 import { formatUsd } from '@taori/shared';
-import { api } from './api.js';
+import { api, type RuntimeResourceSnapshot } from './api.js';
 import { CostDashboard } from './CostDashboard.js';
 import { ModelCenter } from './ModelCenter.js';
 import { EmptyState } from './EmptyState.js';
@@ -9,6 +9,7 @@ import { SettingsContent } from './Settings.js';
 
 export type ControlCenterSection =
   | 'overview'
+  | 'monitor'
   | 'models'
   | 'tools'
   | 'costs'
@@ -45,6 +46,13 @@ const NAV_ITEMS: Array<{
     description: '系统状态、最近调用、关键入口',
     icon: '⌁',
     keywords: ['总览', 'overview', '系统', '健康', '调用'],
+  },
+  {
+    id: 'monitor',
+    label: '后端监控',
+    description: 'Sidecar 进程 CPU、内存、运行态',
+    icon: '📈',
+    keywords: ['监控', '资源', 'cpu', 'memory', '进程', 'sidecar'],
   },
   {
     id: 'models',
@@ -115,6 +123,29 @@ function formatAgo(ts: number | null): string {
   if (diff < 3_600_000) return `${Math.floor(diff / 60_000)} 分钟前`;
   if (diff < 86_400_000) return `${Math.floor(diff / 3_600_000)} 小时前`;
   return `${Math.floor(diff / 86_400_000)} 天前`;
+}
+
+function formatBytes(bytes: number | null | undefined): string {
+  if (typeof bytes !== 'number' || !Number.isFinite(bytes) || bytes < 0) return '—';
+  if (bytes < 1024) return `${bytes} B`;
+  const units = ['KB', 'MB', 'GB', 'TB'];
+  let value = bytes;
+  let unitIndex = -1;
+  while (value >= 1024 && unitIndex < units.length - 1) {
+    value /= 1024;
+    unitIndex += 1;
+  }
+  return `${value.toFixed(value >= 100 ? 0 : value >= 10 ? 1 : 2)} ${units[unitIndex]}`;
+}
+
+function formatDuration(ms: number | null | undefined): string {
+  if (typeof ms !== 'number' || !Number.isFinite(ms) || ms < 0) return '—';
+  const totalSeconds = Math.floor(ms / 1000);
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  if (hours > 0) return `${hours}h ${minutes}m`;
+  if (minutes > 0) return `${minutes}m`;
+  return `${totalSeconds}s`;
 }
 
 export function ControlCenter({
@@ -279,11 +310,13 @@ export function ControlCenter({
           <div className="control-center__content">
             {activeSection === 'overview' && (
               <OverviewSection
+                onOpenMonitor={() => setActiveSection('monitor')}
                 onOpenModels={() => setActiveSection('models')}
                 onOpenTools={() => setActiveSection('tools')}
                 onOpenCosts={() => setActiveSection('costs')}
               />
             )}
+            {activeSection === 'monitor' && <RuntimeMonitorSection />}
             {activeSection === 'models' && (
               <ModelCenter
                 embedded
@@ -329,10 +362,12 @@ export function ControlCenter({
 }
 
 function OverviewSection({
+  onOpenMonitor,
   onOpenModels,
   onOpenTools,
   onOpenCosts,
 }: {
+  onOpenMonitor: () => void;
   onOpenModels: () => void;
   onOpenTools: () => void;
   onOpenCosts: () => void;
@@ -343,6 +378,7 @@ function OverviewSection({
   const [modelHealthRows, setModelHealthRows] = useState<ModelHealthRow[] | null>(null);
   const [toolHealthRows, setToolHealthRows] = useState<ToolHealthRow[] | null>(null);
   const [monthUsd, setMonthUsd] = useState<number | null>(null);
+  const [runtime, setRuntime] = useState<RuntimeResourceSnapshot | null>(null);
   const [lastCalls, setLastCalls] = useState<
     Array<{
       id: string;
@@ -354,10 +390,12 @@ function OverviewSection({
     }>
   >([]);
   const [error, setError] = useState<string | null>(null);
+  const [refreshNonce, setRefreshNonce] = useState(0);
 
   useEffect(() => {
     let cancelled = false;
-    (async () => {
+    let timer: number | null = null;
+    const load = async (): Promise<void> => {
       try {
         const [
           providerRes,
@@ -367,6 +405,7 @@ function OverviewSection({
           toolHealthRes,
           realtimeRes,
           callsRes,
+          runtimeRes,
         ] = await Promise.all([
           api.listProviders(),
           api.listModels(),
@@ -375,6 +414,7 @@ function OverviewSection({
           api.toolsHealth().catch(() => ({ rows: [] })),
           api.costsRealtime().catch(() => ({ data: { month_usd: null } })),
           api.costsCallLogs(5).catch(() => ({ data: { rows: [] } })),
+          api.runtimeDiagnostics().catch(() => ({ ok: false, data: null as RuntimeResourceSnapshot | null })),
         ]);
         if (cancelled) return;
         setProviders(providerRes.providers);
@@ -386,14 +426,22 @@ function OverviewSection({
           typeof realtimeRes.data.month_usd === 'number' ? realtimeRes.data.month_usd : null,
         );
         setLastCalls(callsRes.data.rows ?? []);
+        setRuntime(runtimeRes.data);
       } catch (e) {
         if (!cancelled) setError(e instanceof Error ? e.message : String(e));
       }
-    })().catch(() => {});
+      if (!cancelled) {
+        timer = window.setTimeout(() => {
+          void load();
+        }, 5000);
+      }
+    };
+    void load();
     return () => {
       cancelled = true;
+      if (timer != null) window.clearTimeout(timer);
     };
-  }, []);
+  }, [refreshNonce]);
 
   const modelStats = useMemo(() => {
     const list = models ?? [];
@@ -431,6 +479,10 @@ function OverviewSection({
   const latestToolFailureText = healthStats.latestToolFailure?.last_failure_classification
     ? `${TOOL_FAILURE_LABELS[healthStats.latestToolFailure.last_failure_classification] ?? healthStats.latestToolFailure.last_failure_classification} · ${formatAgo(healthStats.latestToolFailure.last_failure_at)}`
     : '无';
+  const runtimeMemoryRatio =
+    runtime && runtime.system_memory_bytes > 0
+      ? Math.min(100, Math.round((runtime.rss_bytes / runtime.system_memory_bytes) * 1000) / 10)
+      : null;
 
   return (
     <div className="control-overview" data-testid="control-center-overview">
@@ -461,6 +513,9 @@ function OverviewSection({
       <div className="control-overview__actions">
         <button type="button" onClick={onOpenModels} data-testid="control-center-open-models">
           检查模型与供应商
+        </button>
+        <button type="button" onClick={onOpenMonitor} data-testid="control-center-open-monitor">
+          查看后端监控
         </button>
         <button type="button" onClick={onOpenTools} data-testid="control-center-open-tools">
           管理工具能力
@@ -530,6 +585,47 @@ function OverviewSection({
             <strong data-testid="control-tool-health-last-failure">{latestToolFailureText}</strong>
           </div>
         </article>
+
+        <article className="control-health-card" data-testid="control-runtime-health-summary">
+          <div className="control-health-card__header">
+            <div>
+              <h3>后端进程资源</h3>
+              <p className="hint">Sidecar 实时 CPU / 内存占用，自动每 5 秒刷新</p>
+            </div>
+            <button type="button" onClick={() => setRefreshNonce((value) => value + 1)} data-testid="control-runtime-refresh">
+              刷新
+            </button>
+          </div>
+          <div className="control-health-metrics">
+            <span>
+              <small>CPU</small>
+              <strong data-testid="control-runtime-cpu">
+                {runtime?.cpu_percent == null ? '采样中' : `${runtime.cpu_percent}%`}
+              </strong>
+            </span>
+            <span>
+              <small>RSS 内存</small>
+              <strong data-testid="control-runtime-rss">{formatBytes(runtime?.rss_bytes)}</strong>
+            </span>
+            <span>
+              <small>Heap 已用</small>
+              <strong data-testid="control-runtime-heap">{formatBytes(runtime?.heap_used_bytes)}</strong>
+            </span>
+          </div>
+          <div className="control-health-card__footer">
+            <span>
+              PID {runtime?.pid ?? '—'} · 运行 {formatDuration(runtime?.uptime_ms)}
+              {runtimeMemoryRatio == null ? '' : ` · 内存占宿主 ${runtimeMemoryRatio}%`}
+            </span>
+            <strong data-testid="control-runtime-mode">
+              {runtime?.control_mode === 'desktop'
+                ? 'Desktop 托管'
+                : runtime?.control_mode === 'standalone'
+                  ? 'Standalone'
+                  : '—'}
+            </strong>
+          </div>
+        </article>
       </section>
 
       <section className="control-overview__calls">
@@ -552,6 +648,109 @@ function OverviewSection({
             ))}
           </div>
         )}
+      </section>
+    </div>
+  );
+}
+
+function RuntimeMonitorSection(): JSX.Element {
+  const [runtime, setRuntime] = useState<RuntimeResourceSnapshot | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [refreshNonce, setRefreshNonce] = useState(0);
+
+  useEffect(() => {
+    let cancelled = false;
+    let timer: number | null = null;
+
+    const load = async (): Promise<void> => {
+      try {
+        const runtimeRes = await api.runtimeDiagnostics();
+        if (cancelled) return;
+        setRuntime(runtimeRes.data);
+        setError(null);
+      } catch (e) {
+        if (!cancelled) setError(e instanceof Error ? e.message : String(e));
+      }
+      if (!cancelled) {
+        timer = window.setTimeout(() => {
+          void load();
+        }, 5000);
+      }
+    };
+
+    void load();
+    return () => {
+      cancelled = true;
+      if (timer != null) window.clearTimeout(timer);
+    };
+  }, [refreshNonce]);
+
+  const memoryRatio =
+    runtime && runtime.system_memory_bytes > 0
+      ? Math.min(100, Math.round((runtime.rss_bytes / runtime.system_memory_bytes) * 1000) / 10)
+      : null;
+
+  return (
+    <div className="control-runtime" data-testid="control-runtime-section">
+      {error && <div className="error">加载运行监控失败：{error}</div>}
+      <section className="control-health-card control-runtime__hero">
+        <div className="control-health-card__header">
+          <div>
+            <h3>后端资源监控</h3>
+            <p className="hint">每 5 秒自动刷新一次，观察 Sidecar 当前 CPU、内存与运行态。</p>
+          </div>
+          <button type="button" onClick={() => setRefreshNonce((value) => value + 1)} data-testid="control-runtime-manual-refresh">
+            立即刷新
+          </button>
+        </div>
+        <div className="control-health-metrics control-runtime__metrics">
+          <span>
+            <small>CPU</small>
+            <strong data-testid="control-runtime-cpu-detail">
+              {runtime?.cpu_percent == null ? '采样中' : `${runtime.cpu_percent}%`}
+            </strong>
+          </span>
+          <span>
+            <small>RSS</small>
+            <strong data-testid="control-runtime-rss-detail">{formatBytes(runtime?.rss_bytes)}</strong>
+          </span>
+          <span>
+            <small>Heap 已用</small>
+            <strong data-testid="control-runtime-heap-detail">{formatBytes(runtime?.heap_used_bytes)}</strong>
+          </span>
+          <span>
+            <small>Heap 总量</small>
+            <strong>{formatBytes(runtime?.heap_total_bytes)}</strong>
+          </span>
+        </div>
+        <div className="control-runtime__grid">
+          <article className="control-overview-card">
+            <span>运行模式</span>
+            <strong data-testid="control-runtime-mode-detail">
+              {runtime?.control_mode === 'desktop'
+                ? 'Desktop 托管'
+                : runtime?.control_mode === 'standalone'
+                  ? 'Standalone'
+                  : '—'}
+            </strong>
+            <small>PID {runtime?.pid ?? '—'}</small>
+          </article>
+          <article className="control-overview-card">
+            <span>运行时长</span>
+            <strong>{formatDuration(runtime?.uptime_ms)}</strong>
+            <small>{runtime ? new Date(runtime.started_at).toLocaleString() : '—'}</small>
+          </article>
+          <article className="control-overview-card">
+            <span>宿主内存占比</span>
+            <strong>{memoryRatio == null ? '—' : `${memoryRatio}%`}</strong>
+            <small>可用 {formatBytes(runtime?.system_free_memory_bytes)}</small>
+          </article>
+          <article className="control-overview-card">
+            <span>并行度</span>
+            <strong>{runtime?.available_parallelism ?? '—'}</strong>
+            <small>DB: {runtime?.db_path ?? '—'}</small>
+          </article>
+        </div>
       </section>
     </div>
   );

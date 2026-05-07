@@ -1,7 +1,7 @@
 {
   "name": "taori",
   "private": true,
-  "version": "0.0.2",
+  "version": "0.0.3",
   "description": "Taori — multi-model desktop AI assistant. Workspace root.",
   "packageManager": "pnpm@9.15.0",
   "engines": {

@@ -177,6 +177,7 @@ export function buildServer(args: BuildServerArgs): FastifyInstance {
         files,
         messages: new MessagesRepo(args.db),
         conversations: new ConversationsRepo(args.db),
+        memories,
         keystore: args.keystore,
         filesDir,
       }),

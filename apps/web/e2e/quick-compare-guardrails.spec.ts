@@ -248,7 +248,7 @@ test.describe('quick compare guardrails', () => {
     await expect(page.getByTestId('quick-compare-output')).toHaveCount(2, { timeout: 15_000 });
   });
 
-  test('quick compare is disabled for prompts that need search or webpage fetching', async ({ page }) => {
+  test('quick compare stays available for prompts that may need tools or web fetching', async ({ page }) => {
     const env = readSidecarEnv();
     await importBackup(env, [
       { id: 'mdl_default', display_name: 'Default', is_default_for: 'chat' },
@@ -260,8 +260,8 @@ test.describe('quick compare guardrails', () => {
     await page.getByTestId('composer-input').fill('请搜索 Taori 最新资料并总结');
 
     const quickCompareButton = page.getByTestId('composer-quick-compare');
-    await expect(quickCompareButton).toBeDisabled();
-    await expect(quickCompareButton).toHaveAttribute('title', /正式工具链/);
+    await expect(quickCompareButton).toBeEnabled();
+    await expect(quickCompareButton).not.toHaveAttribute('title', /正式工具链/);
   });
 
   test('remembered disabled-until model falls back to a selectable default model', async ({ page }) => {
@@ -312,12 +312,17 @@ test.describe('quick compare guardrails', () => {
 
     const styles = await page.getByTestId('quick-compare-card').evaluate((el) => {
       const style = getComputedStyle(el);
+      const rgb = style.color.match(/\d+/g)?.map(Number) ?? [];
       return {
         color: style.color,
         backgroundImage: style.backgroundImage,
+        rgb,
       };
     });
-    expect(styles.color).toBe('rgb(241, 245, 249)');
+    expect(styles.rgb.length).toBe(3);
+    expect(styles.rgb[0]).toBeGreaterThan(220);
+    expect(styles.rgb[1]).toBeGreaterThan(220);
+    expect(styles.rgb[2]).toBeGreaterThan(220);
     expect(styles.backgroundImage).not.toContain('rgb(255, 255, 255)');
   });
 

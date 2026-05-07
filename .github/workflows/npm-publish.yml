@@ -27,6 +27,11 @@ jobs:
           node-version: 20
           cache: pnpm
 
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.10
+
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
@@ -35,6 +40,8 @@ jobs:
 
       - name: Build shared and sidecar
         run: pnpm build:npm
+        env:
+          TAORI_BUNDLE_ENGINE: bun
 
       - name: Dry-run npm pack
         run: cd packages/npm && npm pack --dry-run
@@ -62,11 +69,18 @@ jobs:
           cache: pnpm
           registry-url: https://registry.npmjs.org
 
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.10
+
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
       - name: Build shared and sidecar
         run: pnpm build:npm
+        env:
+          TAORI_BUNDLE_ENGINE: bun
 
       - name: Publish to npm
         run: pnpm --filter @chenpu17/taori publish --no-git-checks --access public --provenance

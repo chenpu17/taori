@@ -21,6 +21,7 @@ import { StatusNotice } from './StatusNotice.js';
 import type { BackupConflictStrategy, McpServer, Persona, PromptTemplate, Tool, ToolHealthRow, WorkflowRecipe } from '@taori/shared';
 
 const MAX_BACKUP_IMPORT_BYTES = 25 * 1024 * 1024;
+const DEFAULT_IMAGE_GENERATION_TIMEOUT_MS = 300_000;
 
 interface SettingsProps {
   onClose: () => void;
@@ -127,6 +128,7 @@ export function SettingsContent({
             </p>
             <button
               type="button"
+              className="settings-action-btn settings-action-btn--primary"
               onClick={onReopenOnboarding}
               data-testid="settings-add-provider"
             >
@@ -187,19 +189,27 @@ function ToolsSection({ onChanged }: { onChanged: () => void }): JSX.Element {
   const [mcpName, setMcpName] = useState('');
   const [mcpCommand, setMcpCommand] = useState('');
   const [mcpArgs, setMcpArgs] = useState('');
+  const [imageTimeoutMinutes, setImageTimeoutMinutes] = useState('5');
 
   const load = async (): Promise<void> => {
     setLoading(true);
     setError(null);
     try {
-      const [res, healthRes, mcpRes] = await Promise.all([
+      const [res, healthRes, mcpRes, imageTimeoutRes] = await Promise.all([
         api.listTools(),
         api.toolsHealth().catch(() => ({ rows: [] })),
         api.listMcpServers().catch(() => ({ servers: [] })),
+        api.getMemoryEffective('image_generation_timeout_ms').catch(() => ({ data: { value: null as string | null } })),
       ]);
       setTools(res.data);
       setToolHealthRows(new Map(healthRes.rows.map((row) => [row.tool_name, row])));
       setMcpServers(mcpRes.servers);
+      const timeoutMs = Number(imageTimeoutRes.data.value ?? DEFAULT_IMAGE_GENERATION_TIMEOUT_MS);
+      const normalizedTimeoutMs =
+        Number.isFinite(timeoutMs) && timeoutMs > 0
+          ? timeoutMs
+          : DEFAULT_IMAGE_GENERATION_TIMEOUT_MS;
+      setImageTimeoutMinutes(String(normalizedTimeoutMs / 60_000));
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
@@ -296,6 +306,43 @@ function ToolsSection({ onChanged }: { onChanged: () => void }): JSX.Element {
     }
   };
 
+  const saveImageTimeout = async (): Promise<void> => {
+    const trimmed = imageTimeoutMinutes.trim();
+    const parsedMinutes = Number(trimmed);
+    if (!trimmed) {
+      setSaving('image-timeout');
+      setError(null);
+      try {
+        await api.deleteMemory('global', 'image_generation_timeout_ms');
+        setImageTimeoutMinutes(String(DEFAULT_IMAGE_GENERATION_TIMEOUT_MS / 60_000));
+        onChanged();
+      } catch (e) {
+        setError(e instanceof Error ? e.message : String(e));
+      } finally {
+        setSaving(null);
+      }
+      return;
+    }
+    if (!Number.isFinite(parsedMinutes) || parsedMinutes < 0.5 || parsedMinutes > 30) {
+      setError('图片生成超时请输入 0.5 到 30 分钟之间的数字。');
+      return;
+    }
+    setSaving('image-timeout');
+    setError(null);
+    try {
+      await api.putMemory(
+        'global',
+        'image_generation_timeout_ms',
+        String(Math.round(parsedMinutes * 60_000)),
+      );
+      onChanged();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setSaving(null);
+    }
+  };
+
   return (
     <section className="settings-section" data-testid="settings-tools">
       <div className="settings-section-head">
@@ -346,6 +393,34 @@ function ToolsSection({ onChanged }: { onChanged: () => void }): JSX.Element {
 
           <div className="settings-mcp" data-testid="settings-mcp">
             <div className="settings-section-head">
+              <h3>图像生成</h3>
+            </div>
+            <p className="hint">
+              可配置图像生成工具的单次等待上限。留空会恢复默认值 5 分钟。
+            </p>
+            <div className="settings-inline-form">
+              <input
+                type="number"
+                min="0.5"
+                max="30"
+                step="0.5"
+                value={imageTimeoutMinutes}
+                onChange={(e) => setImageTimeoutMinutes(e.target.value)}
+                placeholder="5"
+                data-testid="settings-image-timeout-minutes"
+              />
+              <button
+                type="button"
+                className="settings-action-btn settings-action-btn--primary"
+                onClick={() => void saveImageTimeout()}
+                disabled={saving === 'image-timeout'}
+                data-testid="settings-image-timeout-save"
+              >
+                {saving === 'image-timeout' ? '保存中…' : '保存超时'}
+              </button>
+            </div>
+
+            <div className="settings-section-head">
               <h3>MCP 本地 Server</h3>
             </div>
             <div className="settings-mcp-form">
@@ -369,7 +444,7 @@ function ToolsSection({ onChanged }: { onChanged: () => void }): JSX.Element {
               />
               <button
                 type="button"
-                className="btn-primary"
+                className="settings-action-btn settings-action-btn--primary"
                 onClick={() => void addMcpServer()}
                 disabled={saving === 'mcp:add'}
                 data-testid="mcp-server-add"
@@ -402,6 +477,7 @@ function ToolsSection({ onChanged }: { onChanged: () => void }): JSX.Element {
                     <div className="settings-mcp-actions">
                       <button
                         type="button"
+                        className="settings-action-btn settings-action-btn--secondary"
                         onClick={() => void refreshMcpServer(server)}
                         disabled={saving === `${server.id}:refresh`}
                         data-testid={`mcp-server-refresh-${server.id}`}
@@ -419,6 +495,7 @@ function ToolsSection({ onChanged }: { onChanged: () => void }): JSX.Element {
                       </button>
                       <button
                         type="button"
+                        className="settings-action-btn settings-action-btn--secondary"
                         onClick={() => void deleteMcpServer(server)}
                         disabled={saving === `${server.id}:delete`}
                         data-testid={`mcp-server-delete-${server.id}`}
@@ -625,6 +702,7 @@ function MonthlyBudgetSection(): JSX.Element {
         />
         <button
           type="button"
+          className="settings-action-btn settings-action-btn--primary"
           onClick={() => void save(value)}
           disabled={loading || saving}
           data-testid="monthly-budget-save"
@@ -633,6 +711,7 @@ function MonthlyBudgetSection(): JSX.Element {
         </button>
         <button
           type="button"
+          className="settings-action-btn settings-action-btn--secondary"
           onClick={() => void save('')}
           disabled={loading || saving || value.trim().length === 0}
           data-testid="monthly-budget-clear"
@@ -1479,6 +1558,7 @@ function DangerZone({ onChanged }: { onChanged: () => void }): JSX.Element {
       <div className="settings-inline-form">
         <button
           type="button"
+          className="settings-action-btn settings-action-btn--secondary"
           onClick={() => void onExport()}
           disabled={busyClear || busyExport || busyImport}
           data-testid="settings-export-backup"
@@ -1497,6 +1577,7 @@ function DangerZone({ onChanged }: { onChanged: () => void }): JSX.Element {
         </select>
         <button
           type="button"
+          className="settings-action-btn settings-action-btn--secondary"
           onClick={() => fileInputRef.current?.click()}
           disabled={busyClear || busyExport || busyImport}
           data-testid="settings-import-backup"

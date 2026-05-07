@@ -54,6 +54,8 @@ test('Quick Compare shows three candidates and adopts one into chat history', as
   await expect(page.getByTestId('quick-compare-card')).toBeVisible({ timeout: 15_000 });
   await expect(page.getByTestId('quick-compare-output')).toHaveCount(3, { timeout: 15_000 });
   await expect(page.getByTestId('quick-compare-output').first()).toContainText('Quick Compare 本地预览');
+  await expect(page.getByTestId('quick-compare-output').first()).toContainText('首字');
+  await expect(page.getByTestId('quick-compare-output').first()).toContainText('总耗时');
 
   await page.getByTestId('quick-compare-adopt').first().click();
   await expect(page.getByTestId('quick-compare-card')).toHaveCount(0, { timeout: 15_000 });

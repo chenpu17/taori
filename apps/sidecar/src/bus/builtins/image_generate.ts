@@ -31,6 +31,7 @@ import type {
   FilesRepo,
   MessagesRepo,
   ConversationsRepo,
+  MemoriesRepo,
 } from '../../db/repos/index.js';
 import type { Model } from '@taori/shared';
 import type { KeyStore } from '../../keystore.js';
@@ -61,6 +62,7 @@ export interface ImageGenerateDeps {
   files: FilesRepo;
   messages: MessagesRepo;
   conversations: ConversationsRepo;
+  memories: MemoriesRepo;
   keystore: KeyStore;
   /** absolute root for image bytes; M2 reuses sidecar data dir */
   filesDir: string;
@@ -77,7 +79,8 @@ interface AdapterResult {
   height: number;
 }
 
-const IMAGE_GENERATION_TIMEOUT_MS = 120_000;
+const DEFAULT_IMAGE_GENERATION_TIMEOUT_MS = 300_000;
+const IMAGE_GENERATION_TIMEOUT_MEMORY_KEY = 'image_generation_timeout_ms';
 
 export function createImageGenerateTool(
   deps: ImageGenerateDeps,
@@ -145,7 +148,7 @@ export function createImageGenerateTool(
           apiKey,
           modelName: model.model_name,
           prompt: input.prompt,
-        });
+        }, readImageGenerationTimeoutMs(deps.memories));
       }
 
       const pricePerCall = model.price_per_call ?? 0.05;
@@ -276,15 +279,16 @@ interface AdapterArgs {
 async function callImageAdapterWithTimeout(
   type: string,
   args: Omit<AdapterArgs, 'signal'>,
+  timeoutMs: number,
 ): Promise<AdapterResult> {
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), IMAGE_GENERATION_TIMEOUT_MS);
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
   try {
     return await callAdapter(type, { ...args, signal: controller.signal });
   } catch (err) {
     if (controller.signal.aborted || isAbortError(err)) {
       throw Object.assign(
-        new Error(`image generation timed out after ${IMAGE_GENERATION_TIMEOUT_MS / 1000}s`),
+        new Error(`image generation timed out after ${Math.round(timeoutMs / 1000)}s`),
         { classification: 'network' },
       );
     }
@@ -296,6 +300,15 @@ async function callImageAdapterWithTimeout(
 
 function isAbortError(err: unknown): boolean {
   return err instanceof DOMException && err.name === 'AbortError';
+}
+
+function readImageGenerationTimeoutMs(memories: MemoriesRepo): number {
+  const raw = memories.get('global', null, IMAGE_GENERATION_TIMEOUT_MEMORY_KEY);
+  const parsed = Number(raw ?? DEFAULT_IMAGE_GENERATION_TIMEOUT_MS);
+  if (!Number.isFinite(parsed) || parsed < 30_000 || parsed > 1_800_000) {
+    return DEFAULT_IMAGE_GENERATION_TIMEOUT_MS;
+  }
+  return Math.round(parsed);
 }
 
 /**

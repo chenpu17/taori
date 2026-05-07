@@ -36,6 +36,21 @@ test('model-center: provider chips render and tabs filter rows', async ({ page }
   await expect(page.locator('.model-center__matrix .hint').last()).toContainText(
     '没有',
   );
+
+  const headerActionStyles = await Promise.all([
+    page.getByTestId('provider-key-status-check').evaluate((el) => {
+      const style = getComputedStyle(el);
+      return { color: style.color, backgroundColor: style.backgroundColor };
+    }),
+    page.getByTestId('model-center-import').evaluate((el) => {
+      const style = getComputedStyle(el);
+      return { color: style.color, backgroundColor: style.backgroundColor };
+    }),
+  ]);
+  for (const styles of headerActionStyles) {
+    expect(styles.color).not.toBe('rgb(0, 0, 0)');
+    expect(styles.backgroundColor).not.toBe('rgb(0, 0, 0)');
+  }
 });
 
 test('model-center: "+ 添加 Provider" reopens onboarding wizard', async ({ page }) => {

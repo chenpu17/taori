@@ -223,6 +223,12 @@ function generatedImageFilename(img: Pick<GeneratedImage, 'file_id' | 'prompt' |
   return `${raw || 'generated-image'}.${ext}`;
 }
 
+function formatLatencyMs(value: number | null | undefined): string | null {
+  if (value == null || !Number.isFinite(value)) return null;
+  if (value < 1_000) return `${Math.round(value)}ms`;
+  return value < 10_000 ? `${(value / 1_000).toFixed(1)}s` : `${Math.round(value / 1_000)}s`;
+}
+
 function currentBudgetMonthKey(now = new Date()): string {
   return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
 }
@@ -3724,26 +3730,30 @@ function ChatPanel({
     () => chatModels.filter((item) => isQuickCompareEligibleModel(item)),
     [chatModels],
   );
+  const quickCompareNeedsTools = hasQuickCompareToolIntent(input);
 
   const defaultQuickCompareModelIds = useMemo(() => {
-    const currentModelEligible = isQuickCompareEligibleModel(model);
-    return [
-      ...(currentModelEligible ? [model.id] : []),
-      ...quickCompareEligibleModels
-        .filter((item) => item.id !== model.id)
-        .map((item) => item.id),
-    ].slice(0, 3);
-  }, [model, quickCompareEligibleModels]);
-  const quickCompareToolBlocked = hasQuickCompareToolIntent(input);
+    return quickCompareEligibleModels
+      .slice()
+      .sort((a, b) => {
+        if (quickCompareNeedsTools) {
+          const toolSupportDiff = Number(b.supports_tools) - Number(a.supports_tools);
+          if (toolSupportDiff !== 0) return toolSupportDiff;
+        }
+        if (a.id === model.id) return -1;
+        if (b.id === model.id) return 1;
+        return a.fallback_order - b.fallback_order;
+      })
+      .map((item) => item.id)
+      .slice(0, 3);
+  }, [model.id, quickCompareEligibleModels, quickCompareNeedsTools]);
   const quickCompareDisabledReason = !input.trim()
     ? '先输入要比较的问题'
     : quickCompareEligibleModels.length < 2
       ? 'Quick Compare 至少需要 2 个可用聊天模型'
       : pendingHasImage && !model.supports_vision
         ? '当前模型不能处理待发送图片'
-        : quickCompareToolBlocked
-          ? '这条消息像是需要搜索/抓网页。请直接发送，让正式工具链先完成检索。'
-          : null;
+        : null;
   const quickCompareDisabled = quickCompareDisabledReason !== null;
 
   const runQuickCompare = useCallback(async (
@@ -3753,15 +3763,6 @@ function ChatPanel({
     if (quickCompare?.running || isLoading) return;
     const prompt = input.trim();
     if (!prompt) return;
-    if (hasQuickCompareToolIntent(prompt)) {
-      setQuickCompare({
-        compareId: null,
-        running: false,
-        error: 'Quick Compare 不执行搜索/抓网页。请直接发送，让正式工具链完成检索后再对比草稿。',
-        outputs: [],
-      });
-      return;
-    }
     const currentModelEligible = isQuickCompareEligibleModel(model);
     const candidateIds = [...new Set(modelIds)].slice(0, 3);
     if (candidateIds.length < 2) {
@@ -4566,38 +4567,89 @@ function ChatPanel({
           {quickCompare.error && <p className="err" data-testid="quick-compare-error">{quickCompare.error}</p>}
           {quickCompare.outputs.length > 0 && (
             <div className="quick-compare-grid" data-testid="quick-compare-grid">
-              {quickCompare.outputs.map((output) => {
-                const outputModel = chatModels.find((item) => item.id === output.modelId) ?? null;
-                return (
-                  <article
-                    className={`quick-compare-output quick-compare-${output.status}`}
-                    key={output.outputId}
-                    data-testid="quick-compare-output"
-                  >
-                    <header>
-                      <strong>{outputModel ? modelDisplayWithProvider(outputModel, providers) : output.modelId}</strong>
-                      <span>{output.status === 'failed' ? '失败' : output.status === 'complete' ? '完成' : '生成中'}</span>
-                    </header>
-                    {output.status === 'failed' ? (
-                      <p className="err">{output.error ?? '候选生成失败'}</p>
-                    ) : (
-                      <MarkdownView
-                        content={output.content || '（暂无内容）'}
-                        className="quick-compare-content msg-md"
-                      />
-                    )}
-                    <button
-                      type="button"
-                      className="quick-compare-adopt"
-                      disabled={output.status !== 'complete' || quickCompareAdoptingId === output.outputId}
-                      onClick={() => void adoptQuickCompareOutput(output.outputId)}
-                      data-testid="quick-compare-adopt"
-                    >
-                      {quickCompareAdoptingId === output.outputId ? '采纳中…' : '采纳这版'}
-                    </button>
-                  </article>
+              {(() => {
+                const completedWithFirstToken = quickCompare.outputs.filter(
+                  (item) => item.status === 'complete' && item.firstTokenMs != null,
                 );
-              })}
+                const completedWithDuration = quickCompare.outputs.filter(
+                  (item) => item.status === 'complete' && item.durationMs != null,
+                );
+                const fastestFirstTokenMs = completedWithFirstToken.length > 1
+                  ? Math.min(...completedWithFirstToken.map((item) => item.firstTokenMs ?? Number.POSITIVE_INFINITY))
+                  : null;
+                const fastestDurationMs = completedWithDuration.length > 1
+                  ? Math.min(...completedWithDuration.map((item) => item.durationMs ?? Number.POSITIVE_INFINITY))
+                  : null;
+                return quickCompare.outputs.map((output) => {
+                  const outputModel = chatModels.find((item) => item.id === output.modelId) ?? null;
+                  const isFastestFirstToken =
+                    fastestFirstTokenMs != null && output.firstTokenMs != null && output.firstTokenMs === fastestFirstTokenMs;
+                  const isFastestDuration =
+                    fastestDurationMs != null && output.durationMs != null && output.durationMs === fastestDurationMs;
+                  return (
+                    <article
+                      className={`quick-compare-output quick-compare-${output.status}`}
+                      key={output.outputId}
+                      data-testid="quick-compare-output"
+                    >
+                      <header>
+                        <div className="quick-compare-output-title">
+                          <strong>{outputModel ? modelDisplayWithProvider(outputModel, providers) : output.modelId}</strong>
+                          {(isFastestFirstToken || isFastestDuration) && (
+                            <div className="quick-compare-speed-badges">
+                              {isFastestFirstToken && <span className="quick-compare-speed-badge">首字最快</span>}
+                              {isFastestDuration && <span className="quick-compare-speed-badge">完成最快</span>}
+                            </div>
+                          )}
+                        </div>
+                        <span>{output.status === 'failed' ? '失败' : output.status === 'complete' ? '完成' : '生成中'}</span>
+                      </header>
+                      {(output.firstTokenMs != null || output.durationMs != null || outputModel?.supports_tools) && (
+                        <div className="quick-compare-metrics">
+                          {output.firstTokenMs != null && <span>首字 {formatLatencyMs(output.firstTokenMs)}</span>}
+                          {output.durationMs != null && <span>总耗时 {formatLatencyMs(output.durationMs)}</span>}
+                          {outputModel?.supports_tools && <span>支持 Tools</span>}
+                        </div>
+                      )}
+                      {output.toolTraces.length > 0 && (
+                        <div className="quick-compare-tool-traces">
+                          {output.toolTraces.map((trace) => (
+                            <div
+                              key={trace.callId}
+                              className={`quick-compare-tool-trace quick-compare-tool-trace-${trace.status}`}
+                            >
+                              <span className="quick-compare-tool-trace-label">
+                                {trace.label}
+                                {trace.durationMs != null ? ` · ${formatLatencyMs(trace.durationMs)}` : ''}
+                              </span>
+                              <span className="quick-compare-tool-trace-status">
+                                {trace.status === 'running' ? '调用中' : trace.status === 'ok' ? '已完成' : '失败'}
+                              </span>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                      {output.status === 'failed' ? (
+                        <p className="err">{output.error ?? '候选生成失败'}</p>
+                      ) : (
+                        <MarkdownView
+                          content={output.content || '（暂无内容）'}
+                          className="quick-compare-content msg-md"
+                        />
+                      )}
+                      <button
+                        type="button"
+                        className="quick-compare-adopt"
+                        disabled={output.status !== 'complete' || quickCompareAdoptingId === output.outputId}
+                        onClick={() => void adoptQuickCompareOutput(output.outputId)}
+                        data-testid="quick-compare-adopt"
+                      >
+                        {quickCompareAdoptingId === output.outputId ? '采纳中…' : '采纳这版'}
+                      </button>
+                    </article>
+                  );
+                });
+              })()}
             </div>
           )}
         </section>

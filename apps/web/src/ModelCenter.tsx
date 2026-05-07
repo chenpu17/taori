@@ -582,7 +582,12 @@ export function ModelCenter({
             {syncingTarget === 'all' ? '同步中…' : '🔄 同步价格'}
           </button>
           {!embedded && (
-            <button type="button" onClick={onClose} data-testid="model-center-close">
+            <button
+              type="button"
+              className="model-center-action-btn model-center-action-btn--secondary"
+              onClick={onClose}
+              data-testid="model-center-close"
+            >
               关闭
             </button>
           )}
@@ -606,6 +611,7 @@ export function ModelCenter({
           <div className="model-center__providers-actions">
             <button
               type="button"
+              className="model-center-action-btn model-center-action-btn--secondary"
               onClick={() => void onCheckProviderKeys()}
               disabled={providerKeyChecking || providers.length === 0}
               data-testid="provider-key-status-check"
@@ -805,6 +811,7 @@ export function ModelCenter({
           </div>
           <button
             type="button"
+            className="model-center-action-btn model-center-action-btn--secondary"
             onClick={() =>
               setImportDrawer({
                 capability: activeTab,
@@ -1478,6 +1485,7 @@ function ImportDrawer({
             </div>
             <button
               type="button"
+              className="model-center-action-btn model-center-action-btn--secondary"
               onClick={() => void onSyncManaged()}
               disabled={!providerId || syncingManaged}
               data-testid="import-drawer-sync-managed"
@@ -1543,6 +1551,7 @@ function ImportDrawer({
           </label>
           <button
             type="button"
+            className="model-center-action-btn model-center-action-btn--secondary"
             onClick={() => void discover()}
             disabled={!providerId || discovering}
             data-testid="import-drawer-refresh"

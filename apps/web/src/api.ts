@@ -113,6 +113,25 @@ export interface StructuredMemory {
   updated_at: number;
 }
 
+export interface RuntimeResourceSnapshot {
+  pid: number;
+  started_at: number;
+  uptime_ms: number;
+  cpu_user_ms: number;
+  cpu_system_ms: number;
+  cpu_percent: number | null;
+  rss_bytes: number;
+  heap_used_bytes: number;
+  heap_total_bytes: number;
+  external_bytes: number;
+  array_buffers_bytes: number;
+  system_memory_bytes: number;
+  system_free_memory_bytes: number;
+  available_parallelism: number;
+  db_path: string;
+  control_mode: 'desktop' | 'standalone';
+}
+
 async function streamOrThrow(res: Response): Promise<string> {
   if (!res.ok) {
     let body: unknown = null;
@@ -239,6 +258,11 @@ export const api = {
         risks?: Array<{ code: string; message: string }>;
         final_screenshot?: string | null;
       }>(r),
+    ),
+
+  runtimeDiagnostics: () =>
+    authedFetch('/v1/diagnostics/runtime').then((r) =>
+      json<{ ok: boolean; data: RuntimeResourceSnapshot }>(r),
     ),
 
   listProviders: () =>

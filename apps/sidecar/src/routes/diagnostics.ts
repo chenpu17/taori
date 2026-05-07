@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import type { BuildServerArgs } from '../server.js';
+import { createRuntimeMonitor } from '../runtime-monitor.js';
 
 interface RealProviderStep {
   name: string;
@@ -31,8 +32,20 @@ interface CapabilitySummary {
 
 export function registerDiagnosticsRoute(
   app: FastifyInstance,
-  _deps: BuildServerArgs,
+  deps: BuildServerArgs,
 ): void {
+  const readRuntimeResources = createRuntimeMonitor({
+    startedAt: deps.startedAt,
+    config: deps.config,
+  });
+
+  app.get('/v1/diagnostics/runtime', async () => {
+    return {
+      ok: true,
+      data: readRuntimeResources(),
+    };
+  });
+
   app.get('/v1/diagnostics/real-provider/latest', async () => {
     const dir = findLatestRealProviderArtifact();
     if (!dir) {

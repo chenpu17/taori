@@ -27,12 +27,15 @@ import {
   QuickCompareRepo,
   RunEventsRepo,
 } from '../db/repos/index.js';
-import { classifyProviderError } from '../providers/registry.js';
+import { classifyProviderError, isToolPayloadUnsupportedError } from '../providers/registry.js';
 import { normalizeOllamaOpenAiBaseUrl } from '../providers/ollama.js';
 import { throwIfBudgetBlockedOrNeedsConfirmation } from '../cost/budget-guard.js';
 import { openDataStream } from '../chat/stream-dispatch.js';
 import { appendRunEvent } from '../chat/run-stream.js';
+import { buildConversationToolPolicy } from '../chat/tool-policy.js';
+import { buildUpstreamTools, withCapabilityToolInstruction, type ToolTracePayload } from '../chat/upstream-tools.js';
 import { pickQuickCompareModels } from '../quick-compare/model-picker.js';
+import type { CapabilityBus } from '../bus/index.js';
 
 function writeAnnotation(stream: PassThrough, annotations: QuickCompareAnnotation[]): void {
   stream.write(`8:${JSON.stringify(annotations)}\n`);
@@ -60,7 +63,6 @@ function buildCompareMessages(args: {
   const system = [
     args.personaPrompt,
     '你正在参加 Taori Quick Compare。请独立给出高质量回答，不要提及其他候选模型。回答要直接、可执行、避免空话。',
-    'Quick Compare 不会调用工具、搜索网页或抓取 URL。不要声称已经搜索、浏览、抓取或调用工具；如果需要外部资料，请明确说明应先在正式对话中完成检索。',
   ].filter(Boolean).join('\n\n');
   const messages = system
     ? [{ role: 'system' as const, content: system }, ...args.requestMessages]
@@ -102,6 +104,9 @@ async function runCompareParticipant(args: {
   provider: Provider | null;
   apiKey: string | null;
   messages: Array<{ role: 'user' | 'assistant' | 'system'; content: string }>;
+  sourceUserMessageId: string | null;
+  bus: CapabilityBus | null | undefined;
+  toolPolicy: Record<string, boolean>;
   qcRepo: QuickCompareRepo;
   costsRepo: CostsRepo;
   modelsRepo: ModelsRepo;
@@ -111,6 +116,7 @@ async function runCompareParticipant(args: {
   const startedAt = Date.now();
   let firstTokenMs: number | null = null;
   let accumulated = '';
+  let toolsWereSent = false;
   args.qcRepo.patchOutput(args.outputId, { status: 'streaming' });
   appendRunEvent(args.log, args.runEventsRepo, {
     run_id: args.runId,
@@ -142,12 +148,40 @@ async function runCompareParticipant(args: {
           : args.provider.base_url.replace(/\/$/, ''),
         apiKey: args.apiKey,
       });
+      const emitToolTrace = (payload: ToolTracePayload): void => {
+        writeAnnotation(args.stream, [{
+          type: 'qc.tool_trace',
+          output_id: args.outputId,
+          index: args.index,
+          model_id: args.model.id,
+          ...payload,
+        }]);
+      };
+      const upstreamTools = buildUpstreamTools(
+        {
+          messageId: args.outputId,
+          conversationId: args.conversationId,
+          sourceUserMessageId: args.sourceUserMessageId,
+          supportsTools: args.model.supports_tools,
+          toolPolicy: args.toolPolicy,
+          bus: args.bus ?? null,
+          imageModelId: null,
+          filesRepo: null,
+          log: args.log,
+        },
+        (line) => args.stream.write(line),
+        emitToolTrace,
+      );
+      toolsWereSent = upstreamTools.tools != null;
       const result = await streamText({
         model: provider.chat(args.model.model_name),
-        messages: args.messages,
+        messages: upstreamTools.tools
+          ? withCapabilityToolInstruction(args.messages, upstreamTools.flags)
+          : args.messages,
         maxTokens: 1200,
         temperature: 0.6,
         maxRetries: 0,
+        ...(upstreamTools.tools ? { tools: upstreamTools.tools, maxSteps: 3 } : {}),
         abortSignal: args.signal,
       });
       for await (const delta of result.textStream) {
@@ -255,6 +289,18 @@ async function runCompareParticipant(args: {
     }]);
     return { outputId: args.outputId, ok: true };
   } catch (e) {
+    const rejectedTools = toolsWereSent && isToolPayloadUnsupportedError(e);
+    if (rejectedTools && args.model.supports_tools) {
+      try {
+        args.modelsRepo.update(args.model.id, { supports_tools: false });
+        args.log.warn({ modelId: args.model.id }, 'quick_compare.tools_auto_disabled_after_provider_rejection');
+      } catch (updateErr) {
+        args.log.warn(
+          { err: updateErr, modelId: args.model.id },
+          'quick_compare.tools_auto_disable_failed',
+        );
+      }
+    }
     const providerError = classifyProviderError({ err: e });
     const classification = providerError.classification;
     args.modelsRepo.recordFailure(args.model.id, classification);
@@ -415,6 +461,7 @@ export function registerQuickCompareRoute(app: FastifyInstance, deps: BuildServe
       personaPrompt,
       attachments: body.attachments,
     });
+    const toolPolicy = buildConversationToolPolicy(deps.bus ?? null, memoriesRepo, conversation.id);
 
     void (async () => {
       const providers = selectedModels.map((model) =>
@@ -444,6 +491,9 @@ export function registerQuickCompareRoute(app: FastifyInstance, deps: BuildServe
           provider: providers[index] ?? null,
           apiKey: apiKeys[index] ?? null,
           messages,
+          sourceUserMessageId: sourceUserMessage.id,
+          bus: deps.bus,
+          toolPolicy,
           qcRepo,
           costsRepo,
           modelsRepo,
@@ -614,6 +664,7 @@ export function registerQuickCompareRoute(app: FastifyInstance, deps: BuildServe
       duration_ms: null,
     });
     qcRepo.updateRunStatus(compare.id, 'running');
+    const toolPolicy = buildConversationToolPolicy(deps.bus ?? null, memoriesRepo, compare.conversation_id);
     const dataStream = openDataStream(req.headers.origin, reply);
     writeAnnotation(dataStream.stream, [{
       type: 'qc.meta',
@@ -646,6 +697,9 @@ export function registerQuickCompareRoute(app: FastifyInstance, deps: BuildServe
         provider,
         apiKey,
         messages: [{ role: 'user', content: prompt }],
+        sourceUserMessageId: compare.source_user_message_id,
+        bus: deps.bus,
+        toolPolicy,
         qcRepo,
         costsRepo,
         modelsRepo,
