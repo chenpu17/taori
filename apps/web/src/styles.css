@@ -2191,6 +2191,144 @@ header h1::before {
 .control-overview__calls h3 {
   margin: 0 0 10px;
 }
+
+.control-overview__health-wall {
+  display: grid;
+  gap: 12px;
+  padding: 16px;
+  border-radius: 14px;
+  background: var(--surface-2, rgba(255, 255, 255, 0.03));
+  border: 1px solid var(--border-1, rgba(255, 255, 255, 0.06));
+}
+.control-overview__health-wall-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+.control-overview__health-wall-head h3 {
+  margin: 0 0 4px;
+  font-size: 1rem;
+}
+.control-overview__health-wall-summary {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  font-size: 0.85rem;
+}
+.control-overview__health-wall-summary span {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  border-radius: 999px;
+  background: var(--surface-3, rgba(255, 255, 255, 0.05));
+  border: 1px solid var(--border-1, rgba(255, 255, 255, 0.06));
+}
+.control-overview__health-wall-summary span[data-tone='cooldown'] {
+  border-color: rgba(248, 113, 113, 0.45);
+  color: var(--danger-fg, #fca5a5);
+}
+.control-overview__health-wall-summary span[data-tone='demoted'] {
+  border-color: rgba(251, 191, 36, 0.45);
+  color: var(--warning-fg, #fcd34d);
+}
+.control-overview__health-wall-summary span[data-tone='healthy'] {
+  border-color: rgba(74, 222, 128, 0.4);
+  color: var(--success-fg, #86efac);
+}
+.control-overview__health-wall-summary button {
+  margin-left: 4px;
+}
+.control-overview__health-wall-grid {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: 10px;
+}
+.control-health-wall-card {
+  display: grid;
+  gap: 8px;
+  padding: 12px 14px;
+  border-radius: 12px;
+  background: var(--surface-3, rgba(255, 255, 255, 0.04));
+  border: 1px solid var(--border-1, rgba(255, 255, 255, 0.06));
+}
+.control-health-wall-card--cooldown {
+  border-color: rgba(248, 113, 113, 0.5);
+  background: linear-gradient(180deg, rgba(248, 113, 113, 0.08), transparent 80%);
+}
+.control-health-wall-card--demoted {
+  border-color: rgba(251, 191, 36, 0.45);
+  background: linear-gradient(180deg, rgba(251, 191, 36, 0.06), transparent 80%);
+}
+.control-health-wall-card__head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.control-health-wall-card__head strong {
+  font-size: 0.95rem;
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.control-health-wall-card__state {
+  font-size: 0.75rem;
+  opacity: 0.85;
+}
+.control-health-wall-led {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  flex: 0 0 auto;
+  box-shadow: 0 0 0 2px var(--surface-2, rgba(255, 255, 255, 0.04));
+}
+.control-health-wall-led--healthy {
+  background: #4ade80;
+  box-shadow: 0 0 6px rgba(74, 222, 128, 0.55);
+}
+.control-health-wall-led--demoted {
+  background: #fbbf24;
+  box-shadow: 0 0 6px rgba(251, 191, 36, 0.55);
+}
+.control-health-wall-led--cooldown {
+  background: #f87171;
+  box-shadow: 0 0 6px rgba(248, 113, 113, 0.6);
+  animation: control-health-wall-pulse 1.4s ease-in-out infinite;
+}
+@keyframes control-health-wall-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.55; }
+}
+.control-health-wall-card__metrics {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 6px;
+}
+.control-health-wall-card__metrics span {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.control-health-wall-card__metrics small {
+  font-size: 0.7rem;
+  opacity: 0.65;
+}
+.control-health-wall-card__metrics strong {
+  font-size: 0.9rem;
+}
+.control-health-wall-card__foot {
+  font-size: 0.78rem;
+  opacity: 0.75;
+}
 .control-runtime {
   display: grid;
   gap: 16px;

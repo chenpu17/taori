@@ -125,6 +125,16 @@ function formatAgo(ts: number | null): string {
   return `${Math.floor(diff / 86_400_000)} 天前`;
 }
 
+function formatCountdown(untilMs: number | null): string {
+  if (!untilMs) return '—';
+  const diff = untilMs - Date.now();
+  if (diff <= 0) return '即将恢复';
+  if (diff < 60_000) return `${Math.ceil(diff / 1000)} 秒后`;
+  if (diff < 3_600_000) return `${Math.ceil(diff / 60_000)} 分钟后`;
+  if (diff < 86_400_000) return `${Math.ceil(diff / 3_600_000)} 小时后`;
+  return `${Math.ceil(diff / 86_400_000)} 天后`;
+}
+
 function formatBytes(bytes: number | null | undefined): string {
   if (typeof bytes !== 'number' || !Number.isFinite(bytes) || bytes < 0) return '—';
   if (bytes < 1024) return `${bytes} B`;
@@ -628,6 +638,12 @@ function OverviewSection({
         </article>
       </section>
 
+      <ModelHealthWall
+        models={models}
+        rows={modelHealthRows}
+        onOpenModels={onOpenModels}
+      />
+
       <section className="control-overview__calls">
         <h3>最近外部调用</h3>
         {lastCalls.length === 0 ? (
@@ -650,6 +666,179 @@ function OverviewSection({
         )}
       </section>
     </div>
+  );
+}
+
+interface ModelHealthWallEntry {
+  modelId: string;
+  modelName: string;
+  providerId: string | null;
+  state: 'healthy' | 'demoted' | 'cooldown';
+  demoted: boolean;
+  disabledUntil: number | null;
+  failureCount24h: number;
+  calls24h: number;
+  failures24h: number;
+  failureRate: number;
+  avgFirstTokenMs: number | null;
+  lastFailureAt: number | null;
+  lastFailureClassification: string | null;
+}
+
+function ModelHealthWall({
+  models,
+  rows,
+  onOpenModels,
+}: {
+  models: Model[] | null;
+  rows: ModelHealthRow[] | null;
+  onOpenModels: () => void;
+}): JSX.Element {
+  const entries = useMemo<ModelHealthWallEntry[]>(() => {
+    if (!models) return [];
+    const rowById = new Map<string, ModelHealthRow>();
+    for (const row of rows ?? []) rowById.set(row.model_id, row);
+    const list: ModelHealthWallEntry[] = models.map((m) => {
+      const row = rowById.get(m.id);
+      const calls = row?.calls_24h ?? 0;
+      const fails = row?.failures_24h ?? 0;
+      const cooldown = m.disabled_until != null && m.disabled_until > Date.now();
+      const state: ModelHealthWallEntry['state'] = cooldown
+        ? 'cooldown'
+        : m.demoted
+          ? 'demoted'
+          : 'healthy';
+      return {
+        modelId: m.id,
+        modelName: m.display_name ?? m.model_name,
+        providerId: m.provider_id ?? null,
+        state,
+        demoted: m.demoted,
+        disabledUntil: cooldown ? m.disabled_until ?? null : null,
+        failureCount24h: m.failure_count_24h ?? 0,
+        calls24h: calls,
+        failures24h: fails,
+        failureRate: calls > 0 ? fails / calls : 0,
+        avgFirstTokenMs: row?.avg_first_token_ms ?? null,
+        lastFailureAt: row?.last_failure_at ?? null,
+        lastFailureClassification: row?.last_failure_classification ?? null,
+      };
+    });
+    const stateOrder: Record<ModelHealthWallEntry['state'], number> = {
+      cooldown: 0,
+      demoted: 1,
+      healthy: 2,
+    };
+    return list.sort((a, b) => {
+      const sa = stateOrder[a.state];
+      const sb = stateOrder[b.state];
+      if (sa !== sb) return sa - sb;
+      if (a.failureRate !== b.failureRate) return b.failureRate - a.failureRate;
+      return b.calls24h - a.calls24h;
+    });
+  }, [models, rows]);
+
+  const summary = useMemo(() => {
+    let cooldown = 0;
+    let demoted = 0;
+    let healthy = 0;
+    for (const entry of entries) {
+      if (entry.state === 'cooldown') cooldown += 1;
+      else if (entry.state === 'demoted') demoted += 1;
+      else healthy += 1;
+    }
+    return { cooldown, demoted, healthy };
+  }, [entries]);
+
+  if (!models || models.length === 0) return <></>;
+
+  return (
+    <section className="control-overview__health-wall" data-testid="control-model-health-wall">
+      <header className="control-overview__health-wall-head">
+        <div>
+          <h3>模型健康详情</h3>
+          <p className="hint">
+            红绿灯按模型聚合：冷却中（被自动禁用）/ 降级（仍可手动触发，但已退出自动选择）/ 健康。
+          </p>
+        </div>
+        <div className="control-overview__health-wall-summary">
+          <span data-tone="cooldown" data-testid="health-wall-cooldown">
+            冷却 {summary.cooldown}
+          </span>
+          <span data-tone="demoted" data-testid="health-wall-demoted">
+            降级 {summary.demoted}
+          </span>
+          <span data-tone="healthy" data-testid="health-wall-healthy">
+            健康 {summary.healthy}
+          </span>
+          <button type="button" onClick={onOpenModels} data-testid="health-wall-open-models">
+            管理模型
+          </button>
+        </div>
+      </header>
+      <ul className="control-overview__health-wall-grid">
+        {entries.map((entry) => {
+          const tone = entry.state;
+          const failureRatePct = entry.calls24h > 0 ? Math.round(entry.failureRate * 100) : null;
+          const lastFailureLabel = entry.lastFailureClassification
+            ? MODEL_FAILURE_LABELS[entry.lastFailureClassification] ?? entry.lastFailureClassification
+            : null;
+          return (
+            <li
+              key={entry.modelId}
+              className={`control-health-wall-card control-health-wall-card--${tone}`}
+              data-testid={`health-wall-row-${entry.modelId}`}
+              data-state={tone}
+            >
+              <div className="control-health-wall-card__head">
+                <span className={`control-health-wall-led control-health-wall-led--${tone}`} aria-hidden="true" />
+                <strong>{entry.modelName}</strong>
+                <span className="control-health-wall-card__state">
+                  {tone === 'cooldown'
+                    ? `冷却中 · ${formatCountdown(entry.disabledUntil)}`
+                    : tone === 'demoted'
+                      ? '已降级'
+                      : '健康'}
+                </span>
+              </div>
+              <div className="control-health-wall-card__metrics">
+                <span>
+                  <small>24h 调用</small>
+                  <strong>{entry.calls24h}</strong>
+                </span>
+                <span>
+                  <small>失败</small>
+                  <strong>
+                    {entry.failures24h}
+                    {failureRatePct != null ? ` · ${failureRatePct}%` : ''}
+                  </strong>
+                </span>
+                <span>
+                  <small>首 token</small>
+                  <strong>
+                    {entry.avgFirstTokenMs == null
+                      ? '—'
+                      : entry.avgFirstTokenMs < 1000
+                        ? `${Math.round(entry.avgFirstTokenMs)}ms`
+                        : `${(entry.avgFirstTokenMs / 1000).toFixed(1)}s`}
+                  </strong>
+                </span>
+              </div>
+              <div className="control-health-wall-card__foot">
+                {entry.lastFailureAt ? (
+                  <span>
+                    最近失败 {formatAgo(entry.lastFailureAt)}
+                    {lastFailureLabel ? ` · ${lastFailureLabel}` : ''}
+                  </span>
+                ) : (
+                  <span>近 24h 无失败</span>
+                )}
+              </div>
+            </li>
+          );
+        })}
+      </ul>
+    </section>
   );
 }
 
