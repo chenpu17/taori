@@ -212,7 +212,7 @@ class McpStdioSession {
     await this.request('initialize', {
       protocolVersion: '2024-11-05',
       capabilities: {},
-      clientInfo: { name: 'taori', version: '0.0.1' },
+      clientInfo: { name: 'taori', version: '0.0.2' },
     });
     this.notify('notifications/initialized', {});
   }

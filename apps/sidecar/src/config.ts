@@ -14,11 +14,9 @@
  */
 
 import { randomBytes } from 'node:crypto';
+import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
 
 function devToken(): string {
   // 32 random bytes = 256-bit entropy. Matches the security spec
@@ -33,23 +31,36 @@ export interface SidecarConfig {
   controlUrl: string | null;
   controlBearer: string | null;
   isDev: boolean;
+  standalone: boolean;
   version: string;
 }
 
+function runtimeDir(): string {
+  if (process.env.TAORI_STANDALONE === '1') {
+    return process.cwd();
+  }
+  return path.dirname(fileURLToPath(import.meta.url));
+}
+
 export function loadConfig(): SidecarConfig {
-  const isDev = process.env.NODE_ENV !== 'production';
+  const standalone = process.env.TAORI_STANDALONE === '1';
+  const isDev = !standalone && process.env.NODE_ENV !== 'production';
 
   const port = process.env.SIDECAR_PORT
     ? Number(process.env.SIDECAR_PORT)
     : isDev
       ? 17890
-      : 0;
+      : standalone
+        ? 17890
+        : 0;
 
   const bearer = process.env.SIDECAR_BEARER ?? devToken();
 
   const dbPath =
     process.env.DB_PATH ??
-    path.resolve(__dirname, '..', 'data', isDev ? 'dev.db' : 'taori.db');
+    (standalone
+      ? path.join(os.homedir(), '.taori', 'taori.db')
+      : path.resolve(runtimeDir(), '..', 'data', isDev ? 'dev.db' : 'taori.db'));
 
   const controlUrl = process.env.CONTROL_URL ?? null;
   const controlBearer = process.env.CONTROL_BEARER ?? null;
@@ -61,6 +72,7 @@ export function loadConfig(): SidecarConfig {
     controlUrl,
     controlBearer,
     isDev,
-    version: process.env.npm_package_version ?? '0.0.1',
+    standalone,
+    version: process.env.npm_package_version ?? '0.0.2',
   };
 }

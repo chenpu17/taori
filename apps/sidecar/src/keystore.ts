@@ -61,13 +61,14 @@ export class MemoryStore implements KeyStore {
 export function buildKeyStore(args: {
   control: ControlClient;
   isDev: boolean;
+  standalone?: boolean;
   dbPath: string;
   log: (msg: string) => void;
 }): KeyStore {
   if (args.control.isAvailable) {
     return new KeychainStore(args.control);
   }
-  if (!args.isDev) {
+  if (!args.isDev && !args.standalone) {
     // In production a missing control channel is a fatal misconfiguration —
     // we must not silently fall back to memory (would lose keys + violate
     // security spec).
@@ -77,9 +78,11 @@ export function buildKeyStore(args: {
         'No control channel configured in production: refusing to start without OS Keychain access',
     });
   }
-  const keysPath = path.join(path.dirname(args.dbPath), 'dev.keys.json');
+  const keysPath = path.join(path.dirname(args.dbPath), args.standalone ? 'taori.keys.json' : 'dev.keys.json');
   args.log(
-    `[sidecar] WARNING: control channel unavailable — using dev file key store (${keysPath}). DEV ONLY.`,
+    args.standalone
+      ? `[sidecar] standalone mode — using local file key store (${keysPath})`
+      : `[sidecar] WARNING: control channel unavailable — using dev file key store (${keysPath}). DEV ONLY.`,
   );
   return new DevFileKeyStore(keysPath);
 }

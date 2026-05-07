@@ -1,12 +1,13 @@
 {
-  "name": "@chenpu17/taori",
-  "version": "0.0.1",
-  "private": false,
+  "name": "@taori/shared",
+  "version": "0.0.2",
+  "private": true,
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "files": [
-    "dist"
+    "dist",
+    "README.md"
   ],
   "exports": {
     ".": {
@@ -19,10 +20,6 @@
     "build": "tsc -p tsconfig.json",
     "dev": "tsc -p tsconfig.json --watch",
     "typecheck": "tsc -p tsconfig.json --noEmit"
-  },
-  "publishConfig": {
-    "access": "public",
-    "registry": "https://registry.npmjs.org/"
   },
   "dependencies": {
     "gpt-tokenizer": "3.4.0",

@@ -1,9 +1,13 @@
 {
   "name": "@taori/sidecar",
-  "version": "0.0.1",
+  "version": "0.0.2",
   "private": true,
   "type": "module",
   "main": "./dist/index.js",
+  "files": [
+    "dist",
+    "README.md"
+  ],
   "scripts": {
     "dev": "tsx watch src/index.ts",
     "start": "node dist/index.js",
@@ -15,7 +19,7 @@
   "dependencies": {
     "@ai-sdk/openai": "1.0.20",
     "@fastify/cors": "10.0.1",
-    "@taori/shared": "workspace:@chenpu17/taori@*",
+    "@taori/shared": "workspace:*",
     "ai": "4.0.27",
     "better-sqlite3": "11.7.0",
     "dotenv": "16.4.7",

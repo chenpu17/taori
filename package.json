@@ -1,14 +1,15 @@
 {
   "name": "taori",
   "private": true,
-  "version": "0.0.1",
+  "version": "0.0.2",
   "description": "Taori — multi-model desktop AI assistant. Workspace root.",
   "packageManager": "pnpm@9.15.0",
   "engines": {
     "node": ">=20.10.0"
   },
   "scripts": {
-    "build:shared": "pnpm --filter @chenpu17/taori build",
+    "build:shared": "pnpm --filter @taori/shared build",
+    "build:npm": "pnpm --filter @taori/shared build && pnpm --filter @taori/sidecar build && pnpm --filter @chenpu17/taori build",
     "dev": "node ./scripts/dev-local.mjs",
     "dev:clean": "node ./scripts/dev-clean.mjs",
     "dev:sidecar": "pnpm --filter @taori/sidecar dev",

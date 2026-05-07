@@ -1,4 +1,4 @@
-# @chenpu17/taori
+# @taori/shared
 
 Shared Taori contracts for renderer, sidecar, and external integrations.
 
@@ -10,8 +10,4 @@ Shared Taori contracts for renderer, sidecar, and external integrations.
 - roundtable and quick-compare contracts
 - file-search contracts
 
-## Install
-
-```bash
-npm install @chenpu17/taori
-```
+This package is an internal workspace dependency.

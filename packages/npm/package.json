@@ -1,0 +1,26 @@
+{
+  "name": "@chenpu17/taori",
+  "version": "0.0.2",
+  "description": "Taori standalone sidecar CLI.",
+  "type": "module",
+  "scripts": {
+    "build": "node ./scripts/build.mjs"
+  },
+  "bin": {
+    "taori": "./dist/cli.cjs"
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "dependencies": {
+    "better-sqlite3": "11.7.0"
+  },
+  "devDependencies": {
+    "esbuild": "0.23.1"
+  },
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org/"
+  }
+}
