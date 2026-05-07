@@ -13,6 +13,7 @@
 //!
 //! All logs go to stderr via tracing; stdout is kept clean.
 
+mod automation;
 mod control;
 mod sidecar;
 
@@ -80,9 +81,22 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![sidecar_endpoint, control_health])
         .setup(move |app| {
             let app_handle = app.handle().clone();
+            let automation_handle = app.handle().clone();
             let state = app_state.clone();
             let control_url_for_spawn = control_url.clone();
             let control_bearer_for_spawn = control_bearer.clone();
+            let automation_bearer = std::env::var("TAORI_DESKTOP_AUTOMATION_BEARER")
+                .unwrap_or_else(|_| control_bearer.clone());
+            tauri::async_runtime::spawn(async move {
+                match automation::maybe_start(automation_handle, automation_bearer).await {
+                    Ok(Some((url, handle))) => {
+                        tracing::info!("automation channel up at {}", url);
+                        std::mem::forget(handle);
+                    }
+                    Ok(None) => {}
+                    Err(e) => tracing::error!("automation channel failed: {:#}", e),
+                }
+            });
             // Spawn sidecar in background; block readiness wait off the main thread.
             tauri::async_runtime::spawn(async move {
                 match sidecar::spawn_sidecar(

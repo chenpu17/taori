@@ -36,6 +36,7 @@ import type {
   CostsRepo,
   ModelsRepo,
   ProvidersRepo,
+  RunEventInsert,
   RoundtableMessageRow,
   RoundtableMessagesRepo,
   RoundtableRow,
@@ -43,6 +44,7 @@ import type {
 } from '../db/repos/index.js';
 import type { KeyStore } from '../keystore.js';
 import { classifyProviderError } from '../providers/registry.js';
+import { normalizeOllamaOpenAiBaseUrl } from '../providers/ollama.js';
 
 export interface SummarizerDeps {
   modelsRepo: ModelsRepo;
@@ -51,7 +53,16 @@ export interface SummarizerDeps {
   rtRepo: RoundtablesRepo;
   rtMsgRepo: RoundtableMessagesRepo;
   keystore: KeyStore;
+  runEvents?: RoundtableRunEvents | null;
   log: { info: (...a: unknown[]) => void; warn: (...a: unknown[]) => void; error: (...a: unknown[]) => void };
+}
+
+export interface RoundtableRunEvents {
+  runId: string;
+  conversationId: string;
+  append: (input: Omit<RunEventInsert, 'run_id' | 'conversation_id' | 'message_id'> & {
+    message_id?: string | null;
+  }) => void;
 }
 
 export interface RunSummaryArgs {
@@ -179,7 +190,9 @@ async function runOneAttempt(
   signal: AbortSignal,
 ): Promise<AttemptOutcome> {
   const aiProvider = createOpenAI({
-    baseURL: provider.base_url.replace(/\/$/, ''),
+    baseURL: provider.type === 'ollama'
+      ? normalizeOllamaOpenAiBaseUrl(provider.base_url)
+      : provider.base_url.replace(/\/$/, ''),
     apiKey,
   });
   const startedAt = Date.now();
@@ -299,6 +312,23 @@ function recordAttemptCost(
     success,
     duration_ms: outcome.durationMs,
   });
+  deps.runEvents?.append({
+    kind: 'cost.recorded',
+    status: success ? 'completed' : 'failed',
+    label: '总结成本',
+    summary: actual == null ? outcome.classification ?? null : `$${actual.toFixed(6)}`,
+    payload: {
+      cost_record_id: row.id,
+      model_id: model.id,
+      roundtable_id: rt.id,
+      input_tokens: outcome.promptTokens,
+      output_tokens: outcome.completionTokens,
+      actual_cost_usd: actual,
+      success,
+      classification: outcome.classification ?? null,
+      duration_ms: outcome.durationMs,
+    },
+  });
   return row.id;
 }
 
@@ -321,11 +351,22 @@ export async function runSummary(
       },
     ]);
     deps.rtRepo.setStatus(rt.id, revertStatusOnFail);
+    deps.runEvents?.append({
+      kind: 'model.failed',
+      status: 'failed',
+      label: '圆桌总结',
+      summary: '没有可用的总结模型',
+      payload: {
+        model_id: null,
+        roundtable_id: rt.id,
+        classification: 'unknown',
+      },
+    });
     return { ok: false, classification: 'unknown', fallbackText };
   }
   const model = deps.modelsRepo.get(summarizerModelId);
   const provider = model?.provider_id ? deps.providersRepo.get(model.provider_id) : null;
-  if (!model || !provider || !provider.api_key_ref) {
+  if (!model || !provider || (!provider.api_key_ref && provider.type !== 'ollama')) {
     const fallbackText = buildFallbackText(rt, messages);
     writeAnnotation(stream, [
       {
@@ -337,13 +378,28 @@ export async function runSummary(
       },
     ]);
     deps.rtRepo.setStatus(rt.id, revertStatusOnFail);
+    deps.runEvents?.append({
+      kind: 'model.failed',
+      status: 'failed',
+      label: '圆桌总结',
+      summary: 'summarizer 模型或 provider 不可用',
+      payload: {
+        model_id: summarizerModelId,
+        roundtable_id: rt.id,
+        classification: 'unknown',
+      },
+    });
     return { ok: false, classification: 'unknown', fallbackText };
   }
   let apiKey: string | null = null;
-  try {
-    apiKey = await deps.keystore.read(provider.api_key_ref);
-  } catch (e) {
-    deps.log.warn({ err: e, model_id: model.id }, 'roundtable.summarize.keystore_read_failed');
+  if (provider.type === 'ollama') {
+    apiKey = 'ollama-local';
+  } else {
+    try {
+      apiKey = await deps.keystore.read(provider.api_key_ref as string);
+    } catch (e) {
+      deps.log.warn({ err: e, model_id: model.id }, 'roundtable.summarize.keystore_read_failed');
+    }
   }
   if (!apiKey) {
     const fallbackText = buildFallbackText(rt, messages);
@@ -357,6 +413,18 @@ export async function runSummary(
       },
     ]);
     deps.rtRepo.setStatus(rt.id, revertStatusOnFail);
+    deps.runEvents?.append({
+      kind: 'model.failed',
+      status: 'failed',
+      label: model.display_name ?? model.model_name,
+      summary: 'summarizer 没有 API key',
+      payload: {
+        model_id: model.id,
+        model_name: model.model_name,
+        roundtable_id: rt.id,
+        classification: 'unknown',
+      },
+    });
     return { ok: false, classification: 'unknown', fallbackText };
   }
 
@@ -365,6 +433,19 @@ export async function runSummary(
   const prompt = buildUserPrompt(rt, transcript);
 
   // Attempt 1 — temperature 0.3.
+  deps.runEvents?.append({
+    kind: 'model.started',
+    status: 'started',
+    label: `圆桌总结 · ${model.display_name ?? model.model_name}`,
+    summary: '总结尝试 1',
+    payload: {
+      model_id: model.id,
+      model_name: model.model_name,
+      roundtable_id: rt.id,
+      stage: 'summarizer',
+      attempt: 1,
+    },
+  });
   const a1 = await runOneAttempt(
     deps,
     rt,
@@ -385,6 +466,23 @@ export async function runSummary(
     writeAnnotation(stream, [
       { type: 'rt.summary_done', summary: a1.parsed, cost_record_id: costId },
     ]);
+    deps.runEvents?.append({
+      kind: 'model.completed',
+      status: 'completed',
+      label: `圆桌总结 · ${model.display_name ?? model.model_name}`,
+      summary: '总结完成',
+      payload: {
+        model_id: model.id,
+        model_name: model.model_name,
+        roundtable_id: rt.id,
+        stage: 'summarizer',
+        attempt: 1,
+        input_tokens: a1.promptTokens,
+        output_tokens: a1.completionTokens,
+        duration_ms: a1.durationMs,
+        cost_record_id: costId,
+      },
+    });
     return { ok: true };
   }
   // Record cost on failed JSON/schema attempt as success=true (we got tokens
@@ -410,9 +508,53 @@ export async function runSummary(
       },
     ]);
     deps.rtRepo.setStatus(rt.id, revertStatusOnFail);
+    deps.runEvents?.append({
+      kind: 'model.failed',
+      status: 'failed',
+      label: `圆桌总结 · ${model.display_name ?? model.model_name}`,
+      summary: a1.message ?? 'aborted',
+      payload: {
+        model_id: model.id,
+        model_name: model.model_name,
+        roundtable_id: rt.id,
+        stage: 'summarizer',
+        attempt: 1,
+        classification: a1.classification ?? 'abort',
+        duration_ms: a1.durationMs,
+      },
+    });
     return { ok: false, classification: a1.classification, fallbackText };
   }
 
+  deps.runEvents?.append({
+    kind: 'model.failed',
+    status: 'failed',
+    label: `圆桌总结 · ${model.display_name ?? model.model_name}`,
+    summary: a1.message ?? a1.classification ?? '总结尝试失败',
+    payload: {
+      model_id: model.id,
+      model_name: model.model_name,
+      roundtable_id: rt.id,
+      stage: 'summarizer',
+      attempt: 1,
+      classification: a1.classification ?? 'unknown',
+      duration_ms: a1.durationMs,
+    },
+  });
+
+  deps.runEvents?.append({
+    kind: 'model.started',
+    status: 'started',
+    label: `圆桌总结 · ${model.display_name ?? model.model_name}`,
+    summary: '总结尝试 2',
+    payload: {
+      model_id: model.id,
+      model_name: model.model_name,
+      roundtable_id: rt.id,
+      stage: 'summarizer',
+      attempt: 2,
+    },
+  });
   const a2 = await runOneAttempt(
     deps,
     rt,
@@ -433,6 +575,23 @@ export async function runSummary(
     writeAnnotation(stream, [
       { type: 'rt.summary_done', summary: a2.parsed, cost_record_id: costId },
     ]);
+    deps.runEvents?.append({
+      kind: 'model.completed',
+      status: 'completed',
+      label: `圆桌总结 · ${model.display_name ?? model.model_name}`,
+      summary: '总结完成',
+      payload: {
+        model_id: model.id,
+        model_name: model.model_name,
+        roundtable_id: rt.id,
+        stage: 'summarizer',
+        attempt: 2,
+        input_tokens: a2.promptTokens,
+        output_tokens: a2.completionTokens,
+        duration_ms: a2.durationMs,
+        cost_record_id: costId,
+      },
+    });
     return { ok: true };
   }
   const a2Billed =
@@ -453,5 +612,20 @@ export async function runSummary(
     },
   ]);
   deps.rtRepo.setStatus(rt.id, revertStatusOnFail);
+  deps.runEvents?.append({
+    kind: 'model.failed',
+    status: 'failed',
+    label: `圆桌总结 · ${model.display_name ?? model.model_name}`,
+    summary: a2.message ?? '总结失败',
+    payload: {
+      model_id: model.id,
+      model_name: model.model_name,
+      roundtable_id: rt.id,
+      stage: 'summarizer',
+      attempt: 2,
+      classification: a2.classification ?? 'unknown',
+      duration_ms: a2.durationMs,
+    },
+  });
   return { ok: false, classification: a2.classification, fallbackText };
 }

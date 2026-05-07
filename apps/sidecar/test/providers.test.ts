@@ -2,7 +2,7 @@ import { describe, it, expect, beforeAll, afterAll, vi, afterEach } from 'vitest
 import { buildServer } from '../src/server.js';
 import { openDb } from '../src/db/index.js';
 import { ControlClient } from '../src/control/client.js';
-import { MemoryStore } from '../src/keystore.js';
+import { MemoryStore, type KeyStore } from '../src/keystore.js';
 import type { FastifyInstance } from 'fastify';
 import os from 'node:os';
 import path from 'node:path';
@@ -47,6 +47,12 @@ describe('providers + models', () => {
 
   function mockOpenRouterModels(items: unknown[]): void {
     vi.spyOn(globalThis, 'fetch').mockImplementation(async (url) => {
+      if (typeof url === 'string' && url.includes('/key')) {
+        return new Response(JSON.stringify({ data: { label: 'test key' } }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        });
+      }
       if (typeof url === 'string' && url.includes('/models')) {
         return new Response(JSON.stringify({ data: items }), {
           status: 200,
@@ -56,6 +62,84 @@ describe('providers + models', () => {
       throw new Error(`unexpected fetch: ${url}`);
     });
   }
+
+  it('GET /v1/providers/key-status requires explicit confirmation before reading Keychain', async () => {
+    const keychainDbPath = path.join(os.tmpdir(), `taori-providers-keychain-${Date.now()}.db`);
+    const secrets = new Map<string, string>();
+    const keychain: KeyStore = {
+      kind: 'keychain',
+      write: vi.fn(async (account: string, secret: string) => {
+        secrets.set(account, secret);
+      }),
+      read: vi.fn(async (account: string) => secrets.get(account) ?? null),
+      delete: vi.fn(async (account: string) => {
+        secrets.delete(account);
+      }),
+    };
+    const keychainApp = buildServer({
+      config: {
+        port: 0,
+        bearer,
+        dbPath: keychainDbPath,
+        controlUrl: null,
+        controlBearer: null,
+        isDev: false,
+        version: '0.0.0-test',
+      },
+      db: openDb(keychainDbPath),
+      control: new ControlClient({ url: null, bearer: null }),
+      keystore: keychain,
+      startedAt: Date.now(),
+    });
+    await keychainApp.ready();
+
+    try {
+      const created = await keychainApp.inject({
+        method: 'POST',
+        url: '/v1/providers',
+        headers: authJson,
+        payload: {
+          name: 'Keychain Provider',
+          type: 'custom',
+          base_url: 'https://example.invalid/v1',
+          api_key: 'sk-keychain-test',
+        },
+      });
+      expect(created.statusCode).toBe(201);
+      const provider = created.json() as { id: string };
+      expect(keychain.write).toHaveBeenCalledTimes(1);
+
+      const withoutConfirmation = await keychainApp.inject({
+        method: 'GET',
+        url: '/v1/providers/key-status',
+        headers: auth,
+      });
+      expect(withoutConfirmation.statusCode).toBe(400);
+      expect(withoutConfirmation.json()).toMatchObject({
+        code: 'validation_error',
+        details: {
+          requires_keychain_confirmation: true,
+          keystore_kind: 'keychain',
+        },
+      });
+      expect(keychain.read).not.toHaveBeenCalled();
+
+      const withConfirmation = await keychainApp.inject({
+        method: 'GET',
+        url: '/v1/providers/key-status?confirm_keychain=1',
+        headers: auth,
+      });
+      expect(withConfirmation.statusCode).toBe(200);
+      expect(keychain.read).toHaveBeenCalledTimes(1);
+      expect(withConfirmation.json().statuses).toContainEqual({
+        provider_id: provider.id,
+        key_available: true,
+      });
+    } finally {
+      await keychainApp.close();
+      fs.rmSync(keychainDbPath, { force: true });
+    }
+  });
 
   it('POST /v1/providers/test ok → returns sample_count', async () => {
     mockOpenRouterModels([{ id: 'a/b' }, { id: 'c/d' }]);
@@ -75,8 +159,99 @@ describe('providers + models', () => {
     expect(body.sample_count).toBe(2);
   });
 
-  it('POST /v1/providers/test 401 from upstream → ok=false with classification', async () => {
+  it('Ollama provider test works without an API key and normalizes /v1 for native tags', async () => {
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+      new Response(JSON.stringify({ models: [{ name: 'llama3.2:latest' }] }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      }),
+    );
+    const res = await app.inject({
+      method: 'POST',
+      url: '/v1/providers/test',
+      headers: authJson,
+      payload: {
+        type: 'ollama',
+        base_url: 'http://127.0.0.1:11434/v1',
+      },
+    });
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toMatchObject({ ok: true, sample_count: 1 });
+    expect(fetchSpy).toHaveBeenCalledWith(
+      'http://127.0.0.1:11434/api/tags',
+      expect.objectContaining({ method: 'GET' }),
+    );
+  });
+
+  it('Ollama discovery imports local no-key models with local pricing and heuristics', async () => {
     vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          models: [
+            { name: 'llama3.2:latest' },
+            { name: 'nomic-embed-text:latest' },
+            { name: 'llava:latest' },
+          ],
+        }),
+        { status: 200, headers: { 'content-type': 'application/json' } },
+      ),
+    );
+
+    let res = await app.inject({
+      method: 'POST',
+      url: '/v1/providers',
+      headers: authJson,
+      payload: {
+        name: 'Local Ollama',
+        type: 'ollama',
+        base_url: 'http://127.0.0.1:11434',
+      },
+    });
+    expect(res.statusCode).toBe(201);
+    const provider = res.json();
+    expect(provider.api_key_ref).toBeNull();
+
+    res = await app.inject({
+      method: 'GET',
+      url: `/v1/providers/${provider.id}/discover`,
+      headers: auth,
+    });
+    expect(res.statusCode).toBe(200);
+    const body = res.json();
+    const models = body.models as Array<{
+      model_name: string;
+      capability: string;
+      price_input_per_1m: number;
+      price_output_per_1m: number;
+      supports_vision: boolean;
+      supports_tools: boolean;
+    }>;
+    expect(body.recommended.chat).toBe('llama3.2:latest');
+    expect(models.find((m) => m.model_name === 'llama3.2:latest')).toMatchObject({
+      capability: 'chat',
+      price_input_per_1m: 0,
+      price_output_per_1m: 0,
+      supports_tools: true,
+    });
+    expect(models.find((m) => m.model_name === 'nomic-embed-text:latest')?.capability).toBe(
+      'embedding',
+    );
+    expect(models.find((m) => m.model_name === 'llava:latest')).toMatchObject({
+      capability: 'multimodal',
+      supports_vision: true,
+      supports_tools: true,
+    });
+
+    res = await app.inject({
+      method: 'DELETE',
+      url: `/v1/providers/${provider.id}`,
+      headers: auth,
+    });
+    expect(res.statusCode).toBe(204);
+  });
+
+  it('POST /v1/providers/test 401 from upstream → ok=false with classification', async () => {
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(
       new Response('unauth', { status: 401 }),
     );
     const res = await app.inject({
@@ -93,6 +268,81 @@ describe('providers + models', () => {
     const body = res.json();
     expect(body.ok).toBe(false);
     expect(body.error.classification).toBe('auth');
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+    expect(String(fetchSpy.mock.calls[0]?.[0])).toContain('/key');
+  });
+
+  it('OpenRouter discovery validates API key and requests all output modalities', async () => {
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async (url) => {
+      const raw = String(url);
+      if (raw.includes('/key')) {
+        return new Response(JSON.stringify({ data: { label: 'ok' } }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        });
+      }
+      if (raw.includes('/models')) {
+        expect(raw).toContain('output_modalities=all');
+        return new Response(
+          JSON.stringify({
+            data: [
+              {
+                id: 'openai/gpt-image-1',
+                name: 'GPT Image 1',
+                pricing: { image: '0.04' },
+                architecture: { input_modalities: ['text'], output_modalities: ['image'] },
+              },
+            ],
+          }),
+          { status: 200, headers: { 'content-type': 'application/json' } },
+        );
+      }
+      throw new Error(`unexpected fetch: ${url}`);
+    });
+
+    let res = await app.inject({
+      method: 'POST',
+      url: '/v1/providers',
+      headers: authJson,
+      payload: {
+        name: 'OpenRouter image',
+        type: 'openrouter',
+        base_url: 'https://openrouter.ai/api/v1',
+        api_key: 'sk-or-test',
+      },
+    });
+    expect(res.statusCode).toBe(201);
+    const provider = res.json() as { id: string };
+
+    res = await app.inject({
+      method: 'GET',
+      url: `/v1/providers/${provider.id}/discover`,
+      headers: auth,
+    });
+    expect(res.statusCode).toBe(200);
+    const models = res.json().models as Array<{
+      model_name: string;
+      capability: string;
+      price_per_image: number | null;
+      modalities: string[];
+    }>;
+    expect(models[0]).toMatchObject({
+      model_name: 'openai/gpt-image-1',
+      capability: 'image',
+      price_per_image: 0.04,
+      modalities: ['image'],
+    });
+    expect(fetchSpy).toHaveBeenCalledWith(
+      'https://openrouter.ai/api/v1/models?output_modalities=all',
+      expect.objectContaining({ method: 'GET' }),
+    );
+
+    res = await app.inject({
+      method: 'DELETE',
+      url: `/v1/providers/${provider.id}`,
+      headers: auth,
+    });
+    expect(res.statusCode).toBe(204);
   });
 
   it('OpenAI-compatible discovery reads real /models and infers gpt-image as image', async () => {
@@ -149,6 +399,7 @@ describe('providers + models', () => {
     expect(models.find((m) => m.model_name === 'gpt-4o')).toMatchObject({
       capability: 'multimodal',
       supports_vision: true,
+      supports_tools: true,
     });
 
     res = await app.inject({
@@ -194,6 +445,279 @@ describe('providers + models', () => {
     expect(res.statusCode).toBe(200);
     const models = res.json().models as Array<{ model_name: string; capability: string }>;
     expect(models.find((m) => m.model_name === 'packy-gpt-image')?.capability).toBe('image');
+
+    res = await app.inject({
+      method: 'DELETE',
+      url: `/v1/providers/${provider.id}`,
+      headers: auth,
+    });
+    expect(res.statusCode).toBe(204);
+  });
+
+  it('PackyAPI discovery surfaces gpt-image-2 even when /models omits it', async () => {
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async () =>
+      new Response(
+        JSON.stringify({
+          data: [
+            { id: 'packy-chat', object: 'model' },
+            { id: 'gpt-image-1', object: 'model' },
+          ],
+        }),
+        { status: 200, headers: { 'content-type': 'application/json' } },
+      ),
+    );
+
+    let res = await app.inject({
+      method: 'POST',
+      url: '/v1/providers/test',
+      headers: authJson,
+      payload: {
+        type: 'packyapi',
+        base_url: 'https://www.packyapi.com/v1',
+        api_key: 'sk-packy-test',
+      },
+    });
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toMatchObject({ ok: true, sample_count: 2 });
+
+    res = await app.inject({
+      method: 'POST',
+      url: '/v1/providers',
+      headers: authJson,
+      payload: {
+        name: 'PackyAPI',
+        type: 'packyapi',
+        base_url: 'https://www.packyapi.com/v1',
+        api_key: 'sk-packy-test',
+      },
+    });
+    expect(res.statusCode).toBe(201);
+    const provider = res.json();
+
+    res = await app.inject({
+      method: 'GET',
+      url: `/v1/providers/${provider.id}/discover`,
+      headers: auth,
+    });
+    expect(res.statusCode).toBe(200);
+    const models = res.json().models as Array<{
+      model_name: string;
+      capability: string;
+      display_name: string;
+      modalities: string[];
+      supports_tools: boolean;
+    }>;
+    expect(models[0]).toMatchObject({
+      model_name: 'gpt-image-2',
+      display_name: 'GPT Image 2',
+      capability: 'image',
+      modalities: ['image'],
+      supports_tools: false,
+    });
+    expect(models.find((m) => m.model_name === 'gpt-image-1')?.capability).toBe('image');
+
+    res = await app.inject({
+      method: 'DELETE',
+      url: `/v1/providers/${provider.id}`,
+      headers: auth,
+    });
+    expect(res.statusCode).toBe(204);
+  });
+
+  it('PackyAPI discovery falls back to documented gpt-image-2 when /models is unavailable', async () => {
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('not found', { status: 404 }));
+
+    let res = await app.inject({
+      method: 'POST',
+      url: '/v1/providers',
+      headers: authJson,
+      payload: {
+        name: 'PackyAPI image-only',
+        type: 'packyapi',
+        base_url: 'https://www.packyapi.com/v1',
+        api_key: 'sk-packy-test',
+      },
+    });
+    expect(res.statusCode).toBe(201);
+    const provider = res.json();
+
+    res = await app.inject({
+      method: 'GET',
+      url: `/v1/providers/${provider.id}/discover`,
+      headers: auth,
+    });
+    expect(res.statusCode).toBe(200);
+    expect(res.json().models).toEqual([
+      expect.objectContaining({
+        model_name: 'gpt-image-2',
+        capability: 'image',
+      }),
+    ]);
+
+    res = await app.inject({
+      method: 'DELETE',
+      url: `/v1/providers/${provider.id}`,
+      headers: auth,
+    });
+    expect(res.statusCode).toBe(204);
+  });
+
+  it('SiliconFlow discovery infers chat, vision and image capabilities', async () => {
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async () =>
+      new Response(
+        JSON.stringify({
+          data: [
+            { id: 'deepseek-ai/DeepSeek-V3', object: 'model' },
+            {
+              id: 'Qwen/Qwen2.5-VL-72B-Instruct',
+              object: 'model',
+              input_modalities: ['text', 'image'],
+            },
+            { id: 'black-forest-labs/FLUX.1-schnell', object: 'model' },
+            { id: 'BAAI/bge-m3', object: 'model' },
+          ],
+        }),
+        { status: 200, headers: { 'content-type': 'application/json' } },
+      ),
+    );
+
+    let res = await app.inject({
+      method: 'POST',
+      url: '/v1/providers/test',
+      headers: authJson,
+      payload: {
+        type: 'siliconflow',
+        base_url: 'https://api.siliconflow.cn/v1',
+        api_key: 'sk-sf-test',
+      },
+    });
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toMatchObject({ ok: true, sample_count: 4 });
+
+    res = await app.inject({
+      method: 'POST',
+      url: '/v1/providers',
+      headers: authJson,
+      payload: {
+        name: 'SiliconFlow',
+        type: 'siliconflow',
+        base_url: 'https://api.siliconflow.cn/v1',
+        api_key: 'sk-sf-test',
+      },
+    });
+    expect(res.statusCode).toBe(201);
+    const provider = res.json();
+
+    res = await app.inject({
+      method: 'GET',
+      url: `/v1/providers/${provider.id}/discover`,
+      headers: auth,
+    });
+    expect(res.statusCode).toBe(200);
+    const models = res.json().models as Array<{
+      model_name: string;
+      capability: string;
+      supports_tools: boolean;
+      supports_vision: boolean;
+    }>;
+    expect(models.find((m) => m.model_name === 'deepseek-ai/DeepSeek-V3')).toMatchObject({
+      capability: 'chat',
+      supports_tools: true,
+    });
+    expect(models.find((m) => m.model_name === 'Qwen/Qwen2.5-VL-72B-Instruct')).toMatchObject({
+      capability: 'multimodal',
+      supports_vision: true,
+    });
+    expect(models.find((m) => m.model_name === 'black-forest-labs/FLUX.1-schnell')).toMatchObject({
+      capability: 'image',
+      supports_tools: false,
+    });
+    expect(models.find((m) => m.model_name === 'BAAI/bge-m3')?.capability).toBe('embedding');
+
+    res = await app.inject({
+      method: 'DELETE',
+      url: `/v1/providers/${provider.id}`,
+      headers: auth,
+    });
+    expect(res.statusCode).toBe(204);
+  });
+
+  it('DeepSeek official discovery imports official chat models with tools enabled', async () => {
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (url, init) => {
+      expect(String(url)).toBe('https://api.deepseek.com/models');
+      expect((init?.headers as Record<string, string>).Authorization).toBe('Bearer sk-deepseek-test');
+      return new Response(
+        JSON.stringify({
+          data: [
+            { id: 'deepseek-v4-flash', object: 'model' },
+            { id: 'deepseek-v4-pro', object: 'model' },
+          ],
+        }),
+        { status: 200, headers: { 'content-type': 'application/json' } },
+      );
+    });
+
+    let res = await app.inject({
+      method: 'POST',
+      url: '/v1/providers/test',
+      headers: authJson,
+      payload: {
+        type: 'deepseek',
+        base_url: 'https://api.deepseek.com',
+        api_key: 'sk-deepseek-test',
+      },
+    });
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toMatchObject({ ok: true, sample_count: 2 });
+
+    res = await app.inject({
+      method: 'POST',
+      url: '/v1/providers',
+      headers: authJson,
+      payload: {
+        name: 'DeepSeek 官方',
+        type: 'deepseek',
+        base_url: 'https://api.deepseek.com',
+        api_key: 'sk-deepseek-test',
+      },
+    });
+    expect(res.statusCode).toBe(201);
+    const provider = res.json();
+
+    res = await app.inject({
+      method: 'GET',
+      url: `/v1/providers/${provider.id}/discover`,
+      headers: auth,
+    });
+    expect(res.statusCode).toBe(200);
+    const body = res.json() as {
+      recommended: { chat: string | null };
+      models: Array<{
+        model_name: string;
+        display_name: string;
+        capability: string;
+        modalities: string[];
+        supports_vision: boolean;
+        supports_tools: boolean;
+      }>;
+    };
+    expect(body.recommended.chat).toBe('deepseek-v4-flash');
+    expect(body.models).toEqual([
+      expect.objectContaining({
+        model_name: 'deepseek-v4-flash',
+        display_name: 'DeepSeek V4 Flash',
+        capability: 'chat',
+        modalities: ['text'],
+        supports_vision: false,
+        supports_tools: true,
+      }),
+      expect.objectContaining({
+        model_name: 'deepseek-v4-pro',
+        display_name: 'DeepSeek V4 Pro',
+        capability: 'chat',
+        supports_tools: true,
+      }),
+    ]);
 
     res = await app.inject({
       method: 'DELETE',
@@ -518,6 +1042,49 @@ describe('providers + models', () => {
     });
     expect(res.statusCode).toBe(204);
     expect(await keystore.read(`provider:${provider.id}`)).toBeNull();
+  });
+
+  it('DELETE /v1/providers/:id deletes managed models instead of leaving providerless rows', async () => {
+    let res = await app.inject({
+      method: 'POST',
+      url: '/v1/providers',
+      headers: authJson,
+      payload: {
+        name: 'Provider to delete',
+        type: 'custom',
+        base_url: 'https://example.invalid/v1',
+        api_key: 'sk-delete-test',
+      },
+    });
+    expect(res.statusCode).toBe(201);
+    const provider = res.json() as { id: string };
+
+    res = await app.inject({
+      method: 'POST',
+      url: '/v1/models',
+      headers: authJson,
+      payload: {
+        provider_id: provider.id,
+        model_name: 'delete-me',
+        capability: 'chat',
+        display_name: 'Delete Me',
+        is_default_for: 'chat',
+      },
+    });
+    expect(res.statusCode).toBe(201);
+    const model = res.json() as { id: string };
+
+    res = await app.inject({
+      method: 'DELETE',
+      url: `/v1/providers/${provider.id}`,
+      headers: auth,
+    });
+    expect(res.statusCode).toBe(204);
+
+    res = await app.inject({ method: 'GET', url: '/v1/models', headers: auth });
+    expect(res.statusCode).toBe(200);
+    const rows = res.json().models as Array<{ id: string; provider_id: string | null }>;
+    expect(rows.find((m) => m.id === model.id)).toBeUndefined();
   });
 
   it('POST /v1/providers with invalid body → 400', async () => {

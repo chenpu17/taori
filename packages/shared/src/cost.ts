@@ -1,3 +1,5 @@
+import { countInputTokens } from './tokens.js';
+
 /**
  * Cost-related pure helpers — shared by sidecar (cost calculation) and
  * renderer (price badge + estimate text). No DB / no fetch / no DOM.
@@ -72,28 +74,8 @@ export function formatUsd(usd: number | null | undefined): string {
   return `$${usd.toFixed(2)}`;
 }
 
-/**
- * Pre-send token estimate (M1 §5.1 — "用户在输入框就能看到大致花费").
- *
- * GPT/Claude tokenizers cluster around ~4 chars/token for English and ~1.5
- * chars/token for CJK. We pick a 2× multiplier for any code-point in the CJK
- * unified ideographs / Japanese kana / Hangul ranges and 1× for everything
- * else, then divide by 4. This is intentionally a heuristic — it never has
- * to match a real tokenizer because the user only sees a rounded-USD label.
- */
 export function estimateInputTokens(text: string): number {
-  if (!text) return 0;
-  let weighted = 0;
-  for (const ch of text) {
-    const cp = ch.codePointAt(0) ?? 0;
-    const isCjkLike =
-      (cp >= 0x3040 && cp <= 0x9fff) || // hiragana/katakana/CJK unified
-      (cp >= 0xac00 && cp <= 0xd7af) || // hangul syllables
-      (cp >= 0xf900 && cp <= 0xfaff) || // CJK compat ideographs
-      (cp >= 0x20000 && cp <= 0x2ffff); // CJK extension B+
-    weighted += isCjkLike ? 2 : 1;
-  }
-  return Math.max(1, Math.ceil(weighted / 4));
+  return countInputTokens(text);
 }
 
 /**

@@ -425,7 +425,9 @@ test('session profile shows context and session tool policy blocks only the curr
   expect(convId).toBeTruthy();
   await expect(page.getByTestId('session-profile-strip')).toBeVisible();
   await expect(page.getByTestId('session-profile-model')).toContainText('Tool Researcher');
-  await expect(page.getByTestId('context-snapshot-card').first()).toBeVisible();
+  const contextCard = page.getByTestId('context-snapshot-card').first();
+  await expect(contextCard).toBeVisible();
+  await contextCard.locator('summary').click();
   await expect(page.getByTestId('context-source-chip').first()).toBeVisible();
 
   const webFetchChip = page.getByTestId('session-tool-policy-builtin.web_fetch');

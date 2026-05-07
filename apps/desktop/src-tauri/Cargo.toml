@@ -1,6 +1,6 @@
 [package]
 name = "taori-desktop"
-version = "0.0.0"
+version = "0.0.1"
 description = "Taori desktop shell (Tauri 2)"
 edition = "2021"
 rust-version = "1.77"
@@ -20,7 +20,7 @@ serde_json = "1"
 tokio = { version = "1", features = ["full"] }
 axum = "0.7"
 tower-http = { version = "0.5", features = ["limit"] }
-keyring = "3"
+keyring = { version = "3", features = ["apple-native", "windows-native", "sync-secret-service"] }
 rand = "0.8"
 hex = "0.4"
 tracing = "0.1"

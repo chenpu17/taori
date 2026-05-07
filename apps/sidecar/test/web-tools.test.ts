@@ -62,7 +62,9 @@ describe('builtin web tools', () => {
 
   it('web_fetch blocks localhost/private targets before network access', async () => {
     const fetchMock = vi.fn();
+    await app.close();
     vi.stubGlobal('fetch', fetchMock);
+    app = await makeApp(db, dbPath);
     const res = await app.inject({
       method: 'POST',
       url: '/v1/tools/invoke',
@@ -79,6 +81,7 @@ describe('builtin web tools', () => {
   });
 
   it('web_fetch returns readable markdown for public HTML', async () => {
+    await app.close();
     vi.stubGlobal(
       'fetch',
       vi.fn(async () =>
@@ -88,6 +91,7 @@ describe('builtin web tools', () => {
         }),
       ),
     );
+    app = await makeApp(db, dbPath);
     const res = await app.inject({
       method: 'POST',
       url: '/v1/tools/invoke',

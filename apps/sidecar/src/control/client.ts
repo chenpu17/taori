@@ -23,6 +23,10 @@ export interface ControlClientConfig {
   bearer: string | null;
 }
 
+const KEYCHAIN_READ_TIMEOUT_MS = 15_000;
+const KEYCHAIN_WRITE_TIMEOUT_MS = 30_000;
+const KEYCHAIN_DELETE_TIMEOUT_MS = 30_000;
+
 export class ControlClient {
   constructor(private readonly cfg: ControlClientConfig) {}
 
@@ -34,6 +38,7 @@ export class ControlClient {
     method: string,
     path: string,
     body?: unknown,
+    timeoutMs?: number,
   ): Promise<T> {
     if (!this.isAvailable) {
       throw new TaoriError({
@@ -42,14 +47,30 @@ export class ControlClient {
       });
     }
     const url = `${this.cfg.url}${path}`;
-    const res = await fetch(url, {
-      method,
-      headers: {
-        Authorization: `Bearer ${this.cfg.bearer}`,
-        ...(body !== undefined && { 'Content-Type': 'application/json' }),
-      },
-      body: body !== undefined ? JSON.stringify(body) : undefined,
-    });
+    const controller = timeoutMs ? new AbortController() : null;
+    const timer = controller ? setTimeout(() => controller.abort(), timeoutMs) : null;
+    let res: Response;
+    try {
+      res = await fetch(url, {
+        method,
+        signal: controller?.signal,
+        headers: {
+          Authorization: `Bearer ${this.cfg.bearer}`,
+          ...(body !== undefined && { 'Content-Type': 'application/json' }),
+        },
+        body: body !== undefined ? JSON.stringify(body) : undefined,
+      });
+    } catch (e) {
+      if (timeoutMs && e instanceof Error && e.name === 'AbortError') {
+        throw new TaoriError({
+          code: 'keychain_error',
+          message: `Control channel ${method} ${path} timed out after ${timeoutMs}ms`,
+        });
+      }
+      throw e;
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
     if (!res.ok) {
       throw new TaoriError({
         code: res.status === 404 ? 'not_found' : 'keychain_error',
@@ -62,7 +83,7 @@ export class ControlClient {
   async health(): Promise<boolean> {
     if (!this.isAvailable) return false;
     try {
-      await this.req<{ ok: true }>('GET', '/health');
+      await this.req<{ ok: true }>('GET', '/health', undefined, 1_500);
       return true;
     } catch {
       return false;
@@ -74,7 +95,12 @@ export class ControlClient {
     secret: string,
     service: string = TAORI_KEYCHAIN_SERVICE,
   ): Promise<void> {
-    await this.req('POST', '/v1/keychain/write', { service, account, secret });
+    await this.req(
+      'POST',
+      '/v1/keychain/write',
+      { service, account, secret },
+      KEYCHAIN_WRITE_TIMEOUT_MS,
+    );
   }
 
   async readKeychain(
@@ -86,6 +112,7 @@ export class ControlClient {
         'POST',
         '/v1/keychain/read',
         { service, account },
+        KEYCHAIN_READ_TIMEOUT_MS,
       );
       return res.secret;
     } catch (e) {
@@ -98,7 +125,12 @@ export class ControlClient {
     account: string,
     service: string = TAORI_KEYCHAIN_SERVICE,
   ): Promise<void> {
-    await this.req('POST', '/v1/keychain/delete', { service, account });
+    await this.req(
+      'POST',
+      '/v1/keychain/delete',
+      { service, account },
+      KEYCHAIN_DELETE_TIMEOUT_MS,
+    );
   }
 
   // NOTE: file read is intentionally not exposed in M0. M1 will add it via

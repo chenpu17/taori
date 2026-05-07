@@ -45,14 +45,13 @@ test('R4.2 context warning fires at ≥85% and exceed at ≥100%', async ({ page
 
   const input = page.locator('[data-testid=composer-input]');
 
-  // estimateInputTokens uses ~4 chars/token. context_length=500 → warn at ~1700
-  // chars (425 tokens), exceed at ~2000 chars (500 tokens).
-  await input.fill('a'.repeat(1800));
+  // Real tokenizer: these numbered words produce predictable token counts.
+  await input.fill(Array.from({ length: 213 }, (_, i) => `word${i}`).join(' '));
   const banner = page.locator('[data-testid=context-warning]');
   await expect(banner).toBeVisible();
   await expect(banner).toHaveAttribute('data-state', 'warn');
 
-  await input.fill('a'.repeat(2200));
+  await input.fill(Array.from({ length: 251 }, (_, i) => `word${i}`).join(' '));
   await expect(banner).toHaveAttribute('data-state', 'exceed');
 
   await input.fill('hi');

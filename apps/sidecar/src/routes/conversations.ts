@@ -13,7 +13,7 @@
 
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
-import { TaoriError } from '@taori/shared';
+import { ConversationExportQuerySchema, TaoriError } from '@taori/shared';
 import {
   ConversationsRepo,
   MessagesRepo,
@@ -27,6 +27,10 @@ import {
 import type { BuildServerArgs } from '../server.js';
 import fs from 'node:fs/promises';
 import { readSessionToolEnabled } from './tools.js';
+import {
+  renderConversationMarkdown,
+  safeConversationExportFilename,
+} from '../conversations/export.js';
 
 const PatchSchema = z
   .object({
@@ -200,6 +204,79 @@ export function registerConversationsRoute(
           events: runEventsRepo.listByConversation(req.params.id, limit),
         },
       };
+    },
+  );
+
+  app.get<{ Params: { id: string }; Querystring: { limit?: string } }>(
+    '/v1/conversations/:id/runs',
+    async (req) => {
+      const conv = convRepo.get(req.params.id);
+      if (!conv) {
+        throw new TaoriError({
+          code: 'not_found',
+          message: `Conversation ${req.params.id} not found`,
+        });
+      }
+      const rawLimit = Number(req.query.limit ?? 20);
+      const limit = Number.isFinite(rawLimit) ? rawLimit : 20;
+      return {
+        ok: true,
+        data: {
+          conversation_id: req.params.id,
+          runs: runEventsRepo.listRunsByConversation(req.params.id, limit),
+        },
+      };
+    },
+  );
+
+  app.get<{
+    Params: { id: string };
+    Querystring: { format?: string; include_timeline?: string };
+  }>(
+    '/v1/conversations/:id/export',
+    async (req, reply) => {
+      const parsed = ConversationExportQuerySchema.safeParse(req.query);
+      if (!parsed.success) {
+        throw new TaoriError({
+          code: 'validation_error',
+          message: parsed.error.errors.map((e) => e.message).join('; '),
+        });
+      }
+      const conv = convRepo.get(req.params.id);
+      if (!conv) {
+        throw new TaoriError({
+          code: 'not_found',
+          message: `Conversation ${req.params.id} not found`,
+        });
+      }
+      const messages = msgRepo.listByConversation(req.params.id);
+      const runEvents = parsed.data.include_timeline === 'summary'
+        ? runEventsRepo.listByConversation(req.params.id, 200)
+        : [];
+      const costs = costsRepo.listByConversation(req.params.id);
+      const modelLabels = new Map<string, string>();
+      for (const message of messages) {
+        if (!message.model_id || modelLabels.has(message.model_id)) continue;
+        const model = modelsRepo.get(message.model_id);
+        modelLabels.set(
+          message.model_id,
+          model?.display_name ?? model?.model_name ?? message.model_id,
+        );
+      }
+      const markdown = renderConversationMarkdown({
+        conversation: conv,
+        messages,
+        runEvents,
+        costs,
+        modelLabels,
+        includeTimeline: parsed.data.include_timeline,
+      });
+      reply.header('Content-Type', 'text/markdown; charset=utf-8');
+      reply.header(
+        'Content-Disposition',
+        `attachment; filename="${safeConversationExportFilename(conv)}"`,
+      );
+      return markdown;
     },
   );
 

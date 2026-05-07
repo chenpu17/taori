@@ -15,6 +15,7 @@ import { z } from 'zod';
 import {
   TaoriError,
   CreateRoundtableRequestSchema,
+  makeId,
   type AnalyzerOutput,
 } from '@taori/shared';
 import {
@@ -24,6 +25,8 @@ import {
   MessagesRepo,
   ModelsRepo,
   ProvidersRepo,
+  RunEventsRepo,
+  type RunEventInsert,
   RoundtableMessagesRepo,
   RoundtablesRepo,
 } from '../db/repos/index.js';
@@ -36,12 +39,82 @@ import {
 import { runAnalyzer, buildFallbackOutput } from '../roundtable/analyzer.js';
 import {
   estimateRoundtableCostRange,
+  estimateRoundtableAnalyzerCostUsd,
   estimateRoundtableCallsAndDuration,
+  estimateRoundtableParticipantRoundCostUsd,
+  estimateRoundtableSummaryCostUsd,
   buildAnalyzerModeReason,
 } from '../roundtable/cost-estimate.js';
 import { runRound } from '../roundtable/round-runner.js';
 import { runSummary } from '../roundtable/summarizer.js';
 import { renderRoundtableMarkdown, renderRoundtableSummaryMarkdown } from '../roundtable/export.js';
+import { throwIfBudgetBlockedOrNeedsConfirmation } from '../cost/budget-guard.js';
+
+type RoundtableRunEventInput = Omit<RunEventInsert, 'run_id' | 'conversation_id' | 'message_id'> & {
+  message_id?: string | null;
+};
+
+function appendRoundtableRunEvent(
+  log: { warn: (...a: unknown[]) => void },
+  repo: RunEventsRepo,
+  input: RunEventInsert,
+): void {
+  try {
+    repo.append(input);
+  } catch (e) {
+    const message = e instanceof Error ? e.message : String(e);
+    if (/FOREIGN KEY constraint failed/i.test(message)) {
+      try {
+        repo.append({ ...input, message_id: null });
+        return;
+      } catch (messageRetryError) {
+        const retryMessage =
+          messageRetryError instanceof Error
+            ? messageRetryError.message
+            : String(messageRetryError);
+        if (/FOREIGN KEY constraint failed/i.test(retryMessage)) {
+          try {
+            repo.append({ ...input, conversation_id: null, message_id: null });
+            return;
+          } catch (orphanRetryError) {
+            log.warn(
+              { err: orphanRetryError, runId: input.run_id, kind: input.kind },
+              'roundtable_run_event.write_failed',
+            );
+            return;
+          }
+        }
+      }
+    }
+    log.warn({ err: e, runId: input.run_id, kind: input.kind }, 'roundtable_run_event.write_failed');
+  }
+}
+
+function makeRoundtableRunEvents(args: {
+  log: { warn: (...a: unknown[]) => void };
+  repo: RunEventsRepo;
+  runId: string;
+  conversationId: string;
+}): {
+  runId: string;
+  conversationId: string;
+  append: (input: RoundtableRunEventInput) => void;
+} {
+  return {
+    runId: args.runId,
+    conversationId: args.conversationId,
+    append: (input) => appendRoundtableRunEvent(args.log, args.repo, {
+      run_id: args.runId,
+      conversation_id: args.conversationId,
+      message_id: input.message_id ?? null,
+      kind: input.kind,
+      status: input.status,
+      label: input.label,
+      summary: input.summary,
+      payload: input.payload,
+    }),
+  };
+}
 
 export function registerRoundtableRoute(
   app: FastifyInstance,
@@ -55,6 +128,7 @@ export function registerRoundtableRoute(
   const rtRepo = new RoundtablesRepo(deps.db);
   const rtMsgRepo = new RoundtableMessagesRepo(deps.db);
   const messagesRepo = new MessagesRepo(deps.db);
+  const runEventsRepo = new RunEventsRepo(deps.db);
   // M3.A.6 — In-memory in-flight tracker. The DB `status` column is a coarse
   // FSM that lingers in 'round1' / 'round2' / 'summarizing' even after the
   // stream finishes (spec has no idle-between-rounds state). To safely allow
@@ -159,11 +233,68 @@ export function registerRoundtableRoute(
     // We insert the actual roundtable row only after analyzer settles so the
     // initial status reflects reality (ready / failed).
     const pendingId = `rt_${Math.random().toString(36).slice(2, 14)}`;
+    const runId = makeId('run');
+    const runEvents = makeRoundtableRunEvents({
+      log: req.log,
+      repo: runEventsRepo,
+      runId,
+      conversationId: conv.id,
+    });
+    runEvents.append({
+      kind: 'turn.started',
+      status: 'started',
+      label: '圆桌分析',
+      summary: body.topic.slice(0, 160),
+      payload: {
+        run_kind: 'roundtable',
+        roundtable_id: pendingId,
+        action: 'analyze',
+        requested_mode: requestedMode,
+        origin_conversation_id: originConversationId,
+      },
+    });
+    runEvents.append({
+      kind: 'context.snapshot',
+      status: 'completed',
+      label: '圆桌分析上下文',
+      summary: `${candidateModels.length} 个候选模型`,
+      payload: {
+        roundtable_id: pendingId,
+        action: 'analyze',
+        requested_mode: requestedMode,
+        candidate_model_count: candidateModels.length,
+        analyzer_model_id: analyzerModel?.id ?? null,
+      },
+    });
 
     let analyzerOutput: AnalyzerOutput | null = null;
     let analyzerFailed = false;
 
     if (analyzerModel && analyzerProvider) {
+      throwIfBudgetBlockedOrNeedsConfirmation({
+        confirmed: true,
+        conversationId: conv.id,
+        model: analyzerModel,
+        inputText: body.topic,
+        estimatedCostUsd: estimateRoundtableAnalyzerCostUsd(analyzerModel),
+        costsRepo,
+        memoriesRepo,
+        thresholdKey: '__roundtable_hard_budget_threshold_disabled',
+        defaultThresholdUsd: Number.POSITIVE_INFINITY,
+        softBudgetEnabled: false,
+      });
+      runEvents.append({
+        kind: 'model.started',
+        status: 'started',
+        label: `圆桌分析 · ${analyzerModel.display_name ?? analyzerModel.model_name}`,
+        summary: '分析话题与推荐参与者',
+        payload: {
+          model_id: analyzerModel.id,
+          model_name: analyzerModel.model_name,
+          roundtable_id: pendingId,
+          stage: 'analyzer',
+        },
+      });
       const analyzerResult = await runAnalyzer(
         { keystore: deps.keystore, log: req.log },
         {
@@ -178,15 +309,67 @@ export function registerRoundtableRoute(
       );
       if (analyzerResult.costInsert) {
         try {
-          costsRepo.insert(analyzerResult.costInsert);
+          const costRow = costsRepo.insert(analyzerResult.costInsert);
+          runEvents.append({
+            kind: 'cost.recorded',
+            status: analyzerResult.ok ? 'completed' : 'failed',
+            label: '分析成本',
+            summary: analyzerResult.ok ? '分析调用已入账' : analyzerResult.reason,
+            payload: {
+              cost_record_id: costRow.id,
+              model_id: analyzerModel.id,
+              roundtable_id: pendingId,
+              stage: 'analyzer',
+              success: analyzerResult.ok,
+              classification: analyzerResult.ok ? null : analyzerResult.reason,
+            },
+          });
         } catch (e) {
           req.log.warn({ err: e }, 'roundtable.analyzer_cost_insert_failed');
+          runEvents.append({
+            kind: 'cost.failed',
+            status: 'failed',
+            label: '分析成本',
+            summary: e instanceof Error ? e.message : String(e),
+            payload: {
+              model_id: analyzerModel.id,
+              roundtable_id: pendingId,
+              stage: 'analyzer',
+            },
+          });
         }
       }
       if (analyzerResult.ok) {
         analyzerOutput = analyzerResult.output;
+        runEvents.append({
+          kind: 'model.completed',
+          status: 'completed',
+          label: `圆桌分析 · ${analyzerModel.display_name ?? analyzerModel.model_name}`,
+          summary: analyzerOutput.suggested_mode,
+          payload: {
+            model_id: analyzerModel.id,
+            model_name: analyzerModel.model_name,
+            roundtable_id: pendingId,
+            stage: 'analyzer',
+            suggested_mode: analyzerOutput.suggested_mode,
+            participant_count: analyzerOutput.participants.length,
+          },
+        });
       } else {
         analyzerFailed = true;
+        runEvents.append({
+          kind: 'model.failed',
+          status: 'failed',
+          label: `圆桌分析 · ${analyzerModel.display_name ?? analyzerModel.model_name}`,
+          summary: analyzerResult.message ?? analyzerResult.reason,
+          payload: {
+            model_id: analyzerModel.id,
+            model_name: analyzerModel.model_name,
+            roundtable_id: pendingId,
+            stage: 'analyzer',
+            classification: analyzerResult.reason,
+          },
+        });
         req.log.warn(
           { reason: analyzerResult.reason, message: analyzerResult.message },
           'roundtable.analyzer.failed',
@@ -194,6 +377,18 @@ export function registerRoundtableRoute(
       }
     } else {
       analyzerFailed = true;
+      runEvents.append({
+        kind: 'model.failed',
+        status: 'failed',
+        label: '圆桌分析',
+        summary: 'no_analyzer_model_or_provider',
+        payload: {
+          model_id: analyzerModel?.id ?? null,
+          roundtable_id: pendingId,
+          stage: 'analyzer',
+          classification: 'unknown',
+        },
+      });
       req.log.info(
         'roundtable.analyzer.skipped — no analyzer model / provider key',
       );
@@ -305,6 +500,20 @@ export function registerRoundtableRoute(
       estimated_cost_usd_low: estimate.low,
       estimated_cost_usd_high: estimate.high,
     });
+    runEvents.append({
+      kind: 'turn.completed',
+      status: 'completed',
+      label: '圆桌分析完成',
+      summary: `${inserted.participants.length} 位参与者 · ${inserted.mode}`,
+      payload: {
+        roundtable_id: inserted.id,
+        action: 'analyze',
+        analyzer_fallback: inserted.analyzer_fallback,
+        participant_count: inserted.participants.length,
+        summarizer_model_id: inserted.summarizer_model_id,
+        status: inserted.status,
+      },
+    });
 
     return reply.code(201).send({
       id: inserted.id,
@@ -384,7 +593,37 @@ export function registerRoundtableRoute(
       ) {
         return reply.code(200).send({ ok: true, status: rt.status });
       }
+      const runId = makeId('run');
+      const runEvents = makeRoundtableRunEvents({
+        log: req.log,
+        repo: runEventsRepo,
+        runId,
+        conversationId: rt.conversation_id,
+      });
+      runEvents.append({
+        kind: 'turn.started',
+        status: 'started',
+        label: '取消圆桌',
+        summary: rt.topic.slice(0, 160),
+        payload: {
+          run_kind: 'roundtable',
+          roundtable_id: rt.id,
+          action: 'cancel',
+          previous_status: rt.status,
+        },
+      });
       rtRepo.setStatus(rt.id, 'cancelled');
+      runEvents.append({
+        kind: 'turn.cancelled',
+        status: 'cancelled',
+        label: '圆桌已取消',
+        summary: rt.topic.slice(0, 160),
+        payload: {
+          roundtable_id: rt.id,
+          action: 'cancel',
+          previous_status: rt.status,
+        },
+      });
       return reply.code(200).send({ ok: true, status: 'cancelled' });
     },
   );
@@ -654,6 +893,63 @@ export function registerRoundtableRoute(
 
       const priorMessages =
         next === 2 ? rtMsgRepo.listByRoundtable(rt.id) : [];
+      const participantModels = rt.participants
+        .map((participant) => modelsRepo.get(participant.model_id))
+        .filter((model): model is NonNullable<typeof model> => model !== null);
+      const summarizerModel = rt.summarizer_model_id
+        ? modelsRepo.get(rt.summarizer_model_id)
+        : null;
+      const hardBudgetEstimate =
+        estimateRoundtableParticipantRoundCostUsd(participantModels) +
+        (rt.mode === 'fast' && next === 1 && summarizerModel
+          ? estimateRoundtableSummaryCostUsd(summarizerModel)
+          : 0);
+      throwIfBudgetBlockedOrNeedsConfirmation({
+        confirmed: true,
+        conversationId: rt.conversation_id,
+        model: summarizerModel ?? participantModels[0]!,
+        inputText: rt.topic,
+        estimatedCostUsd: hardBudgetEstimate,
+        costsRepo,
+        memoriesRepo,
+        thresholdKey: '__roundtable_hard_budget_threshold_disabled',
+        defaultThresholdUsd: Number.POSITIVE_INFINITY,
+        softBudgetEnabled: false,
+      });
+      const runId = makeId('run');
+      const runEvents = makeRoundtableRunEvents({
+        log: req.log,
+        repo: runEventsRepo,
+        runId,
+        conversationId: rt.conversation_id,
+      });
+      runEvents.append({
+        kind: 'turn.started',
+        status: 'started',
+        label: `圆桌第 ${next} 轮`,
+        summary: rt.topic.slice(0, 160),
+        payload: {
+          run_kind: 'roundtable',
+          roundtable_id: rt.id,
+          action: 'round',
+          round: next,
+        },
+      });
+      runEvents.append({
+        kind: 'context.snapshot',
+        status: 'completed',
+        label: '圆桌轮次上下文',
+        summary: `${rt.participants.length} 位参与者`,
+        payload: {
+          roundtable_id: rt.id,
+          action: 'round',
+          round: next,
+          mode: rt.mode,
+          participant_count: rt.participants.length,
+          prior_round_message_count: priorMessages.length,
+          participant_model_ids: rt.participants.map((p) => p.model_id),
+        },
+      });
 
       const stream = new PassThrough();
       const origin = req.headers.origin;
@@ -707,6 +1003,7 @@ export function registerRoundtableRoute(
             keystore: deps.keystore,
             bus: deps.bus ?? null,
             memoriesRepo,
+            runEvents,
             log: req.log,
           },
           {
@@ -736,25 +1033,26 @@ export function registerRoundtableRoute(
               'auto_chain_skipped_no_content',
             );
           } else {
-          rtRepo.setStatus(rt.id, 'summarizing');
-          await runSummary(
-            {
-              modelsRepo,
-              providersRepo,
-              costsRepo,
-              rtRepo,
-              rtMsgRepo,
-              keystore: deps.keystore,
-              log: req.log,
-            },
-            {
-              roundtable: { ...rt, status: 'summarizing' },
-              messages: allMessages,
-              stream,
-              signal: abortController.signal,
-              revertStatusOnFail: 'round1',
-            },
-          );
+            rtRepo.setStatus(rt.id, 'summarizing');
+            await runSummary(
+              {
+                modelsRepo,
+                providersRepo,
+                costsRepo,
+                rtRepo,
+                rtMsgRepo,
+                keystore: deps.keystore,
+                runEvents,
+                log: req.log,
+              },
+              {
+                roundtable: { ...rt, status: 'summarizing' },
+                messages: allMessages,
+                stream,
+                signal: abortController.signal,
+                revertStatusOnFail: 'round1',
+              },
+            );
           }
         }
 
@@ -762,6 +1060,21 @@ export function registerRoundtableRoute(
         if (majorityFailed) {
           rtRepo.setStatus(rt.id, 'failed');
         }
+        runEvents.append({
+          kind: majorityFailed ? 'turn.failed' : 'turn.completed',
+          status: majorityFailed ? 'failed' : 'completed',
+          label: majorityFailed ? `圆桌第 ${next} 轮失败` : `圆桌第 ${next} 轮完成`,
+          summary: `${result.completed.length} 完成 / ${result.failed.length} 失败`,
+          payload: {
+            roundtable_id: rt.id,
+            action: 'round',
+            round: next,
+            completed_indices: result.completed,
+            failed_indices: result.failed,
+            majority_failed: majorityFailed,
+            auto_summarized: shouldAutoSummarize,
+          },
+        });
 
         stream.write(
           `d:${JSON.stringify({
@@ -771,6 +1084,17 @@ export function registerRoundtableRoute(
         );
       } catch (e) {
         req.log.error({ err: e }, 'roundtable.round.unhandled');
+        runEvents.append({
+          kind: 'turn.failed',
+          status: 'failed',
+          label: `圆桌第 ${next} 轮失败`,
+          summary: e instanceof Error ? e.message : String(e),
+          payload: {
+            roundtable_id: rt.id,
+            action: 'round',
+            round: next,
+          },
+        });
         stream.write(
           `3:${JSON.stringify(
             `roundtable_round_failed: ${e instanceof Error ? e.message : String(e)}`,
@@ -950,6 +1274,42 @@ export function registerRoundtableRoute(
         classification: null,
         error_message: null,
       });
+      const runId = makeId('run');
+      const runEvents = makeRoundtableRunEvents({
+        log: req.log,
+        repo: runEventsRepo,
+        runId,
+        conversationId: rt.conversation_id,
+      });
+      runEvents.append({
+        kind: 'turn.started',
+        status: 'started',
+        label: `圆桌重试 · ${rt.participants[index]!.role_label}`,
+        summary: rt.topic.slice(0, 160),
+        payload: {
+          run_kind: 'roundtable',
+          roundtable_id: rt.id,
+          action: 'participant_retry',
+          round,
+          participant_index: index,
+          roundtable_message_id: existing.id,
+          override_model_id: overrideApplied ? rt.participants[index]!.model_id : null,
+        },
+      });
+      runEvents.append({
+        kind: 'context.snapshot',
+        status: 'completed',
+        label: '圆桌重试上下文',
+        summary: rt.participants[index]!.role_label,
+        payload: {
+          roundtable_id: rt.id,
+          action: 'participant_retry',
+          round,
+          participant_index: index,
+          participant_model_id: rt.participants[index]!.model_id,
+          override_applied: overrideApplied,
+        },
+      });
 
       const stream = new PassThrough();
       const origin = req.headers.origin;
@@ -1012,6 +1372,7 @@ export function registerRoundtableRoute(
             keystore: deps.keystore,
             bus: deps.bus ?? null,
             memoriesRepo,
+            runEvents,
             log: req.log,
           },
           {
@@ -1023,10 +1384,36 @@ export function registerRoundtableRoute(
             targetIndices: [index],
           },
         );
+        runEvents.append({
+          kind: 'turn.completed',
+          status: 'completed',
+          label: `圆桌重试完成 · ${rt.participants[index]!.role_label}`,
+          summary: rt.topic.slice(0, 160),
+          payload: {
+            roundtable_id: rt.id,
+            action: 'participant_retry',
+            round,
+            participant_index: index,
+            roundtable_message_id: existing.id,
+          },
+        });
         stream.write(
           `d:${JSON.stringify({ finishReason: 'stop', usage: { promptTokens: 0, completionTokens: 0 } })}\n`,
         );
       } catch (e) {
+        runEvents.append({
+          kind: 'turn.failed',
+          status: 'failed',
+          label: `圆桌重试失败 · ${rt.participants[index]!.role_label}`,
+          summary: e instanceof Error ? e.message : String(e),
+          payload: {
+            roundtable_id: rt.id,
+            action: 'participant_retry',
+            round,
+            participant_index: index,
+            roundtable_message_id: existing.id,
+          },
+        });
         stream.write(
           `3:${JSON.stringify(
             `roundtable_retry_failed: ${e instanceof Error ? e.message : String(e)}`,
@@ -1144,9 +1531,66 @@ export function registerRoundtableRoute(
         }
         summaryRt = rtRepo.setSummarizerModel(rt.id, m.id) ?? rt;
       }
+      const summaryModel = summaryRt.summarizer_model_id
+        ? modelsRepo.get(summaryRt.summarizer_model_id)
+        : null;
+      if (!summaryModel) {
+        throw new TaoriError({
+          code: 'validation_error',
+          message: `总结模型不存在：${summaryRt.summarizer_model_id}`,
+        });
+      }
+      throwIfBudgetBlockedOrNeedsConfirmation({
+        confirmed: true,
+        conversationId: rt.conversation_id,
+        model: summaryModel,
+        inputText: rt.topic,
+        estimatedCostUsd: estimateRoundtableSummaryCostUsd(summaryModel),
+        costsRepo,
+        memoriesRepo,
+        thresholdKey: '__roundtable_hard_budget_threshold_disabled',
+        defaultThresholdUsd: Number.POSITIVE_INFINITY,
+        softBudgetEnabled: false,
+      });
 
       const revertStatus = rt.status; // 'round1' | 'round2'
       rtRepo.setStatus(rt.id, 'summarizing');
+      const runId = makeId('run');
+      const runEvents = makeRoundtableRunEvents({
+        log: req.log,
+        repo: runEventsRepo,
+        runId,
+        conversationId: rt.conversation_id,
+      });
+      runEvents.append({
+        kind: 'turn.started',
+        status: 'started',
+        label: '圆桌总结',
+        summary: rt.topic.slice(0, 160),
+        payload: {
+          run_kind: 'roundtable',
+          roundtable_id: rt.id,
+          action: 'summarize',
+          round: rt.current_round,
+          source_message_count: messages.length,
+          override_model_id: overrideModelId ?? null,
+        },
+      });
+      runEvents.append({
+        kind: 'context.snapshot',
+        status: 'completed',
+        label: '圆桌总结上下文',
+        summary: `${messages.length} 条发言`,
+        payload: {
+          roundtable_id: rt.id,
+          action: 'summarize',
+          round: rt.current_round,
+          mode: rt.mode,
+          source_message_count: messages.length,
+          completed_message_count: messages.filter((m) => m.status === 'complete').length,
+          summarizer_model_id: summaryRt.summarizer_model_id,
+        },
+      });
 
       const stream = new PassThrough();
       const origin = req.headers.origin;
@@ -1196,6 +1640,7 @@ export function registerRoundtableRoute(
             rtRepo,
             rtMsgRepo,
             keystore: deps.keystore,
+            runEvents,
             log: req.log,
           },
           {
@@ -1206,6 +1651,18 @@ export function registerRoundtableRoute(
             revertStatusOnFail: revertStatus as 'round1' | 'round2',
           },
         );
+        runEvents.append({
+          kind: result.ok ? 'turn.completed' : 'turn.failed',
+          status: result.ok ? 'completed' : 'failed',
+          label: result.ok ? '圆桌总结完成' : '圆桌总结失败',
+          summary: result.ok ? rt.topic.slice(0, 160) : result.classification ?? 'summary_failed',
+          payload: {
+            roundtable_id: rt.id,
+            action: 'summarize',
+            round: rt.current_round,
+            classification: result.classification ?? null,
+          },
+        });
         stream.write(
           `d:${JSON.stringify({
             finishReason: result.ok ? 'stop' : 'error',
@@ -1214,6 +1671,17 @@ export function registerRoundtableRoute(
         );
       } catch (e) {
         req.log.error({ err: e }, 'roundtable.summarize.unhandled');
+        runEvents.append({
+          kind: 'turn.failed',
+          status: 'failed',
+          label: '圆桌总结失败',
+          summary: e instanceof Error ? e.message : String(e),
+          payload: {
+            roundtable_id: rt.id,
+            action: 'summarize',
+            round: rt.current_round,
+          },
+        });
         // Make sure we don't leave the row stuck in 'summarizing'.
         const fresh = rtRepo.get(rt.id);
         if (fresh?.status === 'summarizing') {

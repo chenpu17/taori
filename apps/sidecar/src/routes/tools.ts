@@ -16,7 +16,7 @@ import { z } from 'zod';
 import { ToolInvokeRequestSchema } from '@taori/shared';
 import type { CapabilityBus } from '../bus/index.js';
 import type { TestForceImageResult } from '../bus/builtins/image_generate.js';
-import { MemoriesRepo } from '../db/repos/index.js';
+import { CostsRepo, MemoriesRepo } from '../db/repos/index.js';
 
 const TEST_HOOKS_ENABLED =
   process.env.NODE_ENV !== 'production' &&
@@ -36,11 +36,30 @@ const SessionToolBody = z.object({
 export interface ToolsRouteDeps {
   bus: CapabilityBus;
   memories: MemoriesRepo;
+  costs: CostsRepo;
 }
 
 export function registerToolsRoute(app: FastifyInstance, deps: ToolsRouteDeps): void {
   app.get('/v1/tools', async () => {
     return { ok: true, data: deps.bus.list() };
+  });
+
+  app.get('/v1/tools/health', async () => {
+    const tools = deps.bus.list();
+    const health = deps.costs.toolHealth24h(tools.map((toolItem) => toolItem.name));
+    return {
+      ok: true,
+      rows: tools.map((toolItem) => (
+        health.get(toolItem.name) ?? {
+          tool_name: toolItem.name,
+          calls_24h: 0,
+          failures_24h: 0,
+          avg_duration_ms: null,
+          last_failure_at: null,
+          last_failure_classification: null,
+        }
+      )),
+    };
   });
 
   app.get('/v1/tools/effective', async (req, reply) => {

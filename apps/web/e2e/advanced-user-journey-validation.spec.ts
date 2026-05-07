@@ -251,7 +251,7 @@ test('first setup recovers from a user mistake and reaches first successful chat
   await expect(page.getByTestId('preflight-image')).toHaveAttribute('data-state', 'ready');
 
   await sendAndWait(page, '第一次配置完成后，帮我确认当前系统可以正常对话');
-  await expect(page.getByTestId('context-snapshot-card').last()).toContainText('3 个工具可见');
+  await expect(page.getByTestId('context-snapshot-card').last()).toContainText('4 个工具可见');
 
   const timeline = await openTimeline(page);
   await expect(timeline.getByTestId('run-event').filter({ hasText: '上下文快照' })).toBeVisible();
@@ -330,7 +330,7 @@ test('two windows keep session tool policy isolated while another conversation c
 
   const timelineA = await openTimeline(page2);
   const topA = timelineA.getByTestId('run-group').first();
-  await expect(topA.getByTestId('run-event').filter({ hasText: '2 个工具可见' })).toBeVisible();
+  await expect(topA.getByTestId('run-event').filter({ hasText: '3 个工具可见' })).toBeVisible();
   await timelineA.getByTestId('run-timeline-close').click();
 
   await page.getByTestId('sidebar-new').click();
@@ -344,7 +344,7 @@ test('two windows keep session tool policy isolated while another conversation c
     timeout: 20_000,
   });
   const timelineB = await openTimeline(page);
-  await expect(timelineB.getByTestId('run-event').filter({ hasText: '3 个工具可见' }).first()).toBeVisible();
+  await expect(timelineB.getByTestId('run-event').filter({ hasText: '4 个工具可见' }).first()).toBeVisible();
   await expect(timelineB.getByTestId('run-event').filter({ hasText: '抓取网页' }).first()).toBeVisible();
   await expectNoHorizontalOverflow(timelineB);
 

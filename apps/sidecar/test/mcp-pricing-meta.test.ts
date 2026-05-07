@@ -103,6 +103,81 @@ describe('MCP stdio + pricing_meta', () => {
     const invokeBody = invokeRes.json() as { data: { ok: boolean; output: unknown } };
     expect(invokeBody.data.ok).toBe(true);
     expect(JSON.stringify(invokeBody.data.output)).toContain('hello mcp');
+
+    const invalidInvokeRes = await app.inject({
+      method: 'POST',
+      url: '/v1/tools/invoke',
+      headers: authHeaders({ 'content-type': 'application/json' }),
+      payload: JSON.stringify({
+        name: toolName,
+        input: { text: 42 },
+        conversation_id: null,
+      }),
+    });
+    expect(invalidInvokeRes.statusCode).toBe(200);
+    const invalidBody = invalidInvokeRes.json() as {
+      data: { ok: boolean; error: { classification: string; message: string } };
+    };
+    expect(invalidBody.data.ok).toBe(false);
+    expect(invalidBody.data.error.classification).toBe('validation_error');
+
+    const healthRes = await app.inject({
+      method: 'GET',
+      url: '/v1/tools/health',
+      headers: authHeaders(),
+    });
+    expect(healthRes.statusCode).toBe(200);
+    const healthBody = healthRes.json() as {
+      rows: Array<{
+        tool_name: string;
+        calls_24h: number;
+        failures_24h: number;
+        last_failure_classification: string | null;
+      }>;
+    };
+    const row = healthBody.rows.find((item) => item.tool_name === toolName);
+    expect(row?.calls_24h).toBe(2);
+    expect(row?.failures_24h).toBe(1);
+    expect(row?.last_failure_classification).toBe('validation_error');
+  });
+
+  it('classifies MCP server crashes during tool calls', async () => {
+    const scriptPath = path.join(tmpDir, 'crashing-mcp-server.mjs');
+    fs.writeFileSync(scriptPath, crashingMcpServerSource());
+
+    const createRes = await app.inject({
+      method: 'POST',
+      url: '/v1/mcp/servers',
+      headers: authHeaders({ 'content-type': 'application/json' }),
+      payload: JSON.stringify({
+        name: 'Crashing MCP',
+        command: process.execPath,
+        args: [scriptPath],
+      }),
+    });
+    const created = createRes.json() as { server: { id: string } };
+    const refreshRes = await app.inject({
+      method: 'POST',
+      url: `/v1/mcp/servers/${created.server.id}/refresh`,
+      headers: authHeaders(),
+    });
+    const toolName = (refreshRes.json() as { tools: Array<{ name: string }> }).tools[0]!.name;
+
+    const invokeRes = await app.inject({
+      method: 'POST',
+      url: '/v1/tools/invoke',
+      headers: authHeaders({ 'content-type': 'application/json' }),
+      payload: JSON.stringify({
+        name: toolName,
+        input: {},
+        conversation_id: null,
+      }),
+    });
+    const body = invokeRes.json() as {
+      data: { ok: boolean; error: { classification: string; message: string } };
+    };
+    expect(body.data.ok).toBe(false);
+    expect(body.data.error.classification).toBe('mcp_crashed');
   });
 
   it('persists pricing_meta through model create and update', async () => {
@@ -167,9 +242,60 @@ function handle(message) {
   if (message.method === 'initialize') {
     send(message.id, { protocolVersion: '2024-11-05', capabilities: { tools: {} }, serverInfo: { name: 'mock', version: '1' } });
   } else if (message.method === 'tools/list') {
-    send(message.id, { tools: [{ name: 'echo', description: 'Echo text', inputSchema: { type: 'object' } }] });
+    send(message.id, {
+      tools: [
+        {
+          name: 'echo',
+          description: 'Echo text',
+          inputSchema: {
+            type: 'object',
+            properties: { text: { type: 'string', minLength: 1 } },
+            required: ['text'],
+            additionalProperties: false
+          }
+        }
+      ]
+    });
   } else if (message.method === 'tools/call') {
     send(message.id, { content: [{ type: 'text', text: 'echo:' + (message.params?.arguments?.text ?? '') }] });
+  }
+}
+process.stdin.on('data', (chunk) => {
+  buffer = Buffer.concat([buffer, chunk]);
+  while (true) {
+    const sep = buffer.indexOf('\\r\\n\\r\\n');
+    if (sep < 0) return;
+    const header = buffer.slice(0, sep).toString('utf8');
+    const match = /content-length:\\s*(\\d+)/i.exec(header);
+    if (!match) return;
+    const len = Number(match[1]);
+    const start = sep + 4;
+    const end = start + len;
+    if (buffer.byteLength < end) return;
+    const payload = buffer.slice(start, end).toString('utf8');
+    buffer = buffer.slice(end);
+    handle(JSON.parse(payload));
+  }
+});
+`;
+}
+
+function crashingMcpServerSource(): string {
+  return `
+let buffer = Buffer.alloc(0);
+function send(id, result) {
+  const payload = Buffer.from(JSON.stringify({ jsonrpc: '2.0', id, result }), 'utf8');
+  process.stdout.write('Content-Length: ' + payload.byteLength + '\\r\\n\\r\\n');
+  process.stdout.write(payload);
+}
+function handle(message) {
+  if (!message.id) return;
+  if (message.method === 'initialize') {
+    send(message.id, { protocolVersion: '2024-11-05', capabilities: { tools: {} }, serverInfo: { name: 'crash', version: '1' } });
+  } else if (message.method === 'tools/list') {
+    send(message.id, { tools: [{ name: 'crash', description: 'Crash now', inputSchema: { type: 'object' } }] });
+  } else if (message.method === 'tools/call') {
+    process.exit(42);
   }
 }
 process.stdin.on('data', (chunk) => {

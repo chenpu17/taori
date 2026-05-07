@@ -15,6 +15,8 @@ import type {
   ProviderTestResponse,
   Model,
   ModelHealthRow,
+  ModelRecommendationRequest,
+  ModelRecommendationResponse,
   ModelCreate,
   ModelUpdate,
   ModelDiscoveryResponse,
@@ -29,17 +31,36 @@ import type {
   Persona,
   PersonaCreate,
   PersonaUpdate,
+  WorkflowRecipe,
+  WorkflowRecipeCreate,
+  WorkflowRecipeUpdate,
+  WorkflowRecipeImport,
+  WorkflowRecipeApplyPreviewRequest,
+  WorkflowRecipeApplyPreview,
   BackupConflictStrategy,
   BackupExportResponse,
   BackupImportResponse,
   BackupPackage,
   Tool,
+  ToolHealthRow,
   EffectiveTool,
   ConversationProfile,
+  AgentRun,
   RunEvent,
+  RunResumeStateResponse,
+  ContinueRunRequest,
+  ConversationExportIncludeTimeline,
+  CostConfirmationRequiredDetails,
+  RecoverRunRequest,
   McpServer,
   McpServerCreate,
   McpServerUpdate,
+  FileSearchRequest,
+  FileSearchResponse,
+  QuickCompareRequest,
+  QuickCompareAnnotation,
+  QuickCompareAdoptResponse,
+  QuickCompareDetailResponse,
 } from '@taori/shared';
 
 async function json<T>(res: Response): Promise<T> {
@@ -65,12 +86,124 @@ async function json<T>(res: Response): Promise<T> {
   return (await res.json()) as T;
 }
 
+export class ApiError extends Error {
+  readonly code?: string;
+  readonly details?: unknown;
+
+  constructor(message: string, code?: string, details?: unknown) {
+    super(message);
+    this.name = 'ApiError';
+    this.code = code;
+    this.details = details;
+  }
+}
+
+export interface StructuredMemory {
+  id: string;
+  scope: 'global' | 'session' | 'user';
+  scope_id: string | null;
+  type: 'preference' | 'project_fact' | 'profile' | 'other';
+  content: string;
+  source_conversation_id: string | null;
+  source_message_id: string | null;
+  enabled: boolean;
+  deleted_at: number | null;
+  last_used_at: number | null;
+  created_at: number;
+  updated_at: number;
+}
+
+async function streamOrThrow(res: Response): Promise<string> {
+  if (!res.ok) {
+    let body: unknown = null;
+    try { body = await res.json(); } catch { /* ignore */ }
+    const message =
+      body && typeof body === 'object' && 'message' in body
+        ? String((body as { message?: unknown }).message)
+        : `${res.status} ${res.statusText}`;
+    const code =
+      body && typeof body === 'object' && 'code' in body
+        ? String((body as { code?: unknown }).code)
+        : undefined;
+    const details =
+      body && typeof body === 'object' && 'details' in body
+        ? (body as { details?: unknown }).details
+        : undefined;
+    throw new ApiError(message, code, details);
+  }
+  return res.text();
+}
+
+async function quickCompareStreamOrThrow(
+  res: Response,
+  onAnnotation?: (annotation: QuickCompareAnnotation) => void,
+): Promise<{ text: string; annotations: QuickCompareAnnotation[] }> {
+  if (!res.ok || !res.body) {
+    const text = await streamOrThrow(res);
+    return { text, annotations: [] };
+  }
+
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  const annotations: QuickCompareAnnotation[] = [];
+  let text = '';
+  let pending = '';
+
+  const parseLine = (line: string): void => {
+    if (!line.startsWith('8:')) return;
+    try {
+      const parsed = JSON.parse(line.slice(2)) as unknown;
+      if (!Array.isArray(parsed)) return;
+      for (const item of parsed) {
+        const annotation = item as QuickCompareAnnotation;
+        annotations.push(annotation);
+        onAnnotation?.(annotation);
+      }
+    } catch {
+      /* ignore malformed stream line */
+    }
+  };
+
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    const chunk = decoder.decode(value, { stream: true });
+    text += chunk;
+    pending += chunk;
+    const lines = pending.split(/\r?\n/);
+    pending = lines.pop() ?? '';
+    for (const line of lines) parseLine(line);
+  }
+  const tail = decoder.decode();
+  if (tail) {
+    text += tail;
+    pending += tail;
+  }
+  if (pending.length > 0) parseLine(pending);
+  return { text, annotations };
+}
+
+export function isCostConfirmationRequiredError(error: unknown): error is ApiError & {
+  details: CostConfirmationRequiredDetails;
+} {
+  if (!(error instanceof ApiError)) return false;
+  if (error.code !== 'cost_confirmation_required') return false;
+  const details = error.details;
+  if (!details || typeof details !== 'object') return false;
+  const raw = details as Partial<CostConfirmationRequiredDetails>;
+  return (
+    (raw.reason === 'threshold' || raw.reason === 'budget') &&
+    typeof raw.estimate_usd === 'number' &&
+    typeof raw.model_id === 'string'
+  );
+}
+
 export const api = {
   health: () => authedFetch('/health').then((r) => json<{ ok: boolean; control_channel: string }>(r)),
 
   // B3 — selfcheck endpoint used by HelpCenter to verify local plumbing.
-  selfCheck: () =>
-    authedFetch('/v1/selfcheck').then((r) =>
+  selfCheck: (options?: { includeKeychain?: boolean }) =>
+    authedFetch(`/v1/selfcheck${options?.includeKeychain ? '?include_keychain=1' : ''}`).then((r) =>
       json<{
         ok: boolean;
         overall: 'ok' | 'warn' | 'error';
@@ -83,12 +216,37 @@ export const api = {
       }>(r),
     ),
 
+  realProviderDiagnostics: () =>
+    authedFetch('/v1/diagnostics/real-provider/latest').then((r) =>
+      json<{
+        ok: boolean;
+        available: boolean;
+        message?: string;
+        artifact_dir?: string;
+        run_id?: string;
+        collected_at?: string | null;
+        summary?: {
+          passed_steps: number;
+          failed_steps: number;
+          risk_count: number;
+          run_count: number | null;
+          run_event_count: number | null;
+          cost_call_count: number | null;
+          latest_run_status: string | null;
+        };
+        selected?: Record<string, { label?: string; id?: string; capability?: string; supports_tools?: boolean; supports_vision?: boolean }>;
+        required_steps?: Array<{ name: string; ok: boolean }>;
+        risks?: Array<{ code: string; message: string }>;
+        final_screenshot?: string | null;
+      }>(r),
+    ),
+
   listProviders: () =>
     authedFetch('/v1/providers').then((r) =>
       json<{ providers: Provider[] }>(r),
     ),
-  providerKeyStatus: () =>
-    authedFetch('/v1/providers/key-status').then((r) =>
+  providerKeyStatus: (options?: { confirmKeychain?: boolean }) =>
+    authedFetch(`/v1/providers/key-status${options?.confirmKeychain ? '?confirm_keychain=1' : ''}`).then((r) =>
       json<{ statuses: { provider_id: string; key_available: boolean }[] }>(r),
     ),
   testProvider: (input: ProviderTestRequest) =>
@@ -124,6 +282,12 @@ export const api = {
     authedFetch('/v1/models/health').then((r) =>
       json<{ rows: ModelHealthRow[] }>(r),
     ),
+  modelRecommendations: (input: ModelRecommendationRequest) =>
+    authedFetch('/v1/models/recommendations', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(input),
+    }).then((r) => json<ModelRecommendationResponse>(r)),
   createModel: (input: ModelCreate) =>
     authedFetch('/v1/models', {
       method: 'POST',
@@ -230,8 +394,10 @@ export const api = {
     );
   },
 
-  costsCallLogs: (limit = 50) =>
-    authedFetch(`/v1/costs/calls?limit=${encodeURIComponent(String(limit))}`).then((r) =>
+  costsCallLogs: (limit = 50, options?: { costRecordId?: string | null }) => {
+    const params = new URLSearchParams({ limit: String(limit) });
+    if (options?.costRecordId) params.set('cost_record_id', options.costRecordId);
+    return authedFetch(`/v1/costs/calls?${params.toString()}`).then((r) =>
       json<{
         ok: boolean;
         data: {
@@ -255,10 +421,15 @@ export const api = {
             classification: string | null;
             first_token_ms: number | null;
             duration_ms: number | null;
+            run_id: string | null;
+            run_event_id: string | null;
+            run_event_kind: string | null;
+            run_event_label: string | null;
           }>;
         };
       }>(r),
-    ),
+    );
+  },
 
   listConversations: (q?: string) => {
     const qs = q && q.trim().length > 0 ? `?q=${encodeURIComponent(q.trim())}` : '';
@@ -305,10 +476,66 @@ export const api = {
     ).then((r) =>
       json<{ ok: boolean; data: { conversation_id: string; events: RunEvent[] } }>(r),
     ),
+  getConversationRuns: (id: string, limit = 20) =>
+    authedFetch(
+      `/v1/conversations/${id}/runs?limit=${encodeURIComponent(String(limit))}`,
+    ).then((r) =>
+      json<{ ok: boolean; data: { conversation_id: string; runs: AgentRun[] } }>(r),
+    ),
+  exportConversationMarkdown: async (
+    id: string,
+    opts: { includeTimeline?: ConversationExportIncludeTimeline } = {},
+  ) => {
+    const includeTimeline = opts.includeTimeline ?? 'summary';
+    const res = await authedFetch(
+      `/v1/conversations/${id}/export?format=markdown&include_timeline=${encodeURIComponent(includeTimeline)}`,
+    );
+    if (!res.ok) {
+      let body: unknown = null;
+      try { body = await res.json(); } catch { /* ignore */ }
+      const message =
+        body && typeof body === 'object' && 'message' in body
+          ? String((body as { message?: unknown }).message)
+          : `${res.status} ${res.statusText}`;
+      throw new Error(message);
+    }
+    const disposition = res.headers.get('content-disposition') ?? '';
+    const filenameMatch = /filename="([^"]+)"/i.exec(disposition);
+    return {
+      blob: await res.blob(),
+      filename: filenameMatch?.[1] ?? `taori-chat-${id}.md`,
+    };
+  },
+  getRunResumeState: (runId: string) =>
+    authedFetch(`/v1/runs/${encodeURIComponent(runId)}/resume-state`).then((r) =>
+      json<RunResumeStateResponse>(r),
+    ),
+  continueRun: (runId: string, body?: ContinueRunRequest) =>
+    authedFetch(`/v1/runs/${encodeURIComponent(runId)}/continue`, {
+      method: 'POST',
+      ...(body
+        ? {
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify(body),
+          }
+        : {}),
+    }).then(streamOrThrow),
+  recoverRun: (runId: string, body: RecoverRunRequest) =>
+    authedFetch(`/v1/runs/${encodeURIComponent(runId)}/recover`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(body),
+    }).then(streamOrThrow),
   getFileData: (fileId: string) =>
     authedFetch(`/v1/files/${fileId}/data`).then((r) =>
       json<{ ok: boolean; file_id: string; content_type: string; data_b64: string; size_bytes: number }>(r),
     ),
+  searchFiles: (input: FileSearchRequest) =>
+    authedFetch('/v1/files/search', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(input),
+    }).then((r) => json<FileSearchResponse>(r)),
   renameConversation: (id: string, title: string | null) =>
     authedFetch(`/v1/conversations/${id}`, {
       method: 'PATCH',
@@ -435,6 +662,25 @@ export const api = {
       method: 'DELETE',
     }).then((r) => json<{ ok: boolean }>(r));
   },
+  listStructuredMemories: (opts: { includeDisabled?: boolean; limit?: number } = {}) => {
+    const qs = new URLSearchParams();
+    if (opts.includeDisabled) qs.set('include_disabled', 'true');
+    if (opts.limit) qs.set('limit', String(opts.limit));
+    const suffix = qs.toString() ? `?${qs.toString()}` : '';
+    return authedFetch(`/v1/structured-memories${suffix}`).then((r) =>
+      json<{ ok: boolean; data: { memories: StructuredMemory[] } }>(r),
+    );
+  },
+  setStructuredMemoryEnabled: (id: string, enabled: boolean) =>
+    authedFetch(`/v1/structured-memories/${encodeURIComponent(id)}`, {
+      method: 'PATCH',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ enabled }),
+    }).then((r) => json<{ ok: boolean; data: StructuredMemory }>(r)),
+  deleteStructuredMemory: (id: string) =>
+    authedFetch(`/v1/structured-memories/${encodeURIComponent(id)}`, {
+      method: 'DELETE',
+    }).then((r) => json<{ ok: boolean }>(r)),
   listPromptTemplates: () =>
     authedFetch('/v1/prompt-templates').then((r) =>
       json<{ prompt_templates: PromptTemplate[] }>(r),
@@ -475,6 +721,38 @@ export const api = {
     authedFetch(`/v1/personas/${id}`, { method: 'DELETE' }).then((r) =>
       json<void>(r),
     ),
+  listWorkflowRecipes: () =>
+    authedFetch('/v1/workflow-recipes').then((r) =>
+      json<{ workflow_recipes: WorkflowRecipe[] }>(r),
+    ),
+  createWorkflowRecipe: (input: WorkflowRecipeCreate) =>
+    authedFetch('/v1/workflow-recipes', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(input),
+    }).then((r) => json<WorkflowRecipe>(r)),
+  updateWorkflowRecipe: (id: string, patch: WorkflowRecipeUpdate) =>
+    authedFetch(`/v1/workflow-recipes/${id}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(patch),
+    }).then((r) => json<WorkflowRecipe>(r)),
+  deleteWorkflowRecipe: (id: string) =>
+    authedFetch(`/v1/workflow-recipes/${id}`, { method: 'DELETE' }).then((r) =>
+      json<void>(r),
+    ),
+  importWorkflowRecipe: (input: WorkflowRecipeImport) =>
+    authedFetch('/v1/workflow-recipes/import', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(input),
+    }).then((r) => json<WorkflowRecipe>(r)),
+  applyWorkflowRecipePreview: (id: string, input: WorkflowRecipeApplyPreviewRequest) =>
+    authedFetch(`/v1/workflow-recipes/${id}/apply-preview`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(input),
+    }).then((r) => json<WorkflowRecipeApplyPreview>(r)),
   clearAllData: () =>
     authedFetch('/v1/admin/clear-all-data', { method: 'POST' }).then((r) =>
       json<{
@@ -501,6 +779,10 @@ export const api = {
     authedFetch('/v1/tools').then((r) =>
       json<{ ok: boolean; data: Tool[] }>(r),
     ),
+  toolsHealth: () =>
+    authedFetch('/v1/tools/health').then((r) =>
+      json<{ ok: boolean; rows: ToolHealthRow[] }>(r),
+    ),
   listEffectiveTools: (conversationId?: string | null) => {
     const qs = conversationId
       ? `?conversation_id=${encodeURIComponent(conversationId)}`
@@ -525,6 +807,25 @@ export const api = {
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ conversation_id: conversationId, enabled }),
     }).then((r) => json<{ ok: boolean; data: EffectiveTool }>(r)),
+  quickCompare: (
+    input: QuickCompareRequest,
+    options?: { onAnnotation?: (annotation: QuickCompareAnnotation) => void },
+  ) =>
+    authedFetch('/v1/quick-compare', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(input),
+    }).then((r) => quickCompareStreamOrThrow(r, options?.onAnnotation)),
+  getQuickCompare: (id: string) =>
+    authedFetch(`/v1/quick-compare/${encodeURIComponent(id)}`).then((r) =>
+      json<QuickCompareDetailResponse>(r),
+    ),
+  adoptQuickCompareOutput: (compareId: string, outputId: string) =>
+    authedFetch(`/v1/quick-compare/${encodeURIComponent(compareId)}/outputs/${encodeURIComponent(outputId)}/adopt`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({}),
+    }).then((r) => json<QuickCompareAdoptResponse>(r)),
   listMcpServers: () =>
     authedFetch('/v1/mcp/servers').then((r) =>
       json<{ ok: boolean; servers: McpServer[] }>(r),

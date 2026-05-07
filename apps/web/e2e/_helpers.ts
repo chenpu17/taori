@@ -92,6 +92,7 @@ export async function resetSidecar(env: SidecarEnv): Promise<void> {
     'cost_confirm_disabled_models',
     'cost_confirm_disabled_conversations',
     'active_chat_model_id',
+    'image_model_default',
   ];
   for (const key of globalMemoryKeys) {
     await authedFetch(

@@ -37,6 +37,7 @@ import {
   memories,
   prompt_templates,
   personas,
+  workflow_recipes,
   cost_records,
   mcp_servers,
   roundtables,
@@ -294,11 +295,13 @@ async function wipeAllData(deps: BuildServerArgs): Promise<{
   deps.db.delete(roundtables).where(sql`1=1`).run();
   deps.db.delete(cost_records).where(sql`1=1`).run();
   deps.db.delete(mcp_servers).where(sql`1=1`).run();
+  deps.db.run(sql`DELETE FROM file_chunk_fts`);
   deps.db.delete(files).where(sql`1=1`).run();
   deps.db.delete(messages).where(sql`1=1`).run();
   deps.db.delete(memories).where(sql`1=1`).run();
   deps.db.delete(prompt_templates).where(sql`1=1`).run();
   deps.db.delete(personas).where(sql`1=1`).run();
+  deps.db.delete(workflow_recipes).where(sql`1=1`).run();
   deps.db.delete(conversations).where(sql`1=1`).run();
   deps.db.delete(models).where(sql`1=1`).run();
   deps.db.delete(providers).where(sql`1=1`).run();

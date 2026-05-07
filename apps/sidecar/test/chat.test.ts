@@ -3,7 +3,7 @@ import { buildServer } from '../src/server.js';
 import { openDb } from '../src/db/index.js';
 import { ControlClient } from '../src/control/client.js';
 import { MemoryStore } from '../src/keystore.js';
-import { ConversationsRepo, MessagesRepo, ProvidersRepo, ModelsRepo, RunEventsRepo } from '../src/db/repos/index.js';
+import { ConversationsRepo, FilesRepo, MessagesRepo, ProvidersRepo, ModelsRepo, RunEventsRepo } from '../src/db/repos/index.js';
 import type { FastifyInstance } from 'fastify';
 import os from 'node:os';
 import path from 'node:path';
@@ -102,6 +102,67 @@ describe('chat M1.2', () => {
     expect(routeRes.statusCode).toBe(200);
     const body = JSON.parse(routeRes.payload) as { data: { events: Array<{ kind: string }> } };
     expect(body.data.events.some((e) => e.kind === 'turn.completed')).toBe(true);
+
+    const runsRes = await app.inject({
+      method: 'GET',
+      url: `/v1/conversations/${meta.conversation_id}/runs`,
+      headers: { authorization: `Bearer ${bearer}` },
+    });
+    expect(runsRes.statusCode).toBe(200);
+    const runsBody = JSON.parse(runsRes.payload) as {
+      data: {
+        runs: Array<{
+          id: string;
+          status: string;
+          kind: string;
+          assistant_message_id: string | null;
+          event_count: number;
+        }>;
+      };
+    };
+    expect(runsBody.data.runs).toHaveLength(1);
+    expect(runsBody.data.runs[0]).toMatchObject({
+      status: 'completed',
+      kind: 'chat',
+      assistant_message_id: meta.message_id,
+    });
+    expect(runsBody.data.runs[0]!.event_count).toBeGreaterThanOrEqual(6);
+  });
+
+  it('injects matching file chunks and records context.file_chunks event', async () => {
+    const conv = new ConversationsRepo(db).create({ title: 'rag chat' });
+    new FilesRepo(db).insert({
+      conversation_id: conv.id,
+      message_id: null,
+      original_path: 'notes.md',
+      mime_type: 'text/markdown',
+      size_bytes: 100,
+      extracted_text: 'Local RAG uses sqlite bm25 chunks so long files do not flood the prompt.',
+    });
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/v1/chat',
+      headers: { authorization: `Bearer ${bearer}`, 'content-type': 'application/json' },
+      payload: {
+        conversation_id: conv.id,
+        model_id: 'mdl_unknown',
+        messages: [{ role: 'user', content: 'How does sqlite bm25 help local RAG?' }],
+      },
+    });
+
+    expect(res.statusCode).toBe(200);
+    const events = new RunEventsRepo(db).listByConversation(conv.id);
+    const fileEvent = events.find((event) => event.kind === 'context.file_chunks');
+    expect(fileEvent).toBeTruthy();
+    expect(fileEvent?.payload?.chunks).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ file_id: expect.stringMatching(/^file_/) }),
+      ]),
+    );
+    const contextEvent = events.find((event) => event.kind === 'context.snapshot');
+    const sources = contextEvent?.payload?.context_sources as Array<{ type: string; active: boolean }> | undefined;
+    expect(sources?.some((source) => source.type === 'file_chunk' && source.active)).toBe(true);
   });
 
   it('reuses existing conversation_id on follow-up turn', async () => {
@@ -185,6 +246,159 @@ describe('chat M1.2', () => {
     expect(asst.content).toBe('Hello world');
     expect(asst.status).toBe('complete');
     expect(asst.model_id).toBe(model.id);
+  });
+
+  it('upstream-path: records context_window before streaming to the provider', async () => {
+    const provRepo = new ProvidersRepo(db);
+    const modRepo = new ModelsRepo(db);
+    const provider = provRepo.create({
+      name: 'OpenRouter',
+      type: 'openrouter',
+      base_url: 'https://openrouter.example.com/api/v1',
+      api_key: 'sk-test-context-window',
+    });
+    await keystore.write(provider.api_key_ref!, 'sk-test-context-window');
+    const model = modRepo.create({
+      provider_id: provider.id,
+      model_name: 'tiny-real-path',
+      capability: 'chat',
+      display_name: 'Tiny Real Path',
+      context_length: 900,
+    });
+
+    const sseBody =
+      `data: ${JSON.stringify({ id: '1', object: 'chat.completion.chunk', created: 1, model: 'm', choices: [{ index: 0, delta: { role: 'assistant', content: 'OK' }, finish_reason: null }] })}\n\n` +
+      `data: ${JSON.stringify({ id: '1', object: 'chat.completion.chunk', created: 1, model: 'm', choices: [{ index: 0, delta: {}, finish_reason: 'stop' }], usage: { prompt_tokens: 5, completion_tokens: 1, total_tokens: 6 } })}\n\n` +
+      `data: [DONE]\n\n`;
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async () => (
+      new Response(sseBody, {
+        status: 200,
+        headers: { 'content-type': 'text/event-stream' },
+      })
+    ));
+
+    const payloadMessages = Array.from({ length: 12 }, (_, index) => ({
+      role: (index % 2 === 0 ? 'user' : 'assistant') as 'user' | 'assistant',
+      content: `history-${index} ${'长上下文'.repeat(80)}`,
+    }));
+    payloadMessages.push({
+      role: 'user' as const,
+      content: '请只回答 OK',
+    });
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/v1/chat',
+      headers: { authorization: `Bearer ${bearer}`, 'content-type': 'application/json' },
+      payload: { model_id: model.id, messages: payloadMessages },
+    });
+    expect(res.statusCode).toBe(200);
+    expect(fetchSpy).toHaveBeenCalled();
+
+    const meta = JSON.parse(res.payload.split('\n').find((l) => l.startsWith('8:'))!.slice(2))[0];
+    const events = new RunEventsRepo(db).listByConversation(meta.conversation_id, 20);
+    const snapshot = events.find((event) => event.kind === 'context.snapshot');
+    expect(snapshot?.payload?.context_window).toMatchObject({
+      strategy: 'sliding_window',
+      model_context_length: 900,
+    });
+    const contextWindow = snapshot?.payload?.context_window as { omitted_message_count?: number } | undefined;
+    expect(contextWindow?.omitted_message_count).toBeGreaterThan(0);
+  });
+
+  it('upstream-path: exposes refreshed MCP tools to ordinary chat and executes them', async () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'taori-chat-mcp-'));
+    try {
+      const scriptPath = path.join(tmpDir, 'mock-mcp-server.mjs');
+      fs.writeFileSync(scriptPath, mockMcpServerSource());
+
+      const createMcp = await app.inject({
+        method: 'POST',
+        url: '/v1/mcp/servers',
+        headers: { authorization: `Bearer ${bearer}`, 'content-type': 'application/json' },
+        payload: JSON.stringify({
+          name: 'Chat MCP',
+          command: process.execPath,
+          args: [scriptPath],
+        }),
+      });
+      expect(createMcp.statusCode).toBe(201);
+      const created = createMcp.json() as { server: { id: string } };
+
+      const refreshMcp = await app.inject({
+        method: 'POST',
+        url: `/v1/mcp/servers/${created.server.id}/refresh`,
+        headers: { authorization: `Bearer ${bearer}` },
+      });
+      expect(refreshMcp.statusCode).toBe(200);
+      const refreshBody = refreshMcp.json() as { tools: Array<{ name: string }> };
+      expect(refreshBody.tools[0]?.name).toMatch(/^mcp\./);
+
+      const provRepo = new ProvidersRepo(db);
+      const modRepo = new ModelsRepo(db);
+      const provider = provRepo.create({
+        name: 'OpenRouter',
+        type: 'openrouter',
+        base_url: 'https://openrouter.example.com/api/v1',
+        api_key: 'sk-test-mcp',
+      });
+      await keystore.write(provider.api_key_ref!, 'sk-test-mcp');
+      const model = modRepo.create({
+        provider_id: provider.id,
+        model_name: 'tool-chat',
+        capability: 'chat',
+        display_name: 'Tool Chat',
+        supports_tools: true,
+      });
+
+      let chatCalls = 0;
+      let mcpAiToolName = '';
+      const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async (_url, init) => {
+        chatCalls++;
+        const rawBody = typeof init?.body === 'string' ? init.body : String(init?.body ?? '{}');
+        const body = JSON.parse(rawBody) as { tools?: Array<{ function?: { name?: string } }> };
+        if (chatCalls === 1) {
+          const toolNames = body.tools?.map((t) => t.function?.name).filter(Boolean) ?? [];
+          mcpAiToolName = toolNames.find((name) => String(name).startsWith(`mcp_${created.server.id}_`)) ?? '';
+          expect(mcpAiToolName).toBeTruthy();
+          const toolCallBody =
+            `data: ${JSON.stringify({ id: '1', object: 'chat.completion.chunk', created: 1, model: 'm', choices: [{ index: 0, delta: { role: 'assistant', tool_calls: [{ index: 0, id: 'call_mcp_1', type: 'function', function: { name: mcpAiToolName, arguments: '' } }] }, finish_reason: null }] })}\n\n` +
+            `data: ${JSON.stringify({ id: '1', object: 'chat.completion.chunk', created: 1, model: 'm', choices: [{ index: 0, delta: { tool_calls: [{ index: 0, function: { arguments: '{"text":"hello from chat"}' } }] }, finish_reason: null }] })}\n\n` +
+            `data: ${JSON.stringify({ id: '1', object: 'chat.completion.chunk', created: 1, model: 'm', choices: [{ index: 0, delta: {}, finish_reason: 'tool_calls' }], usage: { prompt_tokens: 5, completion_tokens: 1, total_tokens: 6 } })}\n\n` +
+            `data: [DONE]\n\n`;
+          return new Response(toolCallBody, {
+            status: 200,
+            headers: { 'content-type': 'text/event-stream' },
+          });
+        }
+        const finalTextBody =
+          `data: ${JSON.stringify({ id: '1', object: 'chat.completion.chunk', created: 1, model: 'm', choices: [{ index: 0, delta: { role: 'assistant', content: 'mcp done' }, finish_reason: null }] })}\n\n` +
+          `data: ${JSON.stringify({ id: '1', object: 'chat.completion.chunk', created: 1, model: 'm', choices: [{ index: 0, delta: {}, finish_reason: 'stop' }], usage: { prompt_tokens: 5, completion_tokens: 1, total_tokens: 6 } })}\n\n` +
+          `data: [DONE]\n\n`;
+        return new Response(finalTextBody, {
+          status: 200,
+          headers: { 'content-type': 'text/event-stream' },
+        });
+      });
+
+      const res = await app.inject({
+        method: 'POST',
+        url: '/v1/chat',
+        headers: { authorization: `Bearer ${bearer}`, 'content-type': 'application/json' },
+        payload: {
+          model_id: model.id,
+          messages: [{ role: 'user', content: 'use my mcp echo tool' }],
+        },
+      });
+      expect(res.statusCode).toBe(200);
+      expect(fetchSpy).toHaveBeenCalled();
+      expect(chatCalls).toBe(2);
+      expect(res.payload).toContain('mcp done');
+      expect(res.payload).toContain('"tool":"mcp.');
+      expect(res.payload).toContain('echo:hello from chat');
+    } finally {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
   });
 
   it('upstream-path: classifies upstream error and persists assistant as failed', async () => {
@@ -325,3 +539,52 @@ describe('chat M1.2', () => {
     expect(res.payload).not.toContain('"code":"internal"');
   });
 });
+
+function mockMcpServerSource(): string {
+  return `
+let buffer = Buffer.alloc(0);
+function send(id, result) {
+  const payload = Buffer.from(JSON.stringify({ jsonrpc: '2.0', id, result }), 'utf8');
+  process.stdout.write('Content-Length: ' + payload.byteLength + '\\r\\n\\r\\n');
+  process.stdout.write(payload);
+}
+function handle(message) {
+  if (!message.id) return;
+  if (message.method === 'initialize') {
+    send(message.id, { protocolVersion: '2024-11-05', capabilities: { tools: {} }, serverInfo: { name: 'mock', version: '1' } });
+  } else if (message.method === 'tools/list') {
+    send(message.id, {
+      tools: [{
+        name: 'echo',
+        description: 'Echo text',
+        inputSchema: {
+          type: 'object',
+          properties: { text: { type: 'string', minLength: 1 } },
+          required: ['text'],
+          additionalProperties: false
+        }
+      }]
+    });
+  } else if (message.method === 'tools/call') {
+    send(message.id, { content: [{ type: 'text', text: 'echo:' + (message.params?.arguments?.text ?? '') }] });
+  }
+}
+process.stdin.on('data', (chunk) => {
+  buffer = Buffer.concat([buffer, chunk]);
+  while (true) {
+    const sep = buffer.indexOf('\\r\\n\\r\\n');
+    if (sep < 0) return;
+    const header = buffer.slice(0, sep).toString('utf8');
+    const match = /content-length:\\s*(\\d+)/i.exec(header);
+    if (!match) return;
+    const len = Number(match[1]);
+    const start = sep + 4;
+    const end = start + len;
+    if (buffer.byteLength < end) return;
+    const payload = buffer.slice(start, end).toString('utf8');
+    buffer = buffer.slice(end);
+    handle(JSON.parse(payload));
+  }
+});
+`;
+}

@@ -218,7 +218,7 @@ test('model capability correction turns image requests from picker flow into too
   await expect(page.getByTestId('msg-tool-images')).toBeVisible({ timeout: 30_000 });
 
   const timeline = await openTimeline(page);
-  await expect(timeline.getByTestId('run-event').filter({ hasText: '3 个工具可见' }).first()).toBeVisible();
+  await expect(timeline.getByTestId('run-event').filter({ hasText: '4 个工具可见' }).first()).toBeVisible();
   await expect(timeline.getByTestId('run-event').filter({ hasText: '生成图片' }).first()).toBeVisible();
   await expectNoHorizontalOverflow(timeline);
 });

@@ -14,7 +14,7 @@ import { buildServer } from '../src/server.js';
 import { openDb } from '../src/db/index.js';
 import { ControlClient } from '../src/control/client.js';
 import { MemoryStore } from '../src/keystore.js';
-import { FilesRepo } from '../src/db/repos/index.js';
+import { ConversationsRepo, FilesRepo } from '../src/db/repos/index.js';
 import { cost_records } from '../src/db/schema.js';
 import type { FastifyInstance } from 'fastify';
 import os from 'node:os';
@@ -65,7 +65,7 @@ describe('M2.3 capability bus + file_read', () => {
     fs.rmSync(tmpDir, { recursive: true, force: true });
   });
 
-  it('GET /v1/tools lists builtin.file_read', async () => {
+  it('GET /v1/tools lists builtin file tools', async () => {
     const res = await app.inject({
       method: 'GET',
       url: '/v1/tools',
@@ -78,6 +78,9 @@ describe('M2.3 capability bus + file_read', () => {
     expect(fr).toBeDefined();
     expect(fr?.capability).toBe('file');
     expect(fr?.source).toBe('builtin');
+    const fsTool = body.data.find((t) => t.name === 'builtin.file_search');
+    expect(fsTool).toBeDefined();
+    expect(fsTool?.capability).toBe('file');
   });
 
   it('session tool policy overrides effective tools and blocks invoke', async () => {
@@ -152,6 +155,37 @@ describe('M2.3 capability bus + file_read', () => {
     const rec = costs.find((c) => c.source_type === 'tool_call');
     expect(rec).toBeDefined();
     expect(rec?.model_name_snapshot).toBe('builtin.file_read');
+    expect(rec?.success).toBe(true);
+    expect(rec?.actual_cost_usd).toBe(0);
+  });
+
+  it('invoke file_search returns focused snippets and writes cost_record', async () => {
+    const conv = new ConversationsRepo(db).create({ title: 'files' });
+    const filesRepo = new FilesRepo(db);
+    const row = filesRepo.insert({
+      conversation_id: conv.id,
+      message_id: null,
+      original_path: 'notes.md',
+      mime_type: 'text/markdown',
+      size_bytes: 100,
+      extracted_text: 'Taori file_search uses sqlite bm25 snippets instead of reading whole files.',
+    });
+
+    const res = await invoke(app, {
+      name: 'builtin.file_search',
+      input: { query: 'sqlite bm25', file_ids: [row.id], limit: 3 },
+      conversation_id: conv.id,
+    });
+    expect(res.statusCode).toBe(200);
+    const body = res.json() as {
+      data: { ok: boolean; output: { results: Array<{ file_id: string; snippet: string }> } };
+    };
+    expect(body.data.ok).toBe(true);
+    expect(body.data.output.results[0]).toMatchObject({ file_id: row.id });
+    expect(body.data.output.results[0]?.snippet).toContain('sqlite bm25');
+
+    const costs = db.select().from(cost_records).all();
+    const rec = costs.find((c) => c.source_type === 'tool_call' && c.model_name_snapshot === 'builtin.file_search');
     expect(rec?.success).toBe(true);
     expect(rec?.actual_cost_usd).toBe(0);
   });

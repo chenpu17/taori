@@ -26,10 +26,21 @@ export interface WebFetchOutput {
   truncated: boolean;
 }
 
+export interface WebFetchDeps {
+  fetch?: typeof fetch;
+}
+
 export function createWebFetchTool(): ToolDescriptor<
   z.infer<typeof InputSchema>,
   WebFetchOutput
 > {
+  return createWebFetchToolWithDeps({});
+}
+
+export function createWebFetchToolWithDeps(
+  deps: WebFetchDeps = {},
+): ToolDescriptor<z.infer<typeof InputSchema>, WebFetchOutput> {
+  const fetchImpl = deps.fetch ?? fetch;
   return {
     name: 'builtin.web_fetch',
     description:
@@ -45,13 +56,13 @@ export function createWebFetchTool(): ToolDescriptor<
       let target = normalizeUrl(input.url);
       await assertPublicHttpUrl(target);
 
-      let response = await fetchOnce(target);
+      let response = await fetchOnce(fetchImpl, target);
       for (let i = 0; i < MAX_REDIRECTS && isRedirect(response); i++) {
         const location = response.headers.get('location');
         if (!location) break;
         target = new URL(location, target).href;
         await assertPublicHttpUrl(target);
-        response = await fetchOnce(target);
+        response = await fetchOnce(fetchImpl, target);
       }
       if (isRedirect(response)) throw networkError('Too many redirects');
       if (!response.ok) {
@@ -107,11 +118,11 @@ function isRedirect(response: Response): boolean {
   return response.status >= 300 && response.status < 400 && response.headers.has('location');
 }
 
-async function fetchOnce(url: string): Promise<Response> {
+async function fetchOnce(fetchImpl: typeof fetch, url: string): Promise<Response> {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 20_000);
   try {
-    return await fetch(url, {
+    return await fetchImpl(url, {
       redirect: 'manual',
       signal: controller.signal,
       headers: {

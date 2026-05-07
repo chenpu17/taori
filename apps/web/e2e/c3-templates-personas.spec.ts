@@ -123,3 +123,36 @@ test('C3 Persona 可在首轮会话绑定，并在切回会话后恢复', async 
   await expect(page.getByTestId('persona-select')).toHaveValue(persona.id);
   await expect(page.getByTestId('persona-memory-scope')).toHaveText('本会话');
 });
+
+test('C3 待绑定 Persona 在刷新后仍保留，并继续绑定到首轮会话', async ({ page }) => {
+  await resetSidecar(env);
+  await seedDefaultChatModel();
+
+  const personaRes = await authedFetch(env, '/v1/personas', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      name: 'OpenClaw 风格',
+      description: '行动导向',
+      prompt: '你是一位少废话、有判断、行动优先的个人助手。',
+    }),
+  });
+  const persona = (await personaRes.json()) as { id: string };
+
+  await page.goto('/');
+  await expect(page.getByTestId('chat-panel')).toBeVisible({ timeout: 10_000 });
+  await page.getByTestId('persona-select').selectOption(persona.id);
+  await expect(page.getByTestId('persona-memory-scope')).toHaveText('待绑定');
+
+  await page.reload();
+  await expect(page.getByTestId('chat-panel')).toBeVisible({ timeout: 10_000 });
+  await expect(page.getByTestId('persona-select')).toHaveValue(persona.id);
+  await expect(page.getByTestId('persona-memory-scope')).toHaveText('待绑定');
+
+  await page.getByTestId('composer-input').fill('刷新后继续发送首条消息');
+  await page.getByTestId('composer-send').click();
+  await expect(page.getByTestId('streaming-indicator')).toHaveCount(0, {
+    timeout: 30_000,
+  });
+  await expect(page.getByTestId('persona-memory-scope')).toHaveText('本会话');
+});

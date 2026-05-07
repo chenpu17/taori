@@ -24,6 +24,7 @@ import {
   RoundtablesRepo,
   RoundtableMessagesRepo,
   CostsRepo,
+  RunEventsRepo,
 } from '../src/db/repos/index.js';
 import type { FastifyInstance } from 'fastify';
 import os from 'node:os';
@@ -41,6 +42,7 @@ interface Ctx {
   rt: RoundtablesRepo;
   rtMsg: RoundtableMessagesRepo;
   costs: CostsRepo;
+  runEvents: RunEventsRepo;
   keystore: MemoryStore;
 }
 
@@ -76,6 +78,7 @@ async function makeCtx(): Promise<Ctx> {
     rt: new RoundtablesRepo(db),
     rtMsg: new RoundtableMessagesRepo(db),
     costs: new CostsRepo(db),
+    runEvents: new RunEventsRepo(db),
     keystore,
   };
 }
@@ -223,6 +226,25 @@ describe('M3.A.2 — POST /v1/roundtable/:id/round', () => {
     // 3 cost rows roundtable_message + 1 topic_analyzer (from creation)
     const allCosts = ctx.costs.sumSince({ since: 0 });
     expect(allCosts.calls).toBeGreaterThanOrEqual(3);
+
+    const events = ctx.runEvents.listByConversation(rt.conversation_id, 100);
+    expect(events.find((e) => e.kind === 'turn.started')?.payload).toMatchObject({
+      run_kind: 'roundtable',
+      roundtable_id: id,
+      action: 'round',
+      round: 1,
+    });
+    expect(events.filter((e) => e.kind === 'model.started')).toHaveLength(3);
+    expect(events.filter((e) => e.kind === 'model.completed')).toHaveLength(3);
+    expect(events.filter((e) => e.kind === 'cost.recorded')).toHaveLength(3);
+    expect(events.at(-1)?.kind).toBe('turn.completed');
+
+    const runs = ctx.runEvents.listRunsByConversation(rt.conversation_id, 10);
+    expect(runs[0]).toMatchObject({
+      kind: 'roundtable',
+      status: 'completed',
+      conversation_id: rt.conversation_id,
+    });
   });
 
   it('majority failure → roundtable.status=failed', async () => {

@@ -179,6 +179,9 @@ test('model-center: provider library refresh, bulk enable, and import disabled c
     await expect(page.getByTestId('import-drawer-row-mock-tech')).toBeVisible();
     await expect(page.getByTestId('import-drawer-row-mock-vision')).toBeVisible();
     await expect(page.getByTestId('import-drawer-counts')).toContainText('已刷新 4 个候选');
+    await expect(page.getByTestId('import-drawer-row-mock-strategy')).toHaveAttribute('data-managed-state', 'enabled');
+    await expect(page.getByTestId('import-drawer-row-mock-user')).toHaveAttribute('data-managed-state', 'enabled');
+    await expect(page.getByTestId('import-drawer-row-mock-tech')).toHaveAttribute('data-managed-state', 'unmanaged');
     await page.getByTestId('import-drawer-capability').selectOption('multimodal');
     await expect(page.getByTestId('import-drawer-row-mock-vision')).toBeVisible();
     await expect(page.getByTestId('import-drawer-row-mock-tech')).toHaveCount(0);
@@ -204,6 +207,7 @@ test('model-center: provider library refresh, bulk enable, and import disabled c
     await expect(page.getByTestId('import-drawer')).toBeVisible();
     await page.getByTestId('import-drawer-status').selectOption('disabled');
     await expect(page.getByTestId('import-drawer-row-mock-tech')).toBeVisible();
+    await expect(page.getByTestId('import-drawer-row-mock-tech')).toHaveAttribute('data-managed-state', 'disabled');
     await page.getByTestId(`import-drawer-toggle-${tech!.id}`).click();
 
     await expect
@@ -217,6 +221,64 @@ test('model-center: provider library refresh, bulk enable, and import disabled c
   } finally {
     await new Promise<void>((resolve) => server.close(() => resolve()));
   }
+});
+
+test('model-center: toggling adjacent models keeps the matrix scroll position', async ({ page }) => {
+  const env = readSidecarEnv();
+  await resetSidecar(env);
+  const providerRes = await authedFetch(env, '/v1/providers', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      name: 'Scroll Provider',
+      type: 'openai',
+      base_url: 'https://example.invalid/v1',
+      api_key: 'sk-test',
+    }),
+  });
+  expect(providerRes.ok).toBeTruthy();
+  const provider = (await providerRes.json()) as { id: string };
+
+  const createdIds: string[] = [];
+  for (let i = 0; i < 28; i += 1) {
+    const res = await authedFetch(env, '/v1/models', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        provider_id: provider.id,
+        model_name: `scroll-model-${String(i).padStart(2, '0')}`,
+        display_name: `Scroll Model ${String(i).padStart(2, '0')}`,
+        capability: 'chat',
+        is_default_for: i === 0 ? 'chat' : null,
+        enabled: true,
+      }),
+    });
+    expect(res.ok).toBeTruthy();
+    const model = (await res.json()) as { id: string };
+    createdIds.push(model.id);
+  }
+
+  await page.goto('/');
+  await page.getByTestId('open-model-center').click();
+  await expect(page.getByTestId('model-center')).toBeVisible();
+  await page.getByTestId('model-center-tab-chat').click();
+
+  const middleRow = page.getByTestId(`model-row-${createdIds[16]}`);
+  await middleRow.evaluate((element) => {
+    element.scrollIntoView({ block: 'center' });
+  });
+  await expect(middleRow).toBeInViewport();
+  const beforeBox = await middleRow.boundingBox();
+  expect(beforeBox).not.toBeNull();
+
+  const toggle = page.getByTestId(`model-row-enabled-${createdIds[16]}`);
+  await toggle.click();
+
+  await expect(toggle).not.toBeChecked();
+  await expect(middleRow).toBeInViewport();
+  const afterBox = await middleRow.boundingBox();
+  expect(afterBox).not.toBeNull();
+  expect(Math.abs((afterBox?.y ?? 0) - (beforeBox?.y ?? 0))).toBeLessThan(80);
 });
 
 test('model-center: OpenAI-compatible PackyAPI refresh shows gpt-image models', async ({
@@ -367,4 +429,64 @@ test('model-center: provider edit and scoped catalog sync update managed model p
   } finally {
     await new Promise<void>((resolve) => server.close(() => resolve()));
   }
+});
+
+test('model-center: deleting a provider removes its models from the chat selector', async ({ page }) => {
+  const env = readSidecarEnv();
+  await resetSidecar(env);
+  const createProvider = async (name: string) => {
+    const res = await authedFetch(env, '/v1/providers', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        name,
+        type: 'custom',
+        base_url: `https://${name.toLowerCase()}.example.invalid/v1`,
+        api_key: 'sk-test',
+      }),
+    });
+    expect(res.ok).toBeTruthy();
+    return (await res.json()) as { id: string };
+  };
+  const first = await createProvider('DeleteMe');
+  const second = await createProvider('KeepMe');
+  const createModel = async (providerId: string, modelName: string, isDefault = false) => {
+    const res = await authedFetch(env, '/v1/models', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        provider_id: providerId,
+        model_name: modelName,
+        capability: 'chat',
+        display_name: modelName,
+        is_default_for: isDefault ? 'chat' : null,
+      }),
+    });
+    expect(res.ok).toBeTruthy();
+    return (await res.json()) as { id: string };
+  };
+  const deletedModel = await createModel(first.id, 'deleted-chat', true);
+  const keptModel = await createModel(second.id, 'kept-chat');
+
+  await page.goto('/');
+  await expect(page.getByTestId('chat-panel')).toBeVisible({ timeout: 10_000 });
+  await expect(page.getByTestId('active-model')).toHaveValue(deletedModel.id);
+
+  await page.getByTestId('open-model-center').click();
+  await expect(page.getByTestId('model-center')).toBeVisible();
+  await page.getByTestId(`provider-chip-more-${first.id}`).click();
+  page.once('dialog', (d) => void d.accept());
+  await page.getByTestId(`provider-menu-delete-${first.id}`).click();
+  await expect(page.getByTestId(`provider-chip-${first.id}`)).toHaveCount(0);
+
+  const modelsRes = await authedFetch(env, '/v1/models');
+  const rows = ((await modelsRes.json()) as { models: Array<{ id: string }> }).models;
+  expect(rows.some((m) => m.id === deletedModel.id)).toBe(false);
+  expect(rows.some((m) => m.id === keptModel.id)).toBe(true);
+
+  await page.getByTestId('model-center-close').click();
+  await expect(page.getByTestId('active-model')).toHaveValue(keptModel.id);
+  await expect(
+    page.getByTestId('active-model').locator('option', { hasText: 'deleted-chat' }),
+  ).toHaveCount(0);
 });

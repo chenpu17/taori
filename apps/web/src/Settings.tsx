@@ -6,7 +6,7 @@
  * top-level page (`ModelCenter.tsx`). Settings now only carries the
  * cross-cutting toggles that don't fit the per-model surface:
  *
- *   • Auto-fallback toggle (M2.1)
+ *   • Auto-fallback / stream recovery toggles
  *   • "Re-open onboarding" entry point
  *   • Danger zone (wipe SQLite + Keychain)
  *
@@ -15,13 +15,16 @@
 
 import { useEffect, useRef, useState } from 'react';
 import { api } from './api.js';
-import type { BackupConflictStrategy, McpServer, Persona, PromptTemplate, Tool } from '@taori/shared';
+import type { StructuredMemory } from './api.js';
+import { EmptyState } from './EmptyState.js';
+import { StatusNotice } from './StatusNotice.js';
+import type { BackupConflictStrategy, McpServer, Persona, PromptTemplate, Tool, ToolHealthRow, WorkflowRecipe } from '@taori/shared';
 
 const MAX_BACKUP_IMPORT_BYTES = 25 * 1024 * 1024;
 
 interface SettingsProps {
   onClose: () => void;
-  onChanged: () => void;
+  onChanged: () => void | Promise<void>;
   onReopenOnboarding: () => void;
 }
 
@@ -77,7 +80,7 @@ export function SettingsContent({
   onReopenOnboarding,
   fixedTab,
 }: {
-  onChanged: () => void;
+  onChanged: () => void | Promise<void>;
   onReopenOnboarding: () => void;
   fixedTab?: SettingsTab;
 }): JSX.Element {
@@ -112,7 +115,9 @@ export function SettingsContent({
       {activeTab === 'general' && (
         <>
           <AutoFallbackSection />
+          <StreamRecoverySection />
           <MonthlyBudgetSection />
+          <MemoryDrawerSection />
           <section className="settings-section">
             <div className="settings-section-head">
               <h3>Provider 与模型</h3>
@@ -129,9 +134,8 @@ export function SettingsContent({
             </button>
           </section>
           <DangerZone
-            onCleared={() => {
+            onChanged={() => {
               onChanged();
-              window.location.reload();
             }}
           />
         </>
@@ -142,6 +146,7 @@ export function SettingsContent({
       {activeTab === 'prompts' && (
         <>
           <PromptTemplatesSection />
+          <WorkflowRecipesSection />
           <PersonasSection />
         </>
       )}
@@ -153,12 +158,28 @@ function notifyPromptAssetsChanged(): void {
   window.dispatchEvent(new Event('taori:prompt-assets-changed'));
 }
 
+function recipeVariables(content: string): Array<{ name: string; label: string; required: boolean }> {
+  const names = new Set<string>();
+  const re = /\{\{\s*([^{}]+?)\s*\}\}/g;
+  let match: RegExpExecArray | null;
+  while ((match = re.exec(content))) {
+    const name = match[1]?.trim();
+    if (name) names.add(name);
+  }
+  return [...names].map((name) => ({ name, label: name, required: true }));
+}
+
 function notifyBudgetSettingsChanged(): void {
   window.dispatchEvent(new Event('taori:budget-settings-changed'));
 }
 
+function notifyStreamRecoverySettingsChanged(): void {
+  window.dispatchEvent(new Event('taori:stream-recovery-settings-changed'));
+}
+
 function ToolsSection({ onChanged }: { onChanged: () => void }): JSX.Element {
   const [tools, setTools] = useState<Tool[]>([]);
+  const [toolHealthRows, setToolHealthRows] = useState<Map<string, ToolHealthRow>>(new Map());
   const [mcpServers, setMcpServers] = useState<McpServer[]>([]);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState<string | null>(null);
@@ -171,11 +192,13 @@ function ToolsSection({ onChanged }: { onChanged: () => void }): JSX.Element {
     setLoading(true);
     setError(null);
     try {
-      const [res, mcpRes] = await Promise.all([
+      const [res, healthRes, mcpRes] = await Promise.all([
         api.listTools(),
+        api.toolsHealth().catch(() => ({ rows: [] })),
         api.listMcpServers().catch(() => ({ servers: [] })),
       ]);
       setTools(res.data);
+      setToolHealthRows(new Map(healthRes.rows.map((row) => [row.tool_name, row])));
       setMcpServers(mcpRes.servers);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
@@ -283,7 +306,13 @@ function ToolsSection({ onChanged }: { onChanged: () => void }): JSX.Element {
         而是根据附件自动切换到支持视觉的聊天模型。
       </p>
       {loading ? (
-        <p className="hint">加载工具列表…</p>
+        <StatusNotice
+          tone="loading"
+          title="加载工具列表…"
+          detail="正在读取当前启用的内置工具与 MCP 工具状态。"
+          compact
+          testId="settings-tools-loading"
+        />
       ) : (
         <>
           <div className="settings-tool-list">
@@ -299,6 +328,7 @@ function ToolsSection({ onChanged }: { onChanged: () => void }): JSX.Element {
                     <span>能力：{capabilityLabel(tool.capability)}</span>
                     <span>来源：{tool.source === 'builtin' ? '内置' : 'MCP'}</span>
                   </div>
+                  <ToolHealthStrip health={toolHealthRows.get(tool.name) ?? null} />
                 </div>
                 <button
                   type="button"
@@ -348,7 +378,13 @@ function ToolsSection({ onChanged }: { onChanged: () => void }): JSX.Element {
               </button>
             </div>
             {mcpServers.length === 0 ? (
-              <p className="hint">尚未添加 MCP Server。首版支持本地 stdio 传输。</p>
+              <StatusNotice
+                tone="info"
+                title="尚未添加 MCP Server"
+                detail="当前支持本地 stdio 传输；添加后即可把外部工具接入 Taori。"
+                compact
+                testId="settings-mcp-empty"
+              />
             ) : (
               <div className="settings-tool-list">
                 {mcpServers.map((server) => (
@@ -397,7 +433,15 @@ function ToolsSection({ onChanged }: { onChanged: () => void }): JSX.Element {
           </div>
         </>
       )}
-      {error && <p className="err" data-testid="settings-tools-error">{error}</p>}
+      {error && (
+        <StatusNotice
+          tone="error"
+          title="工具设置加载失败"
+          detail={error}
+          compact
+          testId="settings-tools-error"
+        />
+      )}
     </section>
   );
 }
@@ -405,6 +449,7 @@ function ToolsSection({ onChanged }: { onChanged: () => void }): JSX.Element {
 function toolLabel(name: string): string {
   const labels: Record<string, string> = {
     'builtin.file_read': '文件读取',
+    'builtin.file_search': '文件检索',
     'builtin.web_search': '网页搜索',
     'builtin.web_fetch': '网页抓取',
     'builtin.image_generate': '图像生成',
@@ -417,6 +462,7 @@ function toolDescription(tool: Tool): string {
   if (tool.name === 'builtin.web_fetch') return '读取指定公开 URL，并转换为可读文本；默认阻止 localhost、内网地址和敏感端口。';
   if (tool.name === 'builtin.image_generate') return '当聊天模型判断需要生成图片时，自动转交给默认或最便宜的图像模型处理。';
   if (tool.name === 'builtin.file_read') return '读取已上传文件的文本内容；不接受任意本地路径。';
+  if (tool.name === 'builtin.file_search') return '按问题检索已上传文件片段，减少长文件拖垮上下文。';
   return tool.description;
 }
 
@@ -431,8 +477,69 @@ function capabilityLabel(capability: Tool['capability']): string {
   return labels[capability];
 }
 
+const TOOL_FAILURE_LABELS: Record<string, string> = {
+  validation_error: '参数错误',
+  tool_timeout: '工具超时',
+  mcp_crashed: 'MCP 崩溃',
+  permission_denied: '权限限制',
+  rate_limit: '限速',
+  quota: '额度',
+  network: '网络',
+  unknown: '未知',
+};
+
+function ToolHealthStrip({ health }: { health: ToolHealthRow | null }): JSX.Element {
+  const row = health ?? {
+    tool_name: '',
+    calls_24h: 0,
+    failures_24h: 0,
+    avg_duration_ms: null,
+    last_failure_at: null,
+    last_failure_classification: null,
+  };
+  const failureText = row.last_failure_classification
+    ? `${TOOL_FAILURE_LABELS[row.last_failure_classification] ?? row.last_failure_classification} · ${formatAgo(row.last_failure_at)}`
+    : '无';
+  return (
+    <div className="tool-health-strip" data-testid="tool-health-strip">
+      <span>
+        <small>24h 调用</small>
+        <strong data-testid="tool-health-calls">{row.calls_24h}</strong>
+      </span>
+      <span>
+        <small>失败</small>
+        <strong data-testid="tool-health-failures">{row.failures_24h}</strong>
+      </span>
+      <span>
+        <small>平均耗时</small>
+        <strong data-testid="tool-health-duration">{formatMetricMs(row.avg_duration_ms)}</strong>
+      </span>
+      <span>
+        <small>最近失败</small>
+        <strong data-testid="tool-health-last-failure">{failureText}</strong>
+      </span>
+    </div>
+  );
+}
+
+function formatMetricMs(value: number | null): string {
+  if (value == null) return '—';
+  if (value < 1000) return `${Math.round(value)}ms`;
+  return `${(value / 1000).toFixed(1)}s`;
+}
+
+function formatAgo(ts: number | null): string {
+  if (!ts) return '—';
+  const diff = Date.now() - ts;
+  if (diff < 60_000) return '刚刚';
+  if (diff < 3_600_000) return `${Math.floor(diff / 60_000)} 分钟前`;
+  if (diff < 86_400_000) return `${Math.floor(diff / 3_600_000)} 小时前`;
+  return `${Math.floor(diff / 86_400_000)} 天前`;
+}
+
 function MonthlyBudgetSection(): JSX.Element {
   const [value, setValue] = useState('');
+  const [hardLimit, setHardLimit] = useState(false);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [msg, setMsg] = useState<string | null>(null);
@@ -441,8 +548,14 @@ function MonthlyBudgetSection(): JSX.Element {
     let cancelled = false;
     (async () => {
       try {
-        const res = await api.getMemoryEffective('monthly_budget_usd');
-        if (!cancelled) setValue(res.data.value ?? '');
+        const [budgetRes, hardRes] = await Promise.all([
+          api.getMemoryEffective('monthly_budget_usd'),
+          api.getMemoryEffective('monthly_budget_hard_limit'),
+        ]);
+        if (!cancelled) {
+          setValue(budgetRes.data.value ?? '');
+          setHardLimit(hardRes.data.value === 'true');
+        }
       } catch (e) {
         if (!cancelled) setMsg(e instanceof Error ? e.message : String(e));
       } finally {
@@ -468,12 +581,20 @@ function MonthlyBudgetSection(): JSX.Element {
     try {
       if (trimmed) {
         await api.putMemory('global', 'monthly_budget_usd', trimmed);
+        await api.putMemory('global', 'monthly_budget_hard_limit', hardLimit ? 'true' : 'false');
       } else {
         await api.deleteMemory('global', 'monthly_budget_usd');
+        await api.deleteMemory('global', 'monthly_budget_hard_limit');
       }
       await api.deleteMemory('global', 'monthly_budget_alert_state');
       setValue(trimmed);
-      setMsg(trimmed ? '月度软预算已保存。阈值提醒将从本月重新计算。' : '已关闭月度软预算。');
+      setMsg(
+        trimmed
+          ? hardLimit
+            ? '月度硬上限已保存。超过后会阻止模型调用，直到你调整预算。'
+            : '月度软预算已保存。阈值提醒将从本月重新计算。'
+          : '已关闭月度软预算和硬上限。',
+      );
       notifyBudgetSettingsChanged();
     } catch (e) {
       setMsg(e instanceof Error ? e.message : String(e));
@@ -488,7 +609,7 @@ function MonthlyBudgetSection(): JSX.Element {
         <h3>月度预算</h3>
       </div>
       <p className="hint">
-        配置一个月度软预算（USD）。达到 50% / 80% / 100% 时会在底部状态栏提示，并在超过 100% 后继续发送前要求确认。
+        配置月度预算（USD）。软预算超过 100% 后继续发送前要求确认；硬上限会直接阻止模型调用，直到你调整预算。
       </p>
       <div className="settings-inline-form">
         <input
@@ -519,9 +640,188 @@ function MonthlyBudgetSection(): JSX.Element {
           清除
         </button>
       </div>
+      <label className="settings-check">
+        <input
+          type="checkbox"
+          checked={hardLimit}
+          onChange={(e) => setHardLimit(e.target.checked)}
+          disabled={loading || saving || value.trim().length === 0}
+          data-testid="monthly-budget-hard-limit"
+        />
+        启用硬上限：超过预算后不允许继续确认绕过
+      </label>
       {msg && <p className="hint" data-testid="monthly-budget-message">{msg}</p>}
     </section>
   );
+}
+
+function MemoryDrawerSection(): JSX.Element {
+  const [items, setItems] = useState<StructuredMemory[]>([]);
+  const [autoExtract, setAutoExtract] = useState(false);
+  const [retrievalEnabled, setRetrievalEnabled] = useState(true);
+  const [localOnly, setLocalOnly] = useState(false);
+  const [loading, setLoading] = useState(true);
+  const [busyId, setBusyId] = useState<string | null>(null);
+  const [msg, setMsg] = useState<string | null>(null);
+
+  const load = async (): Promise<void> => {
+    setLoading(true);
+    setMsg(null);
+    try {
+      const [list, auto, retrieval, localOnlyPref] = await Promise.all([
+        api.listStructuredMemories({ includeDisabled: true, limit: 100 }),
+        api.getMemoryEffective('memory_auto_extract_enabled'),
+        api.getMemoryEffective('memory_retrieval_enabled'),
+        api.getMemoryEffective('memory_local_only_enabled'),
+      ]);
+      setItems(list.data.memories);
+      setAutoExtract(auto.data.value === 'true');
+      setRetrievalEnabled(retrieval.data.value !== 'false');
+      setLocalOnly(localOnlyPref.data.value === 'true');
+    } catch (e) {
+      setMsg(e instanceof Error ? e.message : String(e));
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    void load();
+  }, []);
+
+  const saveToggle = async (key: string, value: boolean): Promise<void> => {
+    setMsg(null);
+    try {
+      await api.putMemory('global', key, value ? 'true' : 'false');
+      if (key === 'memory_auto_extract_enabled') setAutoExtract(value);
+      if (key === 'memory_retrieval_enabled') setRetrievalEnabled(value);
+      if (key === 'memory_local_only_enabled') setLocalOnly(value);
+      setMsg('记忆设置已保存。');
+    } catch (e) {
+      setMsg(e instanceof Error ? e.message : String(e));
+    }
+  };
+
+  const setEnabled = async (memory: StructuredMemory, enabled: boolean): Promise<void> => {
+    setBusyId(memory.id);
+    try {
+      const res = await api.setStructuredMemoryEnabled(memory.id, enabled);
+      setItems((prev) => prev.map((item) => item.id === memory.id ? res.data : item));
+    } catch (e) {
+      setMsg(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusyId(null);
+    }
+  };
+
+  const remove = async (memory: StructuredMemory): Promise<void> => {
+    setBusyId(memory.id);
+    try {
+      await api.deleteStructuredMemory(memory.id);
+      setItems((prev) => prev.filter((item) => item.id !== memory.id));
+    } catch (e) {
+      setMsg(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusyId(null);
+    }
+  };
+
+  return (
+    <section className="settings-section" data-testid="settings-memory-drawer">
+      <div className="settings-section-head">
+        <h3>长期记忆</h3>
+        <button type="button" onClick={() => void load()} disabled={loading}>
+          刷新
+        </button>
+      </div>
+      <p className="hint">
+        Taori 可以把明确有长期价值的偏好和项目事实沉淀为本地记忆。所有记忆都可查看、禁用和删除。
+      </p>
+      <div className="settings-list">
+        <label className="settings-check">
+          <input
+            type="checkbox"
+            checked={autoExtract}
+            onChange={(e) => void saveToggle('memory_auto_extract_enabled', e.target.checked)}
+            data-testid="memory-auto-extract-toggle"
+          />
+          自动抽取长期记忆（使用已配置的便宜聊天模型）
+        </label>
+        <label className="settings-check">
+          <input
+            type="checkbox"
+            checked={retrievalEnabled}
+            onChange={(e) => void saveToggle('memory_retrieval_enabled', e.target.checked)}
+            data-testid="memory-retrieval-toggle"
+          />
+          回答时使用已启用记忆
+        </label>
+        <label className="settings-check">
+          <input
+            type="checkbox"
+            checked={localOnly}
+            onChange={(e) => void saveToggle('memory_local_only_enabled', e.target.checked)}
+            data-testid="memory-local-only-toggle"
+          />
+          本地优先记忆模式（记忆抽取只使用 Ollama 本地模型）
+        </label>
+      </div>
+      {loading ? (
+        <p className="hint">正在加载记忆…</p>
+      ) : items.length === 0 ? (
+        <EmptyState
+          title="暂无长期记忆"
+          hint="当你开启记忆并持续对话后，这里会逐步沉淀长期信息。"
+          icon="🧠"
+          compact
+          tone="muted"
+          testId="memory-empty"
+        />
+      ) : (
+        <div className="settings-list" data-testid="memory-list">
+          {items.map((memory) => (
+            <div className="settings-row memory-row" key={memory.id} data-testid="memory-row">
+              <div>
+                <strong>{memoryTypeLabel(memory.type)}</strong>
+                <p>{memory.content}</p>
+                <small>
+                  来源：{memory.source_conversation_id ?? '未知'}
+                  {' · '}
+                  最后使用：{formatAgo(memory.last_used_at)}
+                </small>
+              </div>
+              <div className="row-actions">
+                <button
+                  type="button"
+                  disabled={busyId === memory.id}
+                  onClick={() => void setEnabled(memory, !memory.enabled)}
+                  data-testid="memory-toggle-enabled"
+                >
+                  {memory.enabled ? '禁用' : '启用'}
+                </button>
+                <button
+                  type="button"
+                  disabled={busyId === memory.id}
+                  onClick={() => void remove(memory)}
+                  data-testid="memory-delete"
+                >
+                  删除
+                </button>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+      {msg && <p className="hint" data-testid="memory-message">{msg}</p>}
+    </section>
+  );
+}
+
+function memoryTypeLabel(type: StructuredMemory['type']): string {
+  if (type === 'preference') return '偏好';
+  if (type === 'project_fact') return '项目事实';
+  if (type === 'profile') return '用户画像';
+  return '其他';
 }
 
 function PromptTemplatesSection(): JSX.Element {
@@ -696,6 +996,206 @@ function PromptTemplatesSection(): JSX.Element {
   );
 }
 
+function WorkflowRecipesSection(): JSX.Element {
+  const [items, setItems] = useState<WorkflowRecipe[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [name, setName] = useState('');
+  const [description, setDescription] = useState('');
+  const [prompt, setPrompt] = useState('');
+  const [requiredTools, setRequiredTools] = useState('');
+  const [optionalTools, setOptionalTools] = useState('');
+
+  const resetForm = (): void => {
+    setEditingId(null);
+    setName('');
+    setDescription('');
+    setPrompt('');
+    setRequiredTools('');
+    setOptionalTools('');
+  };
+
+  const load = async (): Promise<void> => {
+    setLoading(true);
+    setError(null);
+    try {
+      const res = await api.listWorkflowRecipes();
+      setItems(res.workflow_recipes);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    void load();
+  }, []);
+
+  const splitTools = (raw: string): string[] =>
+    raw.split(',').map((item) => item.trim()).filter(Boolean);
+
+  const makeSpec = () => ({
+    schema_version: 1 as const,
+    name: name.trim(),
+    description: description.trim() || null,
+    prompt_template: prompt.trim(),
+    variables: recipeVariables(prompt),
+    recommended_task: 'general' as const,
+    model_strategy: 'recommend' as const,
+    persona: { mode: 'none' as const },
+    tools: {
+      required: splitTools(requiredTools),
+      optional: splitTools(optionalTools),
+    },
+    output_format: { kind: 'markdown' as const, sections: [] },
+    budget: { mode: 'none' as const },
+    metadata: {},
+  });
+
+  const onSubmit = async (): Promise<void> => {
+    if (!name.trim() || !prompt.trim()) return;
+    setSaving(true);
+    setError(null);
+    try {
+      const payload = {
+        name: name.trim(),
+        description: description.trim() || null,
+        spec: makeSpec(),
+        enabled: true,
+      };
+      if (editingId) {
+        await api.updateWorkflowRecipe(editingId, payload);
+      } else {
+        await api.createWorkflowRecipe(payload);
+      }
+      resetForm();
+      await load();
+      notifyPromptAssetsChanged();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const onDelete = async (id: string): Promise<void> => {
+    if (!window.confirm('确认删除这个 Workflow Recipe？')) return;
+    try {
+      await api.deleteWorkflowRecipe(id);
+      if (editingId === id) resetForm();
+      await load();
+      notifyPromptAssetsChanged();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    }
+  };
+
+  return (
+    <section className="settings-section" data-testid="settings-workflow-recipes">
+      <div className="settings-section-head">
+        <h3>Workflow Recipe</h3>
+      </div>
+      <p className="hint">
+        Recipe 会保存 Prompt、变量和工具建议；套用时只填充输入框，不自动执行多步骤流程。
+      </p>
+      <div className="settings-library-grid">
+        <div className="settings-library-form">
+          <input
+            type="text"
+            value={name}
+            onChange={(e) => setName(e.target.value)}
+            placeholder="Recipe 名称"
+            data-testid="recipe-name-input"
+          />
+          <input
+            type="text"
+            value={description}
+            onChange={(e) => setDescription(e.target.value)}
+            placeholder="描述（可选）"
+            data-testid="recipe-description-input"
+          />
+          <textarea
+            value={prompt}
+            onChange={(e) => setPrompt(e.target.value)}
+            placeholder="例如：请围绕 {{topic}} 输出结论、证据、风险和下一步。"
+            rows={6}
+            data-testid="recipe-prompt-input"
+          />
+          <input
+            type="text"
+            value={requiredTools}
+            onChange={(e) => setRequiredTools(e.target.value)}
+            placeholder="必需工具（逗号分隔，可选）"
+            data-testid="recipe-required-tools-input"
+          />
+          <input
+            type="text"
+            value={optionalTools}
+            onChange={(e) => setOptionalTools(e.target.value)}
+            placeholder="可选工具（逗号分隔，可选）"
+            data-testid="recipe-optional-tools-input"
+          />
+          <div className="settings-inline-actions">
+            <button
+              type="button"
+              onClick={() => void onSubmit()}
+              disabled={saving || !name.trim() || !prompt.trim()}
+              data-testid="recipe-save"
+            >
+              {saving ? '保存中…' : editingId ? '更新 Recipe' : '新增 Recipe'}
+            </button>
+            {editingId && (
+              <button type="button" onClick={resetForm} disabled={saving} data-testid="recipe-cancel">
+                取消编辑
+              </button>
+            )}
+          </div>
+        </div>
+        <div className="settings-library-list">
+          {loading ? (
+            <p className="hint">加载中…</p>
+          ) : items.length === 0 ? (
+            <p className="hint">还没有 Recipe。先把一个高频任务沉淀下来。</p>
+          ) : (
+            items.map((item) => (
+              <article key={item.id} className="settings-library-card" data-testid="recipe-card">
+                <div className="settings-library-card-head">
+                  <strong>{item.name}</strong>
+                  <span className="settings-inline-actions">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setEditingId(item.id);
+                        setName(item.name);
+                        setDescription(item.description ?? '');
+                        setPrompt(item.spec.prompt_template);
+                        setRequiredTools(item.spec.tools.required.join(', '));
+                        setOptionalTools(item.spec.tools.optional.join(', '));
+                      }}
+                      data-testid="recipe-edit"
+                    >
+                      编辑
+                    </button>
+                    <button type="button" onClick={() => void onDelete(item.id)} data-testid="recipe-delete">
+                      删除
+                    </button>
+                  </span>
+                </div>
+                {item.description && <p className="hint">{item.description}</p>}
+                <pre className="settings-library-preview">{item.spec.prompt_template}</pre>
+              </article>
+            ))
+          )}
+          {error && <p className="err">{error}</p>}
+        </div>
+      </div>
+    </section>
+  );
+}
+
 function PersonasSection(): JSX.Element {
   const [items, setItems] = useState<Persona[]>([]);
   const [loading, setLoading] = useState(true);
@@ -775,7 +1275,10 @@ function PersonasSection(): JSX.Element {
       <div className="settings-section-head">
         <h3>Persona 预设</h3>
       </div>
-      <p className="hint">会话级 Persona 会以 system prompt 注入，不会显示在消息时间线里。</p>
+      <p className="hint">
+        Persona 会以 system prompt 注入，不会显示在消息时间线里。建议像内置 OpenClaw Persona 一样写清楚
+        Core Truths / Voice / Operating Style / Boundaries / Anti-patterns；未创建会话时的选择会先显示为“待绑定”，发送首条消息后绑定到该会话。
+      </p>
       <div className="settings-library-grid">
         <div className="settings-library-form">
           <input
@@ -875,7 +1378,7 @@ function PersonasSection(): JSX.Element {
  * itself is destructive but idempotent — running it twice on an empty store
  * is a no-op.
  */
-function DangerZone({ onCleared }: { onCleared: () => void }): JSX.Element {
+function DangerZone({ onChanged }: { onChanged: () => void }): JSX.Element {
   const [armed, setArmed] = useState(false);
   const [busyClear, setBusyClear] = useState(false);
   const [busyExport, setBusyExport] = useState(false);
@@ -897,7 +1400,7 @@ function DangerZone({ onCleared }: { onCleared: () => void }): JSX.Element {
           ? `已清空。Keychain 有 ${failures} 项删除失败，可手动到「钥匙串访问」清理。`
           : `已清空。Keychain 同步删除 ${res.data.keystore_entries_removed} 项。`,
       );
-      onCleared();
+      onChanged();
     } catch (e) {
       setMsg(`清空失败：${e instanceof Error ? e.message : String(e)}`);
     } finally {
@@ -955,7 +1458,7 @@ function DangerZone({ onCleared }: { onCleared: () => void }): JSX.Element {
       setMsg(
         `导入完成：新增/更新 ${totalImported} 项，重命名 ${totalRenamed} 项。${warningText}`,
       );
-      onCleared();
+      await onChanged();
     } catch (e) {
       setMsg(`导入失败：${e instanceof Error ? e.message : String(e)}`);
     } finally {
@@ -1105,6 +1608,69 @@ function AutoFallbackSection(): JSX.Element {
         内容策略错误（content_filter）始终不自动重试。
       </p>
       {err && <p className="err" data-testid="auto-fallback-err">{err}</p>}
+    </section>
+  );
+}
+
+function StreamRecoverySection(): JSX.Element {
+  const [autoResume, setAutoResume] = useState<boolean | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const r = await api.getMemoryEffective('stream_auto_resume_enabled');
+        if (cancelled) return;
+        setAutoResume(r.data.value === 'true');
+      } catch (e) {
+        if (!cancelled) setAutoResume(false);
+        if (!cancelled) setErr(e instanceof Error ? e.message : String(e));
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const onToggleAutoResume = async (): Promise<void> => {
+    if (autoResume == null || busy) return;
+    const next = !autoResume;
+    setBusy(true);
+    setErr(null);
+    setAutoResume(next);
+    try {
+      await api.putMemory('global', 'stream_auto_resume_enabled', String(next));
+      notifyStreamRecoverySettingsChanged();
+    } catch (e) {
+      setAutoResume(!next);
+      setErr(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <section className="settings-section" data-testid="settings-stream-recovery">
+      <h3>回复中断恢复</h3>
+      <label className="auto-fallback-row">
+        <input
+          type="checkbox"
+          checked={autoResume === true}
+          disabled={autoResume == null || busy}
+          onChange={() => void onToggleAutoResume()}
+          data-testid="stream-auto-resume-toggle"
+        />
+        <span className="auto-fallback-label">
+          网络或 SSE 中断后自动尝试续接未完成回复
+        </span>
+      </label>
+      <p className="hint">
+        默认关闭。开启后，Taori 会在检测到未完成 run 且 Sidecar 判断可续接时自动继续生成；
+        无法安全判断时仍会保留“继续生成”按钮给你手动确认。
+      </p>
+      {err && <p className="err" data-testid="stream-recovery-err">{err}</p>}
     </section>
   );
 }

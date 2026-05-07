@@ -23,7 +23,7 @@ import {
   type ProviderTestResponse,
   type ModelDiscoveryResponse,
 } from '@taori/shared';
-import { ProvidersRepo } from '../db/repos/index.js';
+import { ModelsRepo, ProvidersRepo } from '../db/repos/index.js';
 import {
   testProvider,
   listProviderModels,
@@ -41,6 +41,7 @@ export function registerProvidersRoute(
   deps: ProvidersRouteDeps,
 ): void {
   const repo = new ProvidersRepo(deps.db);
+  const modelsRepo = new ModelsRepo(deps.db);
 
   app.get('/v1/providers', async () => {
     return { providers: repo.list() };
@@ -52,21 +53,35 @@ export function registerProvidersRoute(
    * Used by Model Center to show a ⚠️ badge when keys need re-entry (e.g.
    * after a dev sidecar restart with MemoryStore).
    */
-  app.get('/v1/providers/key-status', async (): Promise<{
+  app.get('/v1/providers/key-status', async (req): Promise<{
     statuses: { provider_id: string; key_available: boolean }[];
   }> => {
+    const query = req.query as { confirm_keychain?: string } | undefined;
+    if (deps.keystore.kind === 'keychain' && query?.confirm_keychain !== '1') {
+      throw new TaoriError({
+        code: 'validation_error',
+        message:
+          'Reading provider key status uses the system Keychain. Retry with confirm_keychain=1 after explicit user confirmation.',
+        details: {
+          requires_keychain_confirmation: true,
+          keystore_kind: deps.keystore.kind,
+        },
+      });
+    }
     const all = repo.list();
-    const statuses = await Promise.all(
-      all.map(async (p) => {
-        if (!p.api_key_ref) return { provider_id: p.id, key_available: false };
-        try {
-          const k = await deps.keystore.read(p.api_key_ref);
-          return { provider_id: p.id, key_available: k !== null };
-        } catch {
-          return { provider_id: p.id, key_available: false };
-        }
-      }),
-    );
+    const statuses: { provider_id: string; key_available: boolean }[] = [];
+    for (const p of all) {
+      if (!p.api_key_ref) {
+        statuses.push({ provider_id: p.id, key_available: false });
+        continue;
+      }
+      try {
+        const k = await deps.keystore.read(p.api_key_ref);
+        statuses.push({ provider_id: p.id, key_available: k !== null });
+      } catch {
+        statuses.push({ provider_id: p.id, key_available: false });
+      }
+    }
     return { statuses };
   });
 
@@ -165,6 +180,9 @@ export function registerProvidersRoute(
           req.log.warn({ err: e }, 'provider.delete.keystore_fail');
         }
       }
+      for (const model of modelsRepo.listByProvider(req.params.id)) {
+        modelsRepo.delete(model.id);
+      }
       repo.delete(req.params.id);
       reply.code(204).send();
     },
@@ -210,14 +228,17 @@ export function registerProvidersRoute(
           message: `Provider ${req.params.id} not found`,
         });
       }
-      if (!provider.api_key_ref) {
+      let apiKey: string | undefined;
+      if (!provider.api_key_ref && provider.type !== 'ollama') {
         throw new TaoriError({
           code: 'validation_error',
           message: 'Provider has no API key configured',
         });
       }
-      const apiKey = await deps.keystore.read(provider.api_key_ref);
-      if (!apiKey) {
+      if (provider.api_key_ref) {
+        apiKey = (await deps.keystore.read(provider.api_key_ref)) ?? undefined;
+      }
+      if (!apiKey && provider.type !== 'ollama') {
         throw new TaoriError({
           code: 'keychain_error',
           message: 'API key not found in keystore — re-enter via PATCH /providers/:id',

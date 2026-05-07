@@ -1,7 +1,7 @@
-import { z } from 'zod';
 import type { McpServer, Tool } from '@taori/shared';
 import type { CapabilityBus, ToolDescriptor } from '../bus/index.js';
 import { callMcpTool, listMcpTools, type McpToolInfo } from './client.js';
+import { jsonSchemaToZod } from './schema.js';
 
 export function mcpBusToolName(serverId: string, toolName: string): string {
   return `mcp.${serverId}.${toolName}`;
@@ -21,7 +21,7 @@ export function registerMcpTools(
       source: 'mcp',
       source_id: server.id,
       enabled: server.enabled,
-      inputSchema: z.record(z.unknown()),
+      inputSchema: jsonSchemaToZod(mcpTool.inputSchema),
       execute: async (input) => ({
         output: await callMcpTool(
           { command: server.command, args: server.args, env: server.env },

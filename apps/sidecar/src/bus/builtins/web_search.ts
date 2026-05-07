@@ -19,10 +19,21 @@ export interface WebSearchOutput {
   results: WebSearchResult[];
 }
 
+export interface WebSearchDeps {
+  fetch?: typeof fetch;
+}
+
 export function createWebSearchTool(): ToolDescriptor<
   z.infer<typeof InputSchema>,
   WebSearchOutput
 > {
+  return createWebSearchToolWithDeps({});
+}
+
+export function createWebSearchToolWithDeps(
+  deps: WebSearchDeps = {},
+): ToolDescriptor<z.infer<typeof InputSchema>, WebSearchOutput> {
+  const fetchImpl = deps.fetch ?? fetch;
   return {
     name: 'builtin.web_search',
     description:
@@ -35,7 +46,7 @@ export function createWebSearchTool(): ToolDescriptor<
     async execute(input) {
       const numResults = input.num_results ?? 5;
       const url = `https://html.duckduckgo.com/html/?q=${encodeURIComponent(input.query)}`;
-      const res = await fetchWithTimeout(url, 15_000, {
+      const res = await fetchWithTimeout(fetchImpl, url, 15_000, {
         'user-agent':
           'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36',
         accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
@@ -95,6 +106,7 @@ function extractDuckDuckGoUrl(raw: string): string | null {
 }
 
 async function fetchWithTimeout(
+  fetchImpl: typeof fetch,
   url: string,
   timeoutMs: number,
   headers: Record<string, string>,
@@ -102,7 +114,7 @@ async function fetchWithTimeout(
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), timeoutMs);
   try {
-    return await fetch(url, { headers, signal: controller.signal });
+    return await fetchImpl(url, { headers, signal: controller.signal });
   } catch (e) {
     if (e instanceof Error && e.name === 'AbortError') {
       throw networkError(`web_search timeout after ${timeoutMs}ms`);

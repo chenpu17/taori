@@ -26,3 +26,15 @@ Taori React Renderer，负责聊天、控制中心、模型中心、工具配置
 - 控制中心工具页新增 MCP Server 添加、刷新、启停、删除入口。
 - 模型编辑器新增 `pricing_meta` JSON 编辑。
 - 圆桌参与者列新增 `rt.tool_trace` 可视化，并在刷新后保留本轮工具痕迹。
+- 聊天消息的“续写”按钮改为调用 Sidecar `POST /v1/runs/:id/continue`，不再追加“请继续上文”这类合成用户消息；若 Sidecar 返回 `cost_confirmation_required`，复用成本确认弹窗并以 `confirmed_cost=true` 二次提交；完成后刷新消息、运行时间线、实时成本和侧边栏。
+- 失败决策卡片的“重试 / 切换并重试 / 压缩上下文后重试 / 跳过失败工具继续”改为调用 Sidecar `POST /v1/runs/:id/recover`，前端只负责用户确认、传递目标模型或失败工具名，并刷新视图；恢复动作同样消费服务端成本确认门禁。
+- 运行过程的上下文快照卡片消费 Sidecar `context_window` 增量字段，展示本次是否自动裁剪较早历史；聊天发送请求合同不变。
+- 圆桌创建成功后会把新建 roundtable conversation 提升为当前会话，使 Run Timeline、会话工具策略和刷新恢复都绑定到同一个会话状态。
+- 控制中心工具页消费 Sidecar `GET /v1/tools/health`，在每个工具旁展示最近 24h 调用数、失败数、平均耗时和最近失败分类。
+- 控制中心概览页复用 `GET /v1/models/health` 与 `GET /v1/tools/health`，展示模型/工具最近 24h 调用、失败、受影响数量和最近失败分类；仅展示风险，不自动改变默认模型或工具启停。
+- 成本看板最近调用日志消费 `GET /v1/costs/calls` 的 run/event 关联字段，展示 Cost ID、Run ID 和运行事件；Run Timeline 的 `cost.recorded` 事件可通过 `cost_record_id` 精确打开并高亮对应成本调用，形成双向反查。
+- ModelCenter 打开时不再自动读取 Provider Keychain 状态；Provider 卡片只显示已保存 Key 引用，“检查钥匙串状态”会作为显式用户动作调用 `/v1/providers/key-status?confirm_keychain=1`；测试连接、模型同步或发送消息仍属于用户主动触发的真实 Provider 路径。显式检查后会标出 Key 缺失 Provider，并可直接进入重新填写 Key 的编辑流。
+- Help Center 默认“运行自检”只做轻量本地诊断，不读取系统钥匙串；“检查钥匙串”是显式深度检查入口，并提示 macOS 可能弹授权。
+- Help Center 新增“真实模型能力诊断”，消费 Sidecar `GET /v1/diagnostics/real-provider/latest`，只展示最近 `verify:real` 本地产物摘要，不主动读取 Keychain、不发起真实模型调用。
+- Onboarding 供应商预设新增 PackyAPI / PackyCode 与硅基流动 SiliconFlow；默认 Base URL 来自 `packages/shared` 常量，前端只采集用户输入的 API Key，不持久化或日志输出明文。
+- Onboarding 供应商预设新增 DeepSeek 官方；默认 Base URL 来自 `packages/shared` 的 `DEFAULT_DEEPSEEK_BASE_URL`，前端只采集用户输入的 API Key，不持久化或日志输出明文。

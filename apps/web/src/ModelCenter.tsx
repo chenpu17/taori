@@ -17,6 +17,7 @@ import type { FormEvent, JSX } from 'react';
 import { api } from './api.js';
 import {
   formatUsd,
+  isChatCapable,
   type Model,
   type ModelHealthRow,
   type ModelCapability,
@@ -163,7 +164,6 @@ export function ModelCenter({
   const [activeTab, setActiveTab] = useState<ModelCapability>('chat');
   const [models, setModels] = useState<Model[]>([]);
   const [providers, setProviders] = useState<Provider[]>([]);
-  const [keyStatus, setKeyStatus] = useState<Map<string, boolean>>(new Map());
   const [loading, setLoading] = useState(true);
   const [syncingTarget, setSyncingTarget] = useState<string | 'all' | null>(null);
   const [syncSummary, setSyncSummary] = useState<SyncSummary | null>(null);
@@ -181,23 +181,23 @@ export function ModelCenter({
   const [sortKey, setSortKey] = useState<ModelSortKey>('priority');
   const [selectedModelIds, setSelectedModelIds] = useState<Set<string>>(new Set());
   const [providerMenuId, setProviderMenuId] = useState<string | null>(null);
+  const [providerKeyStatus, setProviderKeyStatus] = useState<Map<string, boolean> | null>(null);
+  const [providerKeyChecking, setProviderKeyChecking] = useState(false);
+  const [providerKeyCheckedAt, setProviderKeyCheckedAt] = useState<number | null>(null);
+  const [providerKeyError, setProviderKeyError] = useState<string | null>(null);
   const syncing = syncingTarget !== null;
 
   const refresh = async (): Promise<void> => {
     setLoading(true);
     try {
-      const [{ providers: ps }, { models: ms }, keyStatusRes, healthRes] = await Promise.all([
+      const [{ providers: ps }, { models: ms }, healthRes] = await Promise.all([
         api.listProviders(),
         api.listModels(),
-        api.providerKeyStatus().catch(() => ({ statuses: [] })),
         api.modelsHealth().catch(() => ({ rows: [] })),
       ]);
       setProviders(ps);
       setModels(ms);
       setHealthRows(new Map(healthRes.rows.map((row) => [row.model_id, row])));
-      const ksMap = new Map<string, boolean>();
-      for (const s of keyStatusRes.statuses) ksMap.set(s.provider_id, s.key_available);
-      setKeyStatus(ksMap);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
@@ -284,11 +284,16 @@ export function ModelCenter({
   };
 
   const onToggleEnabled = async (m: Model): Promise<void> => {
+    const nextEnabled = !m.enabled;
+    const previousModels = models;
+    setModels((current) =>
+      current.map((item) => (item.id === m.id ? { ...item, enabled: nextEnabled } : item)),
+    );
     try {
-      await api.updateModel(m.id, { enabled: !m.enabled });
-      await refresh();
+      await api.updateModel(m.id, { enabled: nextEnabled });
       onChanged?.();
     } catch (e) {
+      setModels(previousModels);
       setError(e instanceof Error ? e.message : String(e));
     }
   };
@@ -366,10 +371,27 @@ export function ModelCenter({
     try {
       await api.updateProvider(editingProvider.id, patch);
       setEditingProvider(null);
+      setProviderKeyStatus(null);
+      setProviderKeyCheckedAt(null);
+      setProviderKeyError(null);
       await refresh();
       onChanged?.();
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
+    }
+  };
+
+  const onCheckProviderKeys = async (): Promise<void> => {
+    setProviderKeyChecking(true);
+    setProviderKeyError(null);
+    try {
+      const res = await api.providerKeyStatus({ confirmKeychain: true });
+      setProviderKeyStatus(new Map(res.statuses.map((s) => [s.provider_id, s.key_available])));
+      setProviderKeyCheckedAt(Date.now());
+    } catch (e) {
+      setProviderKeyError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setProviderKeyChecking(false);
     }
   };
 
@@ -523,12 +545,18 @@ export function ModelCenter({
   const onBulkEnabled = async (enabled: boolean): Promise<void> => {
     const ids = selectedVisibleIds;
     if (ids.length === 0) return;
+    const idSet = new Set(ids);
+    const previousModels = models;
+    setModels((current) =>
+      current.map((item) => (idSet.has(item.id) ? { ...item, enabled } : item)),
+    );
+    setSelectedModelIds(new Set());
     try {
       await Promise.all(ids.map((id) => api.updateModel(id, { enabled })));
-      setSelectedModelIds(new Set());
-      await refresh();
       onChanged?.();
     } catch (e) {
+      setModels(previousModels);
+      setSelectedModelIds(new Set(ids));
       setError(e instanceof Error ? e.message : String(e));
     }
   };
@@ -571,35 +599,78 @@ export function ModelCenter({
           presets for OpenRouter, Volcengine Ark, OpenAI, Ollama, etc.). */}
       <section className="model-center__providers" data-testid="model-center-providers">
         <div className="model-center__providers-head">
-          <h3>Providers</h3>
-          <button
-            type="button"
-            className="btn-primary"
-            onClick={onReopenOnboarding}
-            data-testid="model-center-add-provider"
-          >
-            + 添加 Provider
-          </button>
+          <div>
+            <h3>Providers</h3>
+            <p className="hint">不会自动读取系统钥匙串；需要确认 Key 状态时手动检查。</p>
+          </div>
+          <div className="model-center__providers-actions">
+            <button
+              type="button"
+              onClick={() => void onCheckProviderKeys()}
+              disabled={providerKeyChecking || providers.length === 0}
+              data-testid="provider-key-status-check"
+              title="主动读取系统钥匙串，确认 Provider Key 是否仍可用"
+            >
+              {providerKeyChecking ? '检查中…' : '检查钥匙串状态'}
+            </button>
+            <button
+              type="button"
+              className="btn-primary"
+              onClick={onReopenOnboarding}
+              data-testid="model-center-add-provider"
+            >
+              + 添加 Provider
+            </button>
+          </div>
         </div>
+        {providerKeyCheckedAt && (
+          <p className="provider-key-status-summary" data-testid="provider-key-status-summary">
+            已检查 {new Date(providerKeyCheckedAt).toLocaleTimeString()} · 缺失{' '}
+            {providers.filter((p) => p.api_key_ref && providerKeyStatus?.get(p.id) === false).length} 项
+          </p>
+        )}
+        {providerKeyError && (
+          <p className="provider-key-status-summary is-error" data-testid="provider-key-status-error">
+            钥匙串检查失败：{providerKeyError}
+          </p>
+        )}
         {providers.length === 0 ? (
           <p className="hint">尚未配置 Provider，点击上方“+ 添加 Provider”导入。</p>
         ) : (
           <ul className="provider-chips">
             {providers.map((p) => {
-              const keyAvail = keyStatus.get(p.id);
-              const keyMissing = p.api_key_ref && keyAvail === false;
+              const keyKnown = providerKeyStatus?.get(p.id);
+              const keyMissing = p.api_key_ref && keyKnown === false;
+              const keyAvailable = p.api_key_ref && keyKnown === true;
               return (
               <li
                 key={p.id}
-                className={`provider-chip ${p.enabled ? '' : 'is-off'}`}
+                className={`provider-chip ${p.enabled ? '' : 'is-off'} ${keyMissing ? 'has-key-missing' : ''}`}
                 data-testid={`provider-chip-${p.id}`}
               >
                 <span className="provider-chip__name">{p.name}</span>
                 <span className="provider-chip__type">{p.type}</span>
-                {keyMissing && (
+                {keyMissing ? (
+                  <button
+                    type="button"
+                    className="provider-chip__key-missing"
+                    title="系统钥匙串中找不到该 Provider 的 API Key，点击重新填写"
+                    data-testid={`provider-chip-key-missing-${p.id}`}
+                    onClick={() => {
+                      setProviderMenuId(null);
+                      setEditingProvider(p);
+                    }}
+                  >
+                    Key 缺失
+                  </button>
+                ) : p.api_key_ref && (
                   <span
-                    className="provider-chip__key-warn"
-                    title="API Key 不在 Keystore 中 — 请重新输入（开发模式重启后需要重新配置）"
+                    className={`provider-chip__key-warn ${keyAvailable ? 'is-ok' : ''}`}
+                    title={
+                      keyAvailable
+                        ? '系统钥匙串中已确认存在 API Key'
+                        : 'API Key 已保存引用；仅在手动检查、测试连接、同步模型或发送消息时读取'
+                    }
                     data-testid={`provider-chip-key-warn-${p.id}`}
                   >
                     🔑
@@ -664,7 +735,7 @@ export function ModelCenter({
                         data-testid={`provider-menu-edit-${p.id}`}
                         title="编辑 Provider 名称、Base URL、API Key 与启停状态"
                       >
-                        编辑
+                        {keyMissing ? '重新填写 Key' : '编辑'}
                       </button>
                       <button
                         type="button"
@@ -886,7 +957,7 @@ export function ModelCenter({
                           checked={selectedModelIds.has(m.id)}
                           onChange={() => toggleSelectModel(m.id)}
                           aria-label={`选择 ${m.display_name}`}
-                          data-testid={`model-row-select-${m.id}`}
+                          data-testid={`model-select-${m.id}`}
                         />
                       </td>
                       <td>
@@ -897,7 +968,7 @@ export function ModelCenter({
                             <span
                               className="badge badge--demoted"
                               title="该模型被自动降级（连续失败）"
-                              data-testid={`model-row-demoted-${m.id}`}
+                              data-testid={`model-demoted-${m.id}`}
                             >
                               ⚠️ 降级
                             </span>
@@ -923,14 +994,20 @@ export function ModelCenter({
                         ) : null}
                       </td>
                       <td>
-                        <label className="switch">
+                        <label
+                          className={`switch switch-modern ${m.enabled ? 'switch-modern--on' : 'switch-modern--off'}`}
+                          title={m.enabled ? '点击停用该模型' : '点击启用该模型'}
+                        >
                           <input
                             type="checkbox"
                             checked={m.enabled}
                             onChange={() => void onToggleEnabled(m)}
                             data-testid={`model-row-enabled-${m.id}`}
                           />
-                          <span>{m.enabled ? '启用' : '禁用'}</span>
+                          <span className="switch-modern__track" aria-hidden="true">
+                            <span className="switch-modern__thumb" />
+                          </span>
+                          <span className="switch-modern__label">{m.enabled ? '启用' : '禁用'}</span>
                         </label>
                       </td>
                       <td>
@@ -1056,6 +1133,7 @@ export function ModelCenter({
           provider={editingProvider}
           onCancel={() => setEditingProvider(null)}
           onSave={(patch) => void onSaveProviderEdit(patch)}
+          keyMissing={providerKeyStatus?.get(editingProvider.id) === false}
         />
       )}
       {editing && (
@@ -1325,7 +1403,7 @@ function ImportDrawer({
           pricing_meta: m.pricing_meta ?? null,
           context_length: m.context_length ?? null,
           supports_vision: m.supports_vision ?? false,
-          supports_tools: m.supports_tools ?? false,
+          supports_tools: m.supports_tools ?? isChatCapable(m.capability),
           modalities: m.modalities ?? undefined,
           enabled: importEnabled,
         });
@@ -1494,10 +1572,16 @@ function ImportDrawer({
               const diff = managedDiff(existing, m);
               const hasManagedDiff = diff !== null;
               const priceHint = discoveredPrice(m);
+              const managedState = existing
+                ? existing.enabled
+                  ? 'enabled'
+                  : 'disabled'
+                : 'unmanaged';
               return (
                 <li
                   key={m.model_name}
                   className={isExisting ? 'is-existing' : ''}
+                  data-managed-state={managedState}
                   data-testid={`import-drawer-row-${m.model_name}`}
                 >
                   <label>
@@ -1523,7 +1607,7 @@ function ImportDrawer({
                     </span>
                     {existing ? (
                       <>
-                        <span className={`badge ${existing.enabled ? 'badge--default' : ''}`}>
+                        <span className={`badge ${existing.enabled ? 'badge--enabled' : 'badge--disabled'}`}>
                           {existing.enabled ? '已启用' : '已停用'}
                         </span>
                         {hasManagedDiff && (
@@ -1550,7 +1634,7 @@ function ImportDrawer({
                         </button>
                       </>
                     ) : (
-                      <span className="badge">未管理</span>
+                      <span className="badge badge--unmanaged">未管理</span>
                     )}
                   </label>
                 </li>
@@ -1594,10 +1678,12 @@ function EditProviderDialog({
   provider,
   onCancel,
   onSave,
+  keyMissing = false,
 }: {
   provider: Provider;
   onCancel: () => void;
   onSave: (patch: ProviderUpdate) => void;
+  keyMissing?: boolean;
 }): JSX.Element {
   const [name, setName] = useState(provider.name);
   const [baseUrl, setBaseUrl] = useState(provider.base_url);
@@ -1629,8 +1715,12 @@ function EditProviderDialog({
       >
         <header className="modal-card__head">
           <div>
-            <h3>编辑 Provider</h3>
-            <p className="hint">{provider.type}</p>
+            <h3>{keyMissing ? '重新填写 Provider Key' : '编辑 Provider'}</h3>
+            <p className="hint">
+              {keyMissing
+                ? '系统钥匙串中找不到该 Provider 的 API Key，保存新 Key 后会重新写入钥匙串。'
+                : provider.type}
+            </p>
           </div>
           <button type="button" onClick={onCancel} aria-label="关闭">
             ✕
@@ -1655,12 +1745,20 @@ function EditProviderDialog({
             />
           </label>
           <label className="field">
-            <span>API Key（留空则保持当前 Key）</span>
+            <span>{provider.type === 'ollama' ? 'API Key（Ollama 本地无需填写）' : 'API Key（留空则保持当前 Key）'}</span>
             <input
               type="password"
               value={apiKey}
               onChange={(e) => setApiKey(e.target.value)}
-              placeholder={provider.api_key_ref ? '已配置，输入新 Key 可替换' : '未配置，请输入 Key'}
+              placeholder={
+                keyMissing
+                  ? 'Key 缺失，请输入新 Key'
+                  : provider.api_key_ref
+                    ? '已配置，输入新 Key 可替换'
+                    : provider.type === 'ollama'
+                      ? '留空即可使用本地 Ollama'
+                      : '未配置，请输入 Key'
+              }
               data-testid="provider-editor-api-key"
             />
           </label>

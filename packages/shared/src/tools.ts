@@ -43,6 +43,16 @@ export const ToolSchema = z.object({
 });
 export type Tool = z.infer<typeof ToolSchema>;
 
+export const ToolHealthRowSchema = z.object({
+  tool_name: z.string(),
+  calls_24h: z.number().int().nonnegative(),
+  failures_24h: z.number().int().nonnegative(),
+  avg_duration_ms: z.number().nullable(),
+  last_failure_at: z.number().int().nullable(),
+  last_failure_classification: z.enum(TOOL_ERROR_CLASSIFICATIONS).nullable(),
+});
+export type ToolHealthRow = z.infer<typeof ToolHealthRowSchema>;
+
 export const ToolInvokeRequestSchema = z.object({
   name: z.string(),
   input: z.unknown(),

@@ -3,7 +3,7 @@ import { buildServer } from '../src/server.js';
 import { openDb } from '../src/db/index.js';
 import { ControlClient } from '../src/control/client.js';
 import { MemoryStore } from '../src/keystore.js';
-import { MemoriesRepo, ModelsRepo, ProvidersRepo } from '../src/db/repos/index.js';
+import { MemoriesRepo, ModelsRepo, PersonasRepo, ProvidersRepo } from '../src/db/repos/index.js';
 import type { FastifyInstance } from 'fastify';
 import os from 'node:os';
 import path from 'node:path';
@@ -74,6 +74,130 @@ describe('C3 prompt templates + personas', () => {
     await app.close();
     fs.rmSync(dbPath, { force: true });
     vi.restoreAllMocks();
+  });
+
+  it('seeds builtin personas on first list without duplicating them', async () => {
+    const first = await app.inject({
+      method: 'GET',
+      url: '/v1/personas',
+      headers: auth,
+    });
+    expect(first.statusCode).toBe(200);
+    const firstPersonas = (first.json() as { personas: Array<{ name: string; description: string | null; prompt: string }> }).personas;
+    expect(firstPersonas).toHaveLength(2);
+    expect(firstPersonas.map((persona) => persona.name).sort()).toEqual([
+      'OpenClaw 行动派助手',
+      '架构评审助手',
+    ]);
+    expect(firstPersonas.find((persona) => persona.name === '架构评审助手')!.description).toContain('示例 Persona');
+    expect(firstPersonas.find((persona) => persona.name === '架构评审助手')!.prompt).toContain('模块边界');
+    expect(firstPersonas.find((persona) => persona.name === 'OpenClaw 行动派助手')!.description).toContain('OpenClaw');
+    const openClawPrompt = firstPersonas.find((persona) => persona.name === 'OpenClaw 行动派助手')!.prompt;
+    expect(openClawPrompt).toContain('# Core Truths');
+    expect(openClawPrompt).toContain('# Operating Style');
+    expect(openClawPrompt).toContain('# Memory and Boundaries');
+    expect(openClawPrompt).toContain('不要以寒暄开场');
+    expect(openClawPrompt).toContain('记忆系统用来服务用户，不用来膨胀人格');
+
+    const second = await app.inject({
+      method: 'GET',
+      url: '/v1/personas',
+      headers: auth,
+    });
+    expect(second.statusCode).toBe(200);
+    const secondPersonas = (second.json() as { personas: Array<{ id: string }> }).personas;
+    expect(secondPersonas).toHaveLength(2);
+
+    for (const persona of secondPersonas) {
+      const deleted = await app.inject({
+        method: 'DELETE',
+        url: `/v1/personas/${persona.id}`,
+        headers: auth,
+      });
+      expect(deleted.statusCode).toBe(204);
+    }
+
+    const afterDelete = await app.inject({
+      method: 'GET',
+      url: '/v1/personas',
+      headers: auth,
+    });
+    expect(afterDelete.statusCode).toBe(200);
+    expect((afterDelete.json() as { personas: unknown[] }).personas).toHaveLength(0);
+  });
+
+  it('adds the new OpenClaw builtin persona once for older installs without duplicating existing defaults', async () => {
+    const memoriesRepo = new MemoriesRepo(db);
+    memoriesRepo.set('global', null, 'personas.default_seeded.v1', '1');
+    new PersonasRepo(db).create({
+      name: '架构评审助手',
+      description: '示例 Persona：偏严格，帮助检查模块边界、风险与落地路径。',
+      prompt: '你是一位严格但务实的软件架构评审。回答时优先指出模块边界、接口契约、状态归属、依赖方向、风险、验证方式和可回滚路径。避免泛泛鼓励，给出可以直接执行的建议。',
+    });
+
+    const first = await app.inject({
+      method: 'GET',
+      url: '/v1/personas',
+      headers: auth,
+    });
+    expect(first.statusCode).toBe(200);
+    const names = (first.json() as { personas: Array<{ name: string }> }).personas.map((persona) => persona.name).sort();
+    expect(names).toEqual(['OpenClaw 行动派助手', '架构评审助手']);
+
+    const second = await app.inject({
+      method: 'GET',
+      url: '/v1/personas',
+      headers: auth,
+    });
+    expect(second.statusCode).toBe(200);
+    expect((second.json() as { personas: Array<{ name: string }> }).personas.map((persona) => persona.name).sort()).toEqual([
+      'OpenClaw 行动派助手',
+      '架构评审助手',
+    ]);
+  });
+
+  it('upgrades untouched legacy OpenClaw persona to SOUL prompt without resurrecting deleted legacy persona', async () => {
+    const memoriesRepo = new MemoriesRepo(db);
+    const personasRepo = new PersonasRepo(db);
+    memoriesRepo.set('global', null, 'personas.default_seeded.v1', '1');
+    memoriesRepo.set('global', null, 'personas.openclaw_seeded.v1', '1');
+    personasRepo.create({
+      name: 'OpenClaw 行动派助手',
+      description: '受 OpenClaw 灵魂启发：少废话、有判断、先查再问、行动导向、重隐私边界。',
+      prompt:
+        '你是一位受 OpenClaw 气质启发的个人 AI 助手。直接进入答案，不用“好问题”“乐意帮忙”这类套话开场。要有判断和偏好：能明确给建议，发现坏主意时尽早指出，但保持尊重。默认先自己查上下文、读材料、整理线索，再在必要时提问。回答以行动为先：优先给可执行下一步、决策建议、命令或检查路径，而不是空泛讨论。简洁优先，只有在深度真的有用时才展开。可以有一点自然的机智，但不要油腻、不要企业腔。重视隐私、安全和边界：对外部或高风险动作保持谨慎，对本地分析、整理和推进工作可以主动。你的目标不是显得热情，而是把事做成，并让人愿意长期信任你。',
+    });
+
+    const upgradedRes = await app.inject({
+      method: 'GET',
+      url: '/v1/personas',
+      headers: auth,
+    });
+    expect(upgradedRes.statusCode).toBe(200);
+    const upgraded = (upgradedRes.json() as { personas: Array<{ id: string; name: string; prompt: string }> }).personas.find(
+      (persona) => persona.name === 'OpenClaw 行动派助手',
+    );
+    expect(upgraded?.prompt).toContain('# Core Truths');
+    expect(upgraded?.prompt).toContain('记忆系统用来服务用户，不用来膨胀人格');
+
+    const deleted = await app.inject({
+      method: 'DELETE',
+      url: `/v1/personas/${upgraded!.id}`,
+      headers: auth,
+    });
+    expect(deleted.statusCode).toBe(204);
+
+    const afterDelete = await app.inject({
+      method: 'GET',
+      url: '/v1/personas',
+      headers: auth,
+    });
+    expect(afterDelete.statusCode).toBe(200);
+    expect(
+      (afterDelete.json() as { personas: Array<{ name: string }> }).personas.some(
+        (persona) => persona.name === 'OpenClaw 行动派助手',
+      ),
+    ).toBe(false);
   });
 
   it('supports CRUD for prompt_templates and personas', async () => {

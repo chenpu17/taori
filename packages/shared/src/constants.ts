@@ -13,6 +13,12 @@ export const PROVIDER_TYPES = [
   'volcengine_ark',
   // Huawei Cloud ModelArts MaaS (OpenAI-compatible chat + MaaS image API).
   'huawei_maas',
+  // DeepSeek official OpenAI-compatible API.
+  'deepseek',
+  // PackyAPI / PackyCode OpenAI-compatible image endpoint.
+  'packyapi',
+  // SiliconFlow OpenAI-compatible chat + SiliconFlow image generation.
+  'siliconflow',
 ] as const;
 export type ProviderType = (typeof PROVIDER_TYPES)[number];
 
@@ -50,6 +56,15 @@ export type MessageStatus = (typeof MESSAGE_STATUSES)[number];
 
 /** Default OpenRouter base URL */
 export const DEFAULT_OPENROUTER_BASE_URL = 'https://openrouter.ai/api/v1';
+
+/** Default PackyAPI / PackyCode OpenAI-compatible base URL */
+export const DEFAULT_PACKYAPI_BASE_URL = 'https://www.packyapi.com/v1';
+
+/** Default SiliconFlow base URL */
+export const DEFAULT_SILICONFLOW_BASE_URL = 'https://api.siliconflow.cn/v1';
+
+/** Default DeepSeek official OpenAI-compatible base URL */
+export const DEFAULT_DEEPSEEK_BASE_URL = 'https://api.deepseek.com';
 
 /** Sidecar Keychain service identifier (must match what Tauri Rust uses). */
 export const KEYCHAIN_SERVICE = 'app.taori.desktop';

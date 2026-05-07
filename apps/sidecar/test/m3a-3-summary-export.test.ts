@@ -26,6 +26,7 @@ import {
   RoundtablesRepo,
   RoundtableMessagesRepo,
   CostsRepo,
+  RunEventsRepo,
 } from '../src/db/repos/index.js';
 import type { FastifyInstance } from 'fastify';
 import os from 'node:os';
@@ -44,6 +45,7 @@ interface Ctx {
   rtMsg: RoundtableMessagesRepo;
   costs: CostsRepo;
   conv: ConversationsRepo;
+  runEvents: RunEventsRepo;
   keystore: MemoryStore;
 }
 
@@ -80,6 +82,7 @@ async function makeCtx(): Promise<Ctx> {
     rtMsg: new RoundtableMessagesRepo(db),
     costs: new CostsRepo(db),
     conv: new ConversationsRepo(db),
+    runEvents: new RunEventsRepo(db),
     keystore,
   };
 }
@@ -272,6 +275,23 @@ describe('M3.A.3 — POST /v1/roundtable/:id/summarize', () => {
     expect(sumCosts).toHaveLength(1);
     expect(sumCosts[0]!.success).toBe(true);
     expect(sumCosts[0]!.actual_cost_usd).toBeGreaterThan(0);
+
+    const events = ctx.runEvents.listByConversation(fresh.conversation_id, 100);
+    expect(events.find((e) => e.kind === 'turn.started')?.payload).toMatchObject({
+      run_kind: 'roundtable',
+      roundtable_id: id,
+      action: 'summarize',
+    });
+    expect(events.filter((e) => e.kind === 'model.started')).toHaveLength(1);
+    expect(events.filter((e) => e.kind === 'model.completed')).toHaveLength(1);
+    expect(events.filter((e) => e.kind === 'cost.recorded')).toHaveLength(1);
+    expect(events.at(-1)?.kind).toBe('turn.completed');
+    const runs = ctx.runEvents.listRunsByConversation(fresh.conversation_id, 10);
+    expect(runs[0]).toMatchObject({
+      kind: 'roundtable',
+      status: 'completed',
+      conversation_id: fresh.conversation_id,
+    });
   });
 
   it('retry path: 1st attempt invalid JSON → 2nd attempt succeeds', async () => {
@@ -472,6 +492,7 @@ describe('M3.A.3 — fast-mode auto-chain summarize via POST /round', () => {
     const fresh = ctx.rt.get(id)!;
     expect(fresh.status).toBe('completed');
     expect(fresh.summary).toMatchObject({ consensus: expect.any(Array) });
+
   });
 
   it('fast mode majority fail → no auto-summarize', async () => {

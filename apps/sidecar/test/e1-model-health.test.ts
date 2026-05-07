@@ -180,4 +180,97 @@ describe('E1 model health', () => {
       last_failure_classification: null,
     });
   });
+
+  it('POST /v1/models/recommendations ranks by task, price and health with explanations', async () => {
+    const provider = new ProvidersRepo(db).create({
+      name: 'Provider',
+      type: 'openrouter',
+      base_url: 'https://example.invalid/v1',
+      api_key: null,
+    });
+    const models = new ModelsRepo(db);
+    const cheap = models.create({
+      provider_id: provider.id,
+      model_name: 'cheap',
+      capability: 'chat',
+      display_name: 'Cheap',
+      price_input_per_1m: 0.1,
+      price_output_per_1m: 0.2,
+    });
+    const coder = models.create({
+      provider_id: provider.id,
+      model_name: 'coder',
+      capability: 'chat',
+      display_name: 'Coder',
+      price_input_per_1m: 2,
+      price_output_per_1m: 4,
+      supports_tools: true,
+      supports_json: true,
+      context_length: 128_000,
+    });
+    const flaky = models.create({
+      provider_id: provider.id,
+      model_name: 'flaky',
+      capability: 'chat',
+      display_name: 'Flaky',
+      price_input_per_1m: 0.01,
+      price_output_per_1m: 0.02,
+    });
+    const conv = new ConversationsRepo(db).create({ title: 'recommend' });
+    const costs = new CostsRepo(db);
+    costs.insert({
+      conversation_id: conv.id,
+      source_type: 'message',
+      source_id: 'ok',
+      feature: 'chat',
+      model_id: coder.id,
+      model_name_snapshot: coder.display_name,
+      input_tokens: 10,
+      output_tokens: 20,
+      price_input_per_1m_snapshot: 2,
+      price_output_per_1m_snapshot: 4,
+      price_per_call_snapshot: null,
+      estimated_cost_usd: null,
+      actual_cost_usd: 0.01,
+      success: true,
+      first_token_ms: 900,
+      duration_ms: 2_000,
+    });
+    costs.insert({
+      conversation_id: conv.id,
+      source_type: 'message',
+      source_id: 'bad',
+      feature: 'chat',
+      model_id: flaky.id,
+      model_name_snapshot: flaky.display_name,
+      input_tokens: 10,
+      output_tokens: 0,
+      price_input_per_1m_snapshot: 0.01,
+      price_output_per_1m_snapshot: 0.02,
+      price_per_call_snapshot: null,
+      estimated_cost_usd: null,
+      actual_cost_usd: null,
+      success: false,
+      classification: 'rate_limit',
+      first_token_ms: 500,
+      duration_ms: 600,
+    });
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/v1/models/recommendations',
+      headers: auth,
+      payload: { capability: 'chat', task: 'coding', limit: 3 },
+    });
+
+    expect(res.statusCode).toBe(200);
+    const body = res.json() as {
+      recommended_model_id: string | null;
+      recommendations: Array<{ model_id: string; score: number; reasons: string[]; tradeoffs: string[] }>;
+    };
+    expect(body.recommended_model_id).toBe(coder.id);
+    expect(body.recommendations.map((item) => item.model_id)).toContain(cheap.id);
+    expect(body.recommendations[0]?.reasons.join(' ')).toContain('工具');
+    expect(body.recommendations.find((item) => item.model_id === flaky.id)?.tradeoffs.join(' ')).toContain('失败率');
+  });
 });

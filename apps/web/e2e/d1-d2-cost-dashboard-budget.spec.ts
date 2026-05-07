@@ -55,6 +55,9 @@ test.beforeEach(async () => {
   await authedFetch(env, '/v1/memories?scope=global&key=monthly_budget_alert_state', {
     method: 'DELETE',
   });
+  await authedFetch(env, '/v1/memories?scope=global&key=monthly_budget_hard_limit', {
+    method: 'DELETE',
+  });
 });
 
 test('D1 cost dashboard opens and supports scope/group switching', async ({ page }) => {
@@ -70,6 +73,29 @@ test('D1 cost dashboard opens and supports scope/group switching', async ({ page
   await expect(page.getByTestId('cost-dashboard-panel')).toBeVisible();
   await expect(page.getByTestId('cost-dashboard-total')).toBeVisible();
   await expect(page.getByTestId('cost-dashboard-row').first()).toBeVisible();
+  const firstCall = page.getByTestId('cost-call-log-row').first();
+  await expect(firstCall).toBeVisible();
+  await expect(firstCall.getByTestId('cost-call-source-id')).toContainText('Cost');
+  await expect(firstCall.getByTestId('cost-call-run-link')).toContainText('Run');
+  await expect(firstCall.getByTestId('cost-call-event-link')).toContainText('成本记录');
+  await firstCall.getByTestId('cost-call-focus-run').click();
+  await expect(page.getByTestId('control-center')).toHaveCount(0, { timeout: 10_000 });
+  await expect(page.getByTestId('run-timeline-panel')).toBeVisible({ timeout: 10_000 });
+  await expect(
+    page.locator('[data-testid="run-event"][data-kind="cost.recorded"][data-focused="1"]'),
+  ).toBeVisible({ timeout: 10_000 });
+  await page
+    .locator('[data-testid="run-event"][data-kind="cost.recorded"][data-focused="1"]')
+    .getByTestId('run-event-focus-cost')
+    .click();
+  await expect(page.getByTestId('control-center')).toBeVisible({ timeout: 10_000 });
+  await expect(page.getByTestId('cost-dashboard-panel')).toBeVisible();
+  await expect(
+    page.locator('[data-testid="cost-call-log-row"][data-focused="1"]'),
+  ).toBeVisible({ timeout: 10_000 });
+  await expect(page.getByTestId('run-timeline-panel')).toHaveCount(0);
+
+  await expect(page.getByTestId('cost-dashboard-panel')).toBeVisible();
 
   await page.getByTestId('cost-dashboard-group-conversation').click();
   await expect(page.getByTestId('cost-dashboard-group-conversation')).toHaveAttribute('data-active', '1');

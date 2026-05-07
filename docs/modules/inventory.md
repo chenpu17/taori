@@ -124,7 +124,7 @@ M2.5（Model Center / Price Catalog / Volcengine Ark）已实现：
 - 价格同步不变量：`patchPricing` 始终刷新 `price_synced_at`（即便 patch 为空），用户字段（alias 等）始终保留，per-provider 错误隔离
 - 测试：`apps/sidecar/test/m2-5-catalog-sync.test.ts`（2 用例：价格 diff 持久化 + 错误隔离），sidecar 105/105 passing
 - E2E 覆盖：新增 `apps/web/e2e/m2.5-modelcenter.spec.ts` / `m2.5-volcengine-ark.spec.ts` / `m2.5-catalog-sync-ui.spec.ts`；既有 `m1.6-settings` / `m1.8-dod-final` / `r3.1-mc3-reorder` / `r5-user-journey` / `r5-demoted-badge` 全量迁移到 ModelCenter testid（model-row-* / provider-chip-test-* / model-center-tab-* 等）；Playwright 72/72 passing。详见 [架构 11 · QA 策略](../architecture/11-qa-strategy.md)
-- ModelCenter 新增的可测能力：`provider-chip-test-{id}`（沿用 `/v1/models/:id/test` 探活）、`model-row-up/down-{id}`（fallback_order ▲/▼）、`model-row-default-{id}`（设为默认）、`model-row-demoted-{id}`（⚠️ 自动降级徽章）
+- ModelCenter 新增的可测能力：`provider-chip-test-{id}`（沿用 `/v1/models/:id/test` 探活）、`model-row-up/down-{id}`（fallback_order ▲/▼）、`model-row-default-{id}`（设为默认）、`model-demoted-{id}`（⚠️ 自动降级徽章）
 
 ## 10. M2.5 合同变化
 
@@ -148,6 +148,7 @@ C3（Prompt 模板 & Persona 预设）已实现：
 - `apps/sidecar`：新增 `src/routes/templates-personas.ts`；新增 repo `PromptTemplatesRepo` / `PersonasRepo`
 - `packages/shared`：新增 `PromptTemplate*` / `Persona*` schema 与 `ChatRequest.persona_id`
 - 数据：SQLite 新增 `prompt_templates` / `personas`，无破坏式迁移；会话 Persona 绑定复用 `memories`
+- 首次读取 `/v1/personas` 且 Persona 表为空时，Sidecar 会自动创建一个“架构评审助手”示例 Persona，作为用户配置参考；用户删除后不会反复重建，接口返回结构不变
 - `apps/web`：`Settings.tsx` 新增模板/Persona 管理；`App.tsx` 聊天头部新增模板选择器与 Persona 下拉；模板支持 `{{变量}}` 填空
 - 验证：sidecar `c3-templates-personas.test.ts` 通过；Playwright `c3-templates-personas.spec.ts` 通过
 
@@ -178,10 +179,88 @@ C3（Prompt 模板 & Persona 预设）已实现：
 - `packages/shared`：新增 `PricingMetaSchema`、`McpServer*` schema、`mcp_server` ID 前缀；`ModelCreate/Update/DiscoveredModel/BackupModel` 扩展 `pricing_meta`；`RoundtableAnnotation` 新增 `rt.tool_trace`。
 - `apps/sidecar`：新增 `mcp_servers` 表、`src/mcp` stdio JSON-RPC 客户端、`/v1/mcp/servers*` 路由；Capability Bus 支持按 MCP Server 替换注册工具；admin clear 会清除 MCP 配置和 Bus 中的 MCP 工具。
 - `apps/sidecar`：`models.pricing_meta` additive migration 落地；`ModelsRepo.create/update/patchPricing` 支持复杂价格元数据。
+
+## 10.14 Agent Runtime D4 健康视图
+
+- `apps/sidecar`：新增 `GET /v1/tools/health`，基于 `cost_records(source_type='tool_call')` 汇总 Capability Bus 当前工具最近 24h 调用数、失败数、平均耗时和最近失败分类；工具调用失败会把 `validation_error` / `permission_denied` / `tool_timeout` / `mcp_crashed` 等分类写入成本记录。
+- `apps/web`：控制中心概览页展示模型/工具最近 24h 健康摘要；控制中心工具页在每个工具卡片内展示工具健康条；模型健康继续复用 ModelCenter 的 `/v1/models/health` 面板。
+- `packages/shared`：新增 `ToolHealthRowSchema` / `ToolHealthRow`，作为 `/v1/tools/health` 前后端合同。
 - `apps/sidecar`：圆桌 `round-runner` 为支持 tools 的参与者注入内置 web 工具和 MCP 工具，流式输出 `rt.tool_trace`。
 - `apps/web`：控制中心工具页新增 MCP Server 添加/刷新/启停/删除；模型编辑器新增 `pricing_meta` JSON 编辑；圆桌列内展示工具调用痕迹并在回合刷新后保留。
 - 合同文档：新增 `apps/sidecar/MODULE.md`、`apps/web/MODULE.md`、`packages/shared/MODULE.md`。
 - 验证：`apps/sidecar/test/mcp-pricing-meta.test.ts` 覆盖 MCP stdio 刷新/调用和 `pricing_meta` 持久化；`apps/web/e2e/mcp-pricing-roundtable-tools.spec.ts` 覆盖真实 Web UI 的 MCP 添加、模型复杂价格编辑、圆桌 MCP 工具痕迹。
+
+## 10.14 v1.0 Agent Runtime 计划
+
+下一阶段聚焦 Run Timeline、Agent Run 状态机、恢复动作和真实模型验证：
+
+- `packages/shared`：新增 run status / run event / recovery action 合同。
+- `apps/sidecar`：拥有 run 生命周期真相，负责事件写入、停止/续写、retry/fallback/skip-tool 恢复策略、成本归因和 FK 降级。
+- `apps/web`：新增运行过程侧栏、消息级续写/继续解决入口、恢复确认 UI、模型/工具健康展示。
+- `apps/sidecar/capability-bus`：工具调用接收 `run_id`，写入工具生命周期事件，失败进入统一恢复候选。
+- `scripts/verify-real-journey.mjs`：新增 agent-runtime 真实模型用户旅程；真实 Provider 失败需输出结构化 failure artifact。
+- 模块映射详见 [v1-agent-runtime-mapping.md](./v1-agent-runtime-mapping.md)，架构提案详见 [19-agent-runtime-v1-proposal.md](../architecture/19-agent-runtime-v1-proposal.md)。
+
+## 10.15 MCP 聊天链路修复
+
+- `apps/sidecar`：Capability Bus 新增 AI SDK tools 转换入口，普通 `/v1/chat` 不再只暴露 image/web builtin；会话有效、全局启用且模型支持 tools 时，`mcp.*` 工具会动态注入上游模型。
+- `apps/sidecar`：MCP stdio client 从每次调用临时 spawn 改为按 server 配置复用已初始化 session；server 更新、删除、进程崩溃或请求超时时会关闭并移除池内 session。
+- `apps/sidecar`：MCP server 返回的基础 JSON Schema 会转换为 Zod schema，用于 Capability Bus 调用前校验；MCP 超时归类为 `tool_timeout`，进程退出/启动失败归类为 `mcp_crashed`。
+- 验证：`pnpm --filter @taori/sidecar typecheck` 通过；`pnpm test:sidecar` 27 文件 / 186 测试通过。
+
+## 10.16 停止 / 续写闭环
+
+- `apps/sidecar`：新增 `POST /v1/runs/:id/continue`。Sidecar 根据原 run event 找到 `assistant_message_id` 和上一条 user message，仅允许续写状态为 `incomplete` 的助手消息；新 run 使用 `kind='continue'`，通过 `parent_run_id` 指向原 run，并通过 `continued_from_message_id` 记录原助手消息。
+- `apps/web`：消息级“续写”按钮从前端追加“请继续上文”改为查找对应 incomplete run 并调用 Sidecar continue API；续写完成后刷新消息列表、Run Timeline、实时成本和侧边栏，避免生成额外 user message。
+- `scripts/verify-real-journey.mjs`：真实模型用户旅程增加普通聊天 MCP 工具调用验证，覆盖工具痕迹、上下文快照、Run Timeline 和 `tool_call` 成本记录。
+- 合同影响：Sidecar 新增公共恢复 API；Renderer 消费该 API；`packages/shared` 继续复用既有 Agent Run / Event 类型，无新增 schema。
+- 验证：定向 sidecar / web typecheck、Agent Run 单元测试、C2 停止续写 E2E 和真实模型 journey 需作为本阶段验收口径。
+
+## 10.17 恢复策略 Sidecar 闭环
+
+- `packages/shared`：新增 `RecoverRunRequestSchema`，`action` 支持 `continue / retry_same_model / switch_model / skip_tool / compact_context`；`skip_tool` 请求可携带 `tool_name`，失败决策 annotation 可携带 `tool_name` / `tool_label`。
+
+## 10.18 DeepSeek 官方供应商
+
+- `packages/shared`：`ProviderTypeSchema` 新增 `deepseek`，共享常量新增 `DEFAULT_DEEPSEEK_BASE_URL=https://api.deepseek.com`。
+- `apps/sidecar`：Provider registry 新增 DeepSeek 官方 adapter，通过 OpenAI-compatible `/models` 测试与发现 `deepseek-v4-flash` / `deepseek-v4-pro`，并导入为支持 tools 的 chat 模型。
+- `apps/web`：Onboarding / 模型管理供应商预设新增“DeepSeek 官方”，默认 Base URL 来自 shared 常量。
+- `apps/sidecar`：新增 `POST /v1/runs/:id/recover`。Sidecar 根据原 run event 找到源 user message、原 assistant message 和模型，创建新的 assistant message 与 `kind='retry'` 子 run；恢复链写入 `recovery.started -> turn.started -> ... -> recovery.completed/failed`，`parent_run_id` 指向原 run。
+- `apps/sidecar`：`compact_context` 使用确定性摘要压缩源用户消息之前的较早历史，不插入新 user message，并在 recovery event payload 中记录压缩消息数和摘要长度。
+- `apps/sidecar`：`skip_tool` 从原 run events 中定位最后失败工具，创建新的 assistant message 与 `kind='retry'` 子 run，本轮恢复临时禁用该工具并注入恢复说明；找不到失败工具时返回 409，避免伪装成功。
+- `apps/web`：失败决策卡片的“重试 / 切换并重试 / 压缩上下文后重试 / 跳过失败工具继续”改为调用 recover API；前端不再自行 `regenerate` 决定恢复语义，只负责确认动作、选择目标模型或失败工具、刷新消息 / Timeline / 成本。
+- 当前边界：`continue` 仍走 `/v1/runs/:id/continue`；`skip_tool` 只在当前恢复 run 禁用目标工具，不永久修改用户工具配置。
+- 验证：`agent-runs.test.ts` 覆盖 recover 不插入 user message、子 run、recovery event、compact_context 压缩元数据和 skip_tool 409/成功路径；`m2.1-failure-decision.spec.ts` 覆盖 UI 点击恢复按钮会调用 Sidecar recover API；`m2.1-skip-tool-recovery.spec.ts` 覆盖用户点击“跳过失败工具继续”后不新增 user message，且恢复请求不再暴露失败 MCP 工具。
+
+## 10.17.1 高成本恢复确认闭环
+
+- `packages/shared`：`RecoverRunRequestSchema` 新增 `confirmed_cost`；新增 `ContinueRunRequestSchema` 和 `CostConfirmationRequiredDetailsSchema`；错误码新增 `cost_confirmation_required`（HTTP 409）。
+- `apps/sidecar`：`/v1/runs/:id/continue` 与 `/v1/runs/:id/recover` 在创建 assistant message 和启动上游前执行成本确认门禁，复用 `cost_confirm_threshold_usd`、`cost_confirm_disabled_models`、`cost_confirm_disabled_conversations`、`monthly_budget_usd` 与实时本月成本；未确认时返回结构化 details，确认后才继续创建子 run。
+- `apps/web`：`api.continueRun/recoverRun` 保留结构化错误；消息级续写和失败恢复收到 `cost_confirmation_required` 时复用 `CostConfirmDialog`，用户点继续后以 `confirmed_cost=true` 重放原动作，确认前不新增助手消息。
+- 验证：`agent-runs.test.ts` 覆盖 continue/recover 未确认阻断与确认放行；`m2.1-failure-decision.spec.ts` 覆盖恢复动作确认弹窗；`c2-stop-continue.spec.ts` 覆盖停止后续写确认弹窗；`m2.2-cost-l3-l4.spec.ts` 保持普通发送确认回归。
+
+## 10.18 Agent Run Header 与上下文窗口管理
+
+- `apps/sidecar`：新增 SQLite `agent_runs` Header 表，作为 `run_events` 的物化查询索引；`run_events` 仍是 append-only 真相源，事件 append 时同步 upsert Header，旧数据或 Header 缺失时继续从 events 推导兜底。
+- `apps/sidecar`：聊天、续写、恢复三条生成路径按模型 `context_length` 自动做滑动窗口裁剪，保留系统提示和最近消息，避免长对话直接超过上游上下文窗口。
+- `packages/shared`：`ContextSnapshotAnnotation` 增加可选 `context_window`，记录原始/送入消息数、估算输入 token、预算、模型窗口和裁剪策略。
+- `apps/web`：运行过程上下文快照卡片展示自动裁剪数量；不改变聊天发送请求合同。
+- 验证：`agent-runs.test.ts` 覆盖 Header 物化更新和小上下文模型触发裁剪快照；Sidecar/Web typecheck 作为合同兼容检查。
+
+## 10.19 圆桌接入 Agent Run Timeline
+
+- `apps/sidecar`：圆桌分析、轮次、单参与者重试、总结和取消均写入 `run_events`，并通过 `agent_runs` 物化为 `kind='roundtable'` 的 run；事件覆盖 `turn.started/context.snapshot/model.started/model.completed/model.failed/tool.* /cost.recorded/turn.completed/turn.failed/turn.cancelled`。
+- `apps/sidecar`：圆桌参与者调用 web/MCP 工具时，除既有 `rt.tool_trace` SSE 外，同步写入工具生命周期事件，工具失败会进入统一 Timeline 可观测面。
+- `apps/web`：圆桌 launch 成功后同步当前 conversation id，用户无需先发送普通聊天消息即可打开“运行过程”查看圆桌分析和参与者事件。
+- `apps/sidecar`：`chat.ts` 首步拆分为 `src/chat/context-window.ts`、`src/chat/recovery.ts`、`src/chat/run-actions.ts` 与 `src/chat/upstream-tools.ts`，先把上下文窗口、恢复/续写 run 解析、compact 纯逻辑、continue/recover 上下文组装和 AI SDK 工具构建从主路由中移出；公共 HTTP/SSE 合同不变。
+- 验证：`m3a-2-rounds.test.ts` 覆盖 roundtable round 的 run events 与 header；`m3a-3-summary-export.test.ts` 覆盖 summarize 的 run events 与 header；`run-timeline-user-journeys.spec.ts -g "roundtable discussion"` 覆盖用户从 UI 发起圆桌、跑一轮并打开 Run Timeline。
+
+## 10.20 P1 语义压缩设计
+
+- `docs/product/18-p1-semantic-compact.md`：定义语义压缩的用户目标、默认策略、可见性和不做范围。
+- `docs/architecture/22-p1-semantic-compact-proposal.md`：定义 recover request 扩展、`context.compacted` 事件、语义压缩 Sidecar 流程、预算/成本/回退约束。
+- `docs/modules/p1-semantic-compact-mapping.md`：记录 shared、sidecar chat/cost/run-events、web 恢复卡/设置/Timeline 的模块边界。
+- 当前边界：首版默认仍是 deterministic compact；semantic compact 必须显式启用或用户确认，且必须走统一预算硬上限。
 
 ## 10.4 D1 / D2 完工记录（v0.8）
 
@@ -363,6 +442,69 @@ E2（数据备份 / 恢复）已实现：
   - 新增持久表 `run_events`；旧 DB 启动时幂等创建
 - 设计
   - 见 [架构 17](../architecture/17-run-timeline-proposal.md) 与 [产品 12](../product/12-run-timeline.md)
+
+## 11. 灰盒原则提醒
+
+## 10.12 Keychain UX 与桌面验证默认降噪（v1.0）
+
+- `apps/web`
+  - ModelCenter 打开时不再自动调用 `/v1/providers/key-status`，避免仅浏览设置就触发系统钥匙串授权。
+  - Provider 卡片只展示“已保存 Key 引用”；真实读取由“检查钥匙串状态”、测试连接、模型同步或发送消息等用户动作触发；显式检查后会标出 Key 缺失 Provider，并可直接重新填写 Key。
+  - Help Center 默认“运行自检”不读取 Keychain；钥匙串深度检查拆成显式按钮。
+- `apps/sidecar`
+  - `/health` 的 Rust control channel 探测加短超时，只用于诊断 `control_channel` 状态，不让首屏健康检查被控制通道探测长期阻塞。
+  - `/v1/selfcheck` 默认跳过 Keychain probe；只有 `?include_keychain=1` 才写读删临时探针。
+  - `/v1/providers/key-status` 在 Keychain 模式下默认拒绝隐式读取，必须带 `confirm_keychain=1` 才串行读取 Provider Keychain 状态；control channel Keychain 读/写/删有显式超时，避免系统授权卡住时用户请求无限等待。
+- `apps/desktop`
+  - `pnpm dev:desktop` 默认设置 `TAORI_DESKTOP_DEV_KEYSTORE=dev_file`，桌面开发模式不把 Rust control channel 注入 Sidecar，因此不会使用系统 Keychain；需要真实 Keychain 时显式设置 `TAORI_DESKTOP_DEV_KEYSTORE=keychain`。
+  - 新增 debug-only WebView automation channel；仅在 debug build 且 `TAORI_DESKTOP_AUTOMATION=1` 时启动，生产构建不暴露。
+- `scripts`
+  - 新增 `pnpm verify:browser-rc`，串行执行 `verify:web`、`verify:real:report` 和 `git diff --check`，输出 `/tmp/taori-browser-rc-*` 结构化 artifact。
+  - `verify:desktop` 和 `verify:desktop-ui` 默认不读取 Keychain、不发真实模型。
+  - 完整 Keychain / 真实模型桌面验证必须显式 opt-in，避免 macOS dev 二进制反复弹钥匙串授权；显式检查串行执行 Keychain probe 和 Provider key-status，并写结构化 artifact。
+
+## 10.13 真实 Provider 风险诊断面板（v1.0）
+
+- `apps/sidecar`
+  - 新增只读公共接口 `GET /v1/diagnostics/real-provider/latest`。
+  - 接口只扫描最近一次 `pnpm verify:real` 写入的本地 `/tmp/taori-real-journey-*` 产物，汇总步骤通过数、结构化风险、Agent Run 数、Run Event 数、成本调用数和选中模型能力。
+  - 接口不读取系统 Keychain、不发起真实 Provider 调用，不替代执行 `pnpm verify:real`。
+- `apps/web`
+  - Help Center 新增“真实模型能力诊断”入口，展示最近真实验证 artifact 摘要、关键步骤、风险列表和产物目录。
+  - 该入口只读本地诊断结果，不触发 macOS 钥匙串授权弹窗。
+- 数据
+  - 无新表；诊断来源是临时验证 artifact。
+- 验证
+  - Sidecar：`diagnostics.test.ts`
+  - Web：`b3-help-center.spec.ts`
+
+## 10.14 成本来源与运行过程关联（v1.0）
+
+- `apps/sidecar`
+  - 普通聊天与圆桌 `cost.recorded` 事件 payload 携带 `cost_record_id`。
+  - `GET /v1/costs/calls` 在最近调用日志中附带 `run_id`、`run_event_id`、`run_event_kind` 和 `run_event_label`，读路径根据 `cost_record_id` 与 source 信息反查最近 run event；可选 `cost_record_id` 查询参数用于精确定位单条成本调用。
+  - 无数据库迁移；`cost_records` 与 `run_events` 仍各自持有原状态。
+- `apps/web`
+  - 成本看板最近调用日志展示 Cost ID、Run ID 和运行事件标签。
+  - Run Timeline 的 `cost.recorded` 事件展示同一 Cost ID，并可跳回 Cost Dashboard 高亮对应成本调用；用户能在两个视图之间核对普通聊天、恢复动作和圆桌参与者成本。
+- 验证
+  - Sidecar：`costs.test.ts`
+  - Web：`d1-d2-cost-dashboard-budget.spec.ts`、`m2.1-failure-decision.spec.ts`、`run-timeline-user-journeys.spec.ts`
+
+## 10.15 PackyAPI 与 SiliconFlow Provider 预设（v1.0）
+
+- `packages/shared`
+  - `ProviderTypeSchema` 新增 `packyapi`、`siliconflow`。
+  - 新增默认接入点常量：`DEFAULT_PACKYAPI_BASE_URL`、`DEFAULT_SILICONFLOW_BASE_URL`。
+- `apps/sidecar`
+  - Provider registry 新增 PackyAPI / PackyCode 适配器：`/models` 可用时读取并推断能力，始终补充 `gpt-image-2`；`/models` 不可用时仍可导入 `gpt-image-2`。
+  - Provider registry 新增 SiliconFlow 适配器：通过 `/models` 推断 chat / multimodal / image / embedding 能力；图像模型调用 `/images/generations` 时使用 SiliconFlow 的 `image_size` 参数。
+  - `builtin.image_generate` 支持 OpenAI-compatible URL 返回、PackyAPI `gpt-image-2` 和 SiliconFlow URL 返回，并统一落地为本地 file/message attachment。
+- `apps/web`
+  - Onboarding 供应商预设新增 PackyAPI / PackyCode 与硅基流动 SiliconFlow，用户不再需要手动选择“自定义”并填写 Base URL。
+- 验证
+  - Sidecar：`providers.test.ts`、`m2-4-image-gen.test.ts`
+  - Web：`provider-presets.spec.ts`
 
 ## 11. 灰盒原则提醒
 

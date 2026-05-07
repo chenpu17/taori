@@ -8,6 +8,21 @@ type CostGroupBy = 'model' | 'conversation' | 'feature';
 interface CostDashboardProps {
   onClose: () => void;
   embedded?: boolean;
+  focusTarget?: CostCallFocusTarget | null;
+  onFocusConsumed?: () => void;
+}
+
+interface CostRunFocusDetail {
+  conversationId: string;
+  runId: string;
+  runEventId: string | null;
+  costRecordId: string;
+}
+
+interface CostCallFocusTarget {
+  costRecordId: string;
+  runId: string | null;
+  runEventId: string | null;
 }
 
 interface DashboardRow {
@@ -56,6 +71,7 @@ interface CallLogRow {
   conversation_id: string | null;
   conversation_title: string | null;
   source_type: string;
+  source_id: string | null;
   feature: string;
   model_id: string | null;
   model_name_snapshot: string;
@@ -68,6 +84,10 @@ interface CallLogRow {
   classification: string | null;
   first_token_ms: number | null;
   duration_ms: number | null;
+  run_id: string | null;
+  run_event_id: string | null;
+  run_event_kind: string | null;
+  run_event_label: string | null;
 }
 
 const GROUP_LABELS: Record<CostGroupBy, string> = {
@@ -83,6 +103,10 @@ const SOURCE_LABELS: Record<string, string> = {
   summarizer: '圆桌总结',
   tool_call: '工具',
 };
+
+function dispatchCostRunFocus(detail: CostRunFocusDetail): void {
+  window.dispatchEvent(new CustomEvent<CostRunFocusDetail>('taori:focus-run-event', { detail }));
+}
 
 function normalizeDashboardRow(row: DashboardApiRow, groupBy: CostGroupBy): DashboardRow {
   const modelId = typeof row.model_id === 'string' ? row.model_id : null;
@@ -177,7 +201,12 @@ function Sparkline({
   );
 }
 
-export function CostDashboard({ onClose, embedded = false }: CostDashboardProps): JSX.Element {
+export function CostDashboard({
+  onClose,
+  embedded = false,
+  focusTarget = null,
+  onFocusConsumed,
+}: CostDashboardProps): JSX.Element {
   const [scope, setScope] = useState<CostScope>('today');
   const [groupBy, setGroupBy] = useState<CostGroupBy>('model');
   const [rows, setRows] = useState<DashboardRow[] | null>(null);
@@ -185,6 +214,7 @@ export function CostDashboard({ onClose, embedded = false }: CostDashboardProps)
   const [error, setError] = useState<string | null>(null);
   const [refreshing, setRefreshing] = useState(false);
   const [lastUpdatedAt, setLastUpdatedAt] = useState<number | null>(null);
+  const [focusedCostRecordId, setFocusedCostRecordId] = useState<string | null>(null);
   const refreshSeq = useRef(0);
 
   useEffect(() => {
@@ -218,6 +248,27 @@ export function CostDashboard({ onClose, embedded = false }: CostDashboardProps)
     }
   }, [scope, groupBy]);
 
+  const refreshFocusedCall = useCallback(async (costRecordId: string): Promise<void> => {
+    const seq = ++refreshSeq.current;
+    setRefreshing(true);
+    setError(null);
+    try {
+      const logs = await api.costsCallLogs(1, { costRecordId });
+      if (seq !== refreshSeq.current) return;
+      const focusedRows = logs.data.rows ?? [];
+      setCallLogs((prev) => {
+        const rest = (prev ?? []).filter((row) => row.id !== costRecordId);
+        return [...focusedRows, ...rest].slice(0, 12);
+      });
+      setLastUpdatedAt(Date.now());
+    } catch (e) {
+      if (seq !== refreshSeq.current) return;
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      if (seq === refreshSeq.current) setRefreshing(false);
+    }
+  }, []);
+
   useEffect(() => {
     let cancelled = false;
     const run = async (reset: boolean): Promise<void> => {
@@ -231,6 +282,21 @@ export function CostDashboard({ onClose, embedded = false }: CostDashboardProps)
       window.clearInterval(timer);
     };
   }, [refresh]);
+
+  useEffect(() => {
+    if (!focusTarget?.costRecordId) return;
+    setFocusedCostRecordId(focusTarget.costRecordId);
+    void refreshFocusedCall(focusTarget.costRecordId);
+  }, [focusTarget, refreshFocusedCall]);
+
+  useEffect(() => {
+    if (!focusedCostRecordId || callLogs == null) return;
+    const target = document.querySelector(
+      `[data-testid="cost-call-log-row"][data-cost-record-id="${focusedCostRecordId}"]`,
+    );
+    target?.scrollIntoView({ block: 'center', behavior: 'smooth' });
+    if (target) onFocusConsumed?.();
+  }, [callLogs, focusedCostRecordId, onFocusConsumed]);
 
   const topRows = useMemo(() => (rows ?? []).slice(0, 8), [rows]);
   const total = useMemo(
@@ -378,6 +444,12 @@ export function CostDashboard({ onClose, embedded = false }: CostDashboardProps)
                 key={row.id}
                 className="cost-call-log-row"
                 data-testid="cost-call-log-row"
+                data-cost-record-id={row.id}
+                data-conversation-id={row.conversation_id ?? ''}
+                data-source-id={row.source_id ?? ''}
+                data-run-id={row.run_id ?? ''}
+                data-run-event-id={row.run_event_id ?? ''}
+                data-focused={focusedCostRecordId === row.id ? '1' : '0'}
               >
                 <div className="cost-call-log-main">
                   <strong>
@@ -387,7 +459,19 @@ export function CostDashboard({ onClose, embedded = false }: CostDashboardProps)
                   <span>
                     {SOURCE_LABELS[row.source_type] ?? row.source_type} · {row.feature}
                     {row.conversation_title ? ` · ${row.conversation_title}` : ''}
+                    {row.source_id ? ` · 来源 ${row.source_id.slice(0, 10)}` : ''}
                   </span>
+                  <div className="cost-call-log-links">
+                    <span data-testid="cost-call-source-id">Cost {row.id.slice(0, 10)}</span>
+                    {row.run_id ? (
+                      <span data-testid="cost-call-run-link">Run {row.run_id.slice(0, 10)}</span>
+                    ) : null}
+                    {row.run_event_id ? (
+                      <span data-testid="cost-call-event-link">
+                        {row.run_event_label ?? row.run_event_kind ?? '运行事件'} {row.run_event_id.slice(0, 10)}
+                      </span>
+                    ) : null}
+                  </div>
                 </div>
                 <div className="cost-call-log-meta">
                   <span className={row.success ? 'ok' : 'fail'}>
@@ -395,6 +479,23 @@ export function CostDashboard({ onClose, embedded = false }: CostDashboardProps)
                   </span>
                   <span>{row.actual_cost_usd == null ? '费用未知' : formatUsd(row.actual_cost_usd)}</span>
                   <span>{new Date(row.created_at).toLocaleTimeString()}</span>
+                  {row.conversation_id && row.run_id ? (
+                    <button
+                      type="button"
+                      className="cost-call-log-focus"
+                      data-testid="cost-call-focus-run"
+                      onClick={() =>
+                        dispatchCostRunFocus({
+                          conversationId: row.conversation_id!,
+                          runId: row.run_id!,
+                          runEventId: row.run_event_id,
+                          costRecordId: row.id,
+                        })
+                      }
+                    >
+                      查看运行
+                    </button>
+                  ) : null}
                 </div>
               </article>
             ))}

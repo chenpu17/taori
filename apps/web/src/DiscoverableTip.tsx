@@ -31,9 +31,12 @@ export const DiscoverableTip: React.FC<DiscoverableTipProps> = ({ content, onDis
     <div className={`discoverable-tip ${fadeOut ? 'fade-out' : ''}`} data-testid={`tip-${content.id}`}>
       <div className="tip-overlay" onClick={handleGotIt}></div>
       <div className="tip-card">
+        <div className="tip-kicker">发现新能力</div>
         <div className="tip-header">
           <span className="tip-icon">{content.icon}</span>
-          <span className="tip-title">{content.title}</span>
+          <div className="tip-title-wrap">
+            <span className="tip-title">{content.title}</span>
+          </div>
         </div>
         <div className="tip-body">{content.description}</div>
         <div className="tip-footer">

@@ -7,6 +7,7 @@ import {
 import { McpServersRepo } from '../db/repos/index.js';
 import type { CapabilityBus } from '../bus/index.js';
 import { refreshMcpServerTools } from '../mcp/index.js';
+import { closeMcpServerSession } from '../mcp/client.js';
 import type { BuildServerArgs } from '../server.js';
 
 export interface McpRouteDeps extends BuildServerArgs {
@@ -41,11 +42,19 @@ export function registerMcpRoute(app: FastifyInstance, deps: McpRouteDeps): void
         message: parsed.error.errors.map((e) => e.message).join('; '),
       });
     }
+    const previous = repo.get(req.params.id);
     const server = repo.update(req.params.id, parsed.data);
     if (!server) {
       throw new TaoriError({
         code: 'not_found',
         message: `MCP server ${req.params.id} not found`,
+      });
+    }
+    if (previous) {
+      closeMcpServerSession({
+        command: previous.command,
+        args: previous.args,
+        env: previous.env,
       });
     }
     if (parsed.data.enabled === false) {
@@ -59,12 +68,20 @@ export function registerMcpRoute(app: FastifyInstance, deps: McpRouteDeps): void
   });
 
   app.delete<{ Params: { id: string } }>('/v1/mcp/servers/:id', async (req, reply) => {
+    const server = repo.get(req.params.id);
     deps.bus.unregisterBySource('mcp', req.params.id);
     const ok = repo.delete(req.params.id);
     if (!ok) {
       throw new TaoriError({
         code: 'not_found',
         message: `MCP server ${req.params.id} not found`,
+      });
+    }
+    if (server) {
+      closeMcpServerSession({
+        command: server.command,
+        args: server.args,
+        env: server.env,
       });
     }
     reply.code(204).send();

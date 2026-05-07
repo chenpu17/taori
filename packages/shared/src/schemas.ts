@@ -62,7 +62,7 @@ export type ProviderUpdate = z.infer<typeof ProviderUpdateSchema>;
 export const ProviderTestRequestSchema = z.object({
   type: ProviderTypeSchema,
   base_url: z.string().url(),
-  api_key: z.string().min(1).max(2048),
+  api_key: z.string().min(1).max(2048).optional(),
 });
 export type ProviderTestRequest = z.infer<typeof ProviderTestRequestSchema>;
 
@@ -197,6 +197,43 @@ export const ModelHealthRowSchema = z.object({
   last_failure_classification: ErrorClassificationSchema.nullable(),
 });
 export type ModelHealthRow = z.infer<typeof ModelHealthRowSchema>;
+
+export const ModelRecommendationTaskSchema = z.enum([
+  'general',
+  'coding',
+  'fast',
+  'cheap',
+  'long_context',
+  'vision',
+]);
+export type ModelRecommendationTask = z.infer<typeof ModelRecommendationTaskSchema>;
+
+export const ModelRecommendationRequestSchema = z.object({
+  capability: ModelCapabilitySchema.default('chat'),
+  task: ModelRecommendationTaskSchema.default('general'),
+  require_tools: z.boolean().optional(),
+  require_vision: z.boolean().optional(),
+  current_model_id: z.string().min(1).optional(),
+  limit: z.number().int().min(1).max(10).default(5),
+});
+export type ModelRecommendationRequest = z.infer<typeof ModelRecommendationRequestSchema>;
+
+export const ModelRecommendationSchema = z.object({
+  model_id: z.string(),
+  score: z.number(),
+  confidence: z.enum(['low', 'medium', 'high']),
+  reasons: z.array(z.string()),
+  tradeoffs: z.array(z.string()),
+  health: ModelHealthRowSchema,
+});
+export type ModelRecommendation = z.infer<typeof ModelRecommendationSchema>;
+
+export const ModelRecommendationResponseSchema = z.object({
+  task: ModelRecommendationTaskSchema,
+  recommended_model_id: z.string().nullable(),
+  recommendations: z.array(ModelRecommendationSchema),
+});
+export type ModelRecommendationResponse = z.infer<typeof ModelRecommendationResponseSchema>;
 
 /** Discovered model from a provider's listing endpoint (e.g. OpenRouter). */
 export const DiscoveredModelSchema = z.object({
@@ -372,6 +409,112 @@ export const PersonaUpdateSchema = z.object({
 });
 export type PersonaUpdate = z.infer<typeof PersonaUpdateSchema>;
 
+export const WorkflowRecipeVariableSchema = z.object({
+  name: z.string().min(1).max(64).regex(/^[A-Za-z_][A-Za-z0-9_ -]*$/),
+  label: z.string().min(1).max(80).optional(),
+  required: z.boolean().default(true),
+  default_value: z.string().max(2_000).optional(),
+});
+export type WorkflowRecipeVariable = z.infer<typeof WorkflowRecipeVariableSchema>;
+
+export const WorkflowRecipePersonaSchema = z.discriminatedUnion('mode', [
+  z.object({ mode: z.literal('none') }),
+  z.object({ mode: z.literal('existing'), persona_id: z.string().min(1) }),
+  z.object({ mode: z.literal('inline'), prompt: z.string().min(8).max(4_000) }),
+]);
+export type WorkflowRecipePersona = z.infer<typeof WorkflowRecipePersonaSchema>;
+
+export const WorkflowRecipeToolsSchema = z.object({
+  required: z.array(z.string().min(1).max(160)).max(20).default([]),
+  optional: z.array(z.string().min(1).max(160)).max(20).default([]),
+});
+export type WorkflowRecipeTools = z.infer<typeof WorkflowRecipeToolsSchema>;
+
+export const WorkflowRecipeOutputFormatSchema = z.object({
+  kind: z.enum(['markdown', 'json', 'plain']).default('markdown'),
+  sections: z.array(z.string().min(1).max(80)).max(20).default([]),
+});
+export type WorkflowRecipeOutputFormat = z.infer<typeof WorkflowRecipeOutputFormatSchema>;
+
+export const WorkflowRecipeBudgetSchema = z.object({
+  mode: z.enum(['none', 'soft_cap', 'hard_cap']).default('none'),
+  max_estimated_usd: z.number().nonnegative().max(1_000).nullable().optional(),
+});
+export type WorkflowRecipeBudget = z.infer<typeof WorkflowRecipeBudgetSchema>;
+
+export const WorkflowRecipeSpecSchema = z.object({
+  schema_version: z.literal(1),
+  name: z.string().min(1).max(120),
+  description: z.string().max(280).nullable().optional(),
+  prompt_template: z.string().min(1).max(20_000),
+  variables: z.array(WorkflowRecipeVariableSchema).max(50).default([]),
+  recommended_task: ModelRecommendationTaskSchema.default('general'),
+  model_strategy: z.enum(['keep_current', 'recommend', 'prefer_cheap', 'prefer_fast']).default('recommend'),
+  persona: WorkflowRecipePersonaSchema.default({ mode: 'none' }),
+  tools: WorkflowRecipeToolsSchema.default({ required: [], optional: [] }),
+  output_format: WorkflowRecipeOutputFormatSchema.default({ kind: 'markdown', sections: [] }),
+  budget: WorkflowRecipeBudgetSchema.default({ mode: 'none' }),
+  metadata: z.record(z.unknown()).default({}),
+});
+export type WorkflowRecipeSpec = z.infer<typeof WorkflowRecipeSpecSchema>;
+
+export const WorkflowRecipeSchema = z.object({
+  id: z.string(),
+  name: z.string().min(1).max(120),
+  description: z.string().max(280).nullable(),
+  schema_version: z.literal(1),
+  spec: WorkflowRecipeSpecSchema,
+  enabled: z.boolean(),
+  created_at: z.number().int(),
+  updated_at: z.number().int(),
+});
+export type WorkflowRecipe = z.infer<typeof WorkflowRecipeSchema>;
+
+export const WorkflowRecipeCreateSchema = z.object({
+  name: z.string().min(1).max(120),
+  description: z.string().max(280).nullable().optional(),
+  spec: WorkflowRecipeSpecSchema,
+  enabled: z.boolean().optional(),
+});
+export type WorkflowRecipeCreate = z.infer<typeof WorkflowRecipeCreateSchema>;
+
+export const WorkflowRecipeUpdateSchema = z.object({
+  name: z.string().min(1).max(120).optional(),
+  description: z.string().max(280).nullable().optional(),
+  spec: WorkflowRecipeSpecSchema.optional(),
+  enabled: z.boolean().optional(),
+});
+export type WorkflowRecipeUpdate = z.infer<typeof WorkflowRecipeUpdateSchema>;
+
+export const WorkflowRecipeImportSchema = z.object({
+  spec: WorkflowRecipeSpecSchema,
+  enabled: z.boolean().optional(),
+});
+export type WorkflowRecipeImport = z.infer<typeof WorkflowRecipeImportSchema>;
+
+export const WorkflowRecipeApplyPreviewRequestSchema = z.object({
+  variables: z.record(z.string().max(10_000)).default({}),
+  conversation_id: z.string().nullable().optional(),
+  current_model_id: z.string().nullable().optional(),
+});
+export type WorkflowRecipeApplyPreviewRequest = z.infer<typeof WorkflowRecipeApplyPreviewRequestSchema>;
+
+export const WorkflowRecipeApplyPreviewSchema = z.object({
+  recipe_id: z.string(),
+  prompt: z.string(),
+  missing_variables: z.array(z.string()),
+  persona: WorkflowRecipePersonaSchema,
+  tools: z.object({
+    required: z.array(z.object({ name: z.string(), enabled: z.boolean(), available: z.boolean() })),
+    optional: z.array(z.object({ name: z.string(), enabled: z.boolean(), available: z.boolean() })),
+  }),
+  recommended_task: ModelRecommendationTaskSchema,
+  model_strategy: z.enum(['keep_current', 'recommend', 'prefer_cheap', 'prefer_fast']),
+  budget: WorkflowRecipeBudgetSchema,
+  output_format: WorkflowRecipeOutputFormatSchema,
+});
+export type WorkflowRecipeApplyPreview = z.infer<typeof WorkflowRecipeApplyPreviewSchema>;
+
 export const BackupConflictStrategySchema = z.enum(['overwrite', 'skip', 'rename']);
 export type BackupConflictStrategy = z.infer<typeof BackupConflictStrategySchema>;
 
@@ -400,7 +543,7 @@ export const BackupModelRecordSchema = z.object({
   price_per_image: z.number().nullable(),
   price_per_video_second: z.number().nullable(),
   price_currency: z.string(),
-  pricing_meta: PricingMetaSchema.nullable(),
+  pricing_meta: PricingMetaSchema.nullable().optional().default(null),
   price_synced_at: z.number().int().nullable(),
   modalities: z.string().nullable(),
   context_length: z.number().int().nullable(),
@@ -646,8 +789,21 @@ export const ChatRequestSchema = z.object({
    * user message does not duplicate it in the conversation history.
    */
   skip_user_persist: z.boolean().optional(),
+  confirmed_cost: z.boolean().optional(),
 });
 export type ChatRequest = z.infer<typeof ChatRequestSchema>;
+
+export const ConversationExportFormatSchema = z.enum(['markdown']);
+export type ConversationExportFormat = z.infer<typeof ConversationExportFormatSchema>;
+
+export const ConversationExportIncludeTimelineSchema = z.enum(['none', 'summary']);
+export type ConversationExportIncludeTimeline = z.infer<typeof ConversationExportIncludeTimelineSchema>;
+
+export const ConversationExportQuerySchema = z.object({
+  format: ConversationExportFormatSchema.default('markdown'),
+  include_timeline: ConversationExportIncludeTimelineSchema.default('summary'),
+});
+export type ConversationExportQuery = z.infer<typeof ConversationExportQuerySchema>;
 
 export const ErrorBodySchema = z.object({
   code: ErrorCodeSchema,

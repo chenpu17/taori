@@ -1,16 +1,18 @@
 import { useChat } from '@ai-sdk/react';
-import type { Message as AiMessage } from '@ai-sdk/react';
 import { useEffect, useLayoutEffect, useState, useCallback, useRef, useMemo } from 'react';
 import { createPortal } from 'react-dom';
 import { getSidecarEndpoint, authedFetch } from './sidecar.js';
-import { api } from './api.js';
+import { api, isCostConfirmationRequiredError } from './api.js';
 import { Onboarding } from './Onboarding.js';
 import { ControlCenter } from './ControlCenter.js';
 import type { ControlCenterSection } from './ControlCenter.js';
 import { HelpCenter } from './HelpCenter.js';
 import { CommandPalette } from './CommandPalette.js';
 import { DiscoverableTip, TIPS, shouldShowTip } from './DiscoverableTip.js';
+import { EmptyState } from './EmptyState.js';
+import { StatusNotice } from './StatusNotice.js';
 import { TaoriIcon } from './TaoriIcon.js';
+import { ThemeToggle } from './ThemeToggle.js';
 import { RoundtableLaunchDialog } from './Roundtable.js';
 import { RoundtablePanel } from './RoundtablePanel.js';
 import { priceTier, PRICE_TIER_LABEL, formatUsd, estimateInputTokens, estimateCostUsd } from '@taori/shared';
@@ -18,14 +20,62 @@ import type {
   ContextSource,
   EffectiveTool,
   Model,
+  ModelHealthRow,
   Persona,
   PromptTemplate,
   Provider,
+  RecoverRunRequest,
   RunEvent,
   Tool,
+  WorkflowRecipe,
 } from '@taori/shared';
-import { renderMarkdown } from './markdown.js';
+import { MarkdownView } from './MarkdownView.js';
 import { modelBaseDisplayName, modelDisplayWithProvider } from './modelDisplay.js';
+import {
+  hasQuickCompareToolIntent,
+  isQuickCompareEligibleModel,
+  applyQuickCompareAnnotation,
+  messageRoleLabel,
+  parseChatMetaAnnotation,
+  pickFastAlternativeModel,
+  slowResponseThresholdMs,
+  toChatMessage,
+  type ChatMessage,
+  type QuickCompareUiState,
+} from './chatViewModel.js';
+
+declare global {
+  interface Window {
+    __TAORI_AUTOMATION__?: {
+      setActiveModel?: (id: string) => void;
+    };
+  }
+}
+
+interface CostRunFocusDetail {
+  conversationId: string;
+  runId: string;
+  runEventId: string | null;
+  costRecordId: string;
+}
+
+interface CostCallFocusDetail {
+  costRecordId: string;
+  runId: string | null;
+  runEventId: string | null;
+}
+
+interface RunTimelineFocusTarget {
+  runId: string;
+  runEventId: string | null;
+  costRecordId: string | null;
+}
+
+type MessageCost = {
+  input_tokens: number | null;
+  output_tokens: number | null;
+  actual_usd: number | null;
+};
 
 const STARTER_PROMPTS: Array<{ icon: string; title: string; desc: string; text: string }> = [
   {
@@ -104,6 +154,7 @@ const DISCOVERABLE_COST_TIP_THRESHOLD_USD = 0.01;
 const ACTIVE_CHAT_MODEL_MEMORY_KEY = 'active_chat_model_id';
 type MemoryScopeLabel = 'default' | 'global' | 'session';
 type TemplateLike = Pick<PromptTemplate, 'name' | 'description' | 'content'>;
+type WorkflowRecipeTemplateLike = TemplateLike & { recipe: WorkflowRecipe };
 
 interface ToolTraceAnnotation {
   type: 'tool_trace';
@@ -119,10 +170,22 @@ interface ToolTraceAnnotation {
 
 interface ContextSnapshotAnnotation {
   type: 'context_snapshot';
+  model_id?: string | null;
   context_sources?: ContextSource[];
   active_tool_names?: string[];
   disabled_tool_names?: string[];
+  context_window?: {
+    original_message_count: number;
+    sent_message_count: number;
+    omitted_message_count: number;
+    estimated_input_tokens: number;
+    budget_tokens: number | null;
+    model_context_length: number | null;
+    strategy: 'full' | 'sliding_window';
+  } | null;
 }
+
+type ContextWindowStats = NonNullable<ContextSnapshotAnnotation['context_window']>;
 
 interface ToolTraceStep {
   callId: string;
@@ -221,7 +284,13 @@ function isExpectedStopError(error: unknown): boolean {
   return /aborted|aborterror|econnreset|network error/i.test(message);
 }
 
+function isExpectedUserStopError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return isExpectedStopError(error) || /provider_error\/unknown:\s*Unknown error/i.test(message);
+}
+
 const USER_STOP_PENDING_KEY = 'taori.stream.user_stop_pending';
+const PENDING_PERSONA_DRAFT_KEY = 'taori.persona.pending';
 
 function setUserStopPending(value: boolean): void {
   try {
@@ -243,6 +312,26 @@ function hasUserStopPending(): boolean {
   }
 }
 
+function getPendingPersonaDraft(): string {
+  try {
+    return sessionStorage.getItem(PENDING_PERSONA_DRAFT_KEY) ?? '';
+  } catch {
+    return '';
+  }
+}
+
+function setPendingPersonaDraft(value: string): void {
+  try {
+    if (value) {
+      sessionStorage.setItem(PENDING_PERSONA_DRAFT_KEY, value);
+    } else {
+      sessionStorage.removeItem(PENDING_PERSONA_DRAFT_KEY);
+    }
+  } catch {
+    /* ignore storage failures */
+  }
+}
+
 function contextSnapshotFromAnnotations(
   annotations: Array<Record<string, unknown>>,
 ): ContextSnapshotAnnotation | null {
@@ -250,9 +339,38 @@ function contextSnapshotFromAnnotations(
   return snapshot ? (snapshot as unknown as ContextSnapshotAnnotation) : null;
 }
 
+function messageContextSummary(
+  snapshot: ContextSnapshotAnnotation | null,
+): string {
+  const parts: string[] = [];
+  if (snapshot?.model_id) parts.push('模型');
+  const persona = snapshot?.context_sources?.find((source) => source.type === 'persona');
+  if (persona?.active) parts.push(`Persona：${persona.label}`);
+  const activeToolCount = snapshot?.active_tool_names?.length ?? 0;
+  if (activeToolCount > 0) parts.push(`${activeToolCount} 个工具可见`);
+  const omitted = snapshot?.context_window?.omitted_message_count ?? 0;
+  if (omitted > 0) parts.push(`裁剪 ${omitted} 条`);
+  return parts.length > 0 ? parts.join(' · ') : '上下文';
+}
+
 function comparableModelUnitPrice(model: Model): number | null {
   const value = model.price_per_call ?? model.price_input_per_1m ?? null;
   return value != null && Number.isFinite(value) ? value : null;
+}
+
+function isTemporarilyDisabledModel(model: Model, now = Date.now()): boolean {
+  return model.disabled_until != null && model.disabled_until > now;
+}
+
+function pickPreferredChatModel(models: Model[], now = Date.now()): Model | null {
+  const selectable = models.filter((model) => !isTemporarilyDisabledModel(model, now));
+  return (
+    selectable.find((model) => model.is_default_for === 'chat')
+    ?? selectable[0]
+    ?? models.find((model) => model.is_default_for === 'chat')
+    ?? models[0]
+    ?? null
+  );
 }
 
 function findKnownCheaperPeer(models: Model[], current: Model): Model | null {
@@ -292,7 +410,9 @@ export function App(): JSX.Element {
   });
   const [controlCenterSection, setControlCenterSection] =
     useState<ControlCenterSection | null>(null);
+  const [costCallFocus, setCostCallFocus] = useState<CostCallFocusDetail | null>(null);
   const [helpOpen, setHelpOpen] = useState(false);
+  const overlayReturnFocusRef = useRef<HTMLElement | null>(null);
   const [forceOnboarding, setForceOnboarding] = useState(false);
 
   useEffect(() => {
@@ -333,10 +453,15 @@ export function App(): JSX.Element {
         api.listTools(),
       ]);
       const enabled = providers.filter((p) => p.enabled);
+      const providerIds = new Set(providers.map((p) => p.id));
       const chatModels = models.filter(
-        (m) => (m.capability === 'chat' || m.capability === 'multimodal') && m.enabled,
+        (m) =>
+          (m.capability === 'chat' || m.capability === 'multimodal') &&
+          m.enabled &&
+          m.provider_id != null &&
+          providerIds.has(m.provider_id),
       );
-      const def = chatModels.find((m) => m.is_default_for === 'chat') ?? chatModels[0];
+      const def = pickPreferredChatModel(chatModels);
       if (enabled.length === 0 || !def) {
         setBoot({ kind: 'onboarding' });
       } else {
@@ -370,6 +495,64 @@ export function App(): JSX.Element {
     setForceOnboarding(false);
   }, [persistBrowseOnly]);
 
+  const rememberOverlayTrigger = useCallback((target?: EventTarget | null): void => {
+    const candidate =
+      target instanceof HTMLElement
+        ? target
+        : document.activeElement instanceof HTMLElement
+          ? document.activeElement
+          : null;
+    overlayReturnFocusRef.current = candidate;
+  }, []);
+
+  const restoreOverlayFocus = useCallback((): void => {
+    const target = overlayReturnFocusRef.current;
+    overlayReturnFocusRef.current = null;
+    if (!target?.isConnected) return;
+    window.requestAnimationFrame(() => target.focus());
+  }, []);
+
+  const openControlCenter = useCallback((section: ControlCenterSection, target?: EventTarget | null): void => {
+    rememberOverlayTrigger(target);
+    setControlCenterSection(section);
+  }, [rememberOverlayTrigger]);
+
+  const closeControlCenter = useCallback((): void => {
+    setControlCenterSection(null);
+    restoreOverlayFocus();
+  }, [restoreOverlayFocus]);
+
+  const openHelp = useCallback((target?: EventTarget | null): void => {
+    rememberOverlayTrigger(target);
+    setHelpOpen(true);
+  }, [rememberOverlayTrigger]);
+
+  const closeHelp = useCallback((): void => {
+    setHelpOpen(false);
+    restoreOverlayFocus();
+  }, [restoreOverlayFocus]);
+
+  useEffect(() => {
+    const onCloseControlCenter = (): void => closeControlCenter();
+    window.addEventListener('taori:close-control-center', onCloseControlCenter);
+    return () => window.removeEventListener('taori:close-control-center', onCloseControlCenter);
+  }, [closeControlCenter]);
+
+  useEffect(() => {
+    const onFocusCostCall = (event: Event): void => {
+      const detail = (event as CustomEvent<CostCallFocusDetail>).detail;
+      if (!detail?.costRecordId) return;
+      setCostCallFocus({
+        costRecordId: detail.costRecordId,
+        runId: detail.runId ?? null,
+        runEventId: detail.runEventId ?? null,
+      });
+      openControlCenter('costs');
+    };
+    window.addEventListener('taori:focus-cost-call', onFocusCostCall);
+    return () => window.removeEventListener('taori:focus-cost-call', onFocusCostCall);
+  }, [openControlCenter]);
+
   const onReopenOnboarding = useCallback((): void => {
     setControlCenterSection(null);
     setForceOnboarding(true);
@@ -378,6 +561,7 @@ export function App(): JSX.Element {
 
   const onSettingsChanged = useCallback((): void => {
     void reload({ silent: true });
+    window.dispatchEvent(new Event('taori:data-changed'));
   }, [reload]);
 
   const onModelsChanged = useCallback((): void => {
@@ -405,6 +589,7 @@ export function App(): JSX.Element {
           <span className="brand__name">Taori</span>
         </h1>
         <span className="header-actions">
+          <ThemeToggle />
           <StatusBadge endpoint={endpoint} health={health} error={endpointError} />
           {endpoint && health?.ok && (
             <button
@@ -413,7 +598,7 @@ export function App(): JSX.Element {
               onClick={(e) => {
                 e.preventDefault();
                 e.stopPropagation();
-                window.setTimeout(() => setControlCenterSection('costs'), 0);
+                window.setTimeout(() => openControlCenter('costs', e.currentTarget), 0);
               }}
               data-testid="open-cost-dashboard"
               aria-label="成本看板"
@@ -426,7 +611,7 @@ export function App(): JSX.Element {
             <button
               type="button"
               className="settings-btn"
-              onClick={() => setControlCenterSection('models')}
+              onClick={(e) => openControlCenter('models', e.currentTarget)}
               data-testid="open-model-center"
               aria-label="模型中心"
               title="模型中心"
@@ -438,7 +623,7 @@ export function App(): JSX.Element {
             <button
               type="button"
               className="settings-btn"
-              onClick={() => setHelpOpen(true)}
+              onClick={(e) => openHelp(e.currentTarget)}
               data-testid="open-help"
               aria-label="使用帮助"
               title="使用帮助"
@@ -450,7 +635,7 @@ export function App(): JSX.Element {
             <button
               type="button"
               className="settings-btn"
-              onClick={() => setControlCenterSection('general')}
+              onClick={(e) => openControlCenter('general', e.currentTarget)}
               data-testid="open-settings"
               aria-label="设置"
               title="设置"
@@ -462,12 +647,40 @@ export function App(): JSX.Element {
       </header>
       {!endpoint ? (
         <div className="placeholder">
-          {endpointError ? <pre className="err">{endpointError}</pre> : 'Connecting to sidecar…'}
+          {endpointError ? (
+            <StatusNotice
+              tone="error"
+              title="连接 sidecar 失败"
+              detail={endpointError}
+              testId="boot-endpoint-error"
+            />
+          ) : (
+            <StatusNotice
+              tone="loading"
+              title="Connecting to sidecar…"
+              detail="正在探测本地 sidecar 端点与授权状态。"
+              testId="boot-endpoint-loading"
+            />
+          )}
         </div>
       ) : boot.kind === 'loading' ? (
-        <div className="placeholder">加载中…</div>
+        <div className="placeholder">
+          <StatusNotice
+            tone="loading"
+            title="加载中…"
+            detail="正在同步模型、工具和会话数据。"
+            testId="boot-loading"
+          />
+        </div>
       ) : boot.kind === 'error' ? (
-        <div className="placeholder"><pre className="err">{boot.error}</pre></div>
+        <div className="placeholder">
+          <StatusNotice
+            tone="error"
+            title="启动失败"
+            detail={boot.error}
+            testId="boot-error"
+          />
+        </div>
       ) : showOnboarding ? (
         <Onboarding
           onDone={() => {
@@ -485,23 +698,26 @@ export function App(): JSX.Element {
           chatModels={boot.chatModels}
           defaultModel={boot.defaultChatModel}
           tools={boot.tools}
-          onOpenSettings={() => setControlCenterSection('general')}
-          onOpenCostDashboard={() => setControlCenterSection('costs')}
-          onOpenModelCenter={() => setControlCenterSection('models')}
-          onOpenTools={() => setControlCenterSection('tools')}
-          onOpenHelp={() => setHelpOpen(true)}
+          onOpenSettings={() => openControlCenter('general')}
+          onOpenCostDashboard={() => openControlCenter('costs')}
+          onOpenModelCenter={() => openControlCenter('models')}
+          onOpenTools={() => openControlCenter('tools')}
+          onOpenHelp={() => openHelp()}
+          externalOverlayOpen={controlCenterSection != null || helpOpen}
         />
       ) : null}
       {controlCenterSection && (
         <ControlCenter
           initialSection={controlCenterSection}
-          onClose={() => setControlCenterSection(null)}
+          costCallFocus={costCallFocus}
+          onCostCallFocusConsumed={() => setCostCallFocus(null)}
+          onClose={closeControlCenter}
           onChanged={onSettingsChanged}
           onModelsChanged={onModelsChanged}
           onReopenOnboarding={onReopenOnboarding}
         />
       )}
-      {helpOpen && <HelpCenter onClose={() => setHelpOpen(false)} />}
+      {helpOpen && <HelpCenter onClose={closeHelp} />}
     </div>
   );
 }
@@ -513,11 +729,16 @@ function BrowseOnlyWorkspace({
 }): JSX.Element {
   return (
     <div className="placeholder browse-only" data-testid="browse-only">
-      <h2>仅浏览模式</h2>
-      <p className="hint">尚未配置任何模型，无法发起对话。</p>
-      <button type="button" onClick={onConfigure} data-testid="browse-only-configure">
-        配置模型
-      </button>
+      <EmptyState
+        title="仅浏览模式"
+        hint="尚未配置任何模型，暂时无法发起对话。"
+        icon="🧭"
+        testId="browse-only-empty"
+      >
+        <button type="button" onClick={onConfigure} data-testid="browse-only-configure">
+          配置模型
+        </button>
+      </EmptyState>
     </div>
   );
 }
@@ -560,6 +781,7 @@ function Workspace({
   onOpenModelCenter,
   onOpenTools,
   onOpenHelp,
+  externalOverlayOpen,
 }: {
   endpoint: { url: string; bearer: string };
   providers: Provider[];
@@ -571,6 +793,7 @@ function Workspace({
   onOpenModelCenter: () => void;
   onOpenTools: () => void;
   onOpenHelp: () => void;
+  externalOverlayOpen: boolean;
 }): JSX.Element {
   const [conversations, setConversations] = useState<ConversationSummary[]>([]);
   const [activeConvId, setActiveConvId] = useState<string | null>(null);
@@ -591,6 +814,7 @@ function Workspace({
   // B1 — Command palette
   const [cmdPaletteOpen, setCmdPaletteOpen] = useState<boolean>(false);
   const [roundtableLaunchSeq, setRoundtableLaunchSeq] = useState(0);
+  const [timelineFocus, setTimelineFocus] = useState<RunTimelineFocusTarget | null>(null);
 
   useEffect(() => {
     const t = setTimeout(() => setDebouncedQuery(searchQuery), 200);
@@ -703,6 +927,20 @@ function Workspace({
     void refreshConversations();
   }, [refreshConversations]);
 
+  useEffect(() => {
+    const onDataChanged = (): void => {
+      void refreshConversations();
+    };
+    window.addEventListener('taori:data-changed', onDataChanged);
+    return () => window.removeEventListener('taori:data-changed', onDataChanged);
+  }, [refreshConversations]);
+
+  useEffect(() => {
+    if (cmdPaletteOpen) {
+      void refreshConversations();
+    }
+  }, [cmdPaletteOpen, refreshConversations]);
+
   // B1 — Global Cmd+K / Ctrl+K listener
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
@@ -722,9 +960,27 @@ function Workspace({
 
   const onSelectConv = (id: string): void => {
     if (id === activeConvId) return;
+    setTimelineFocus(null);
     setActiveConvId(id);
     setChatKey((n) => n + 1);
   };
+
+  useEffect(() => {
+    const onFocusRun = (event: Event): void => {
+      const detail = (event as CustomEvent<CostRunFocusDetail>).detail;
+      if (!detail?.conversationId || !detail.runId) return;
+      setActiveConvId(detail.conversationId);
+      setTimelineFocus({
+        runId: detail.runId,
+        runEventId: detail.runEventId,
+        costRecordId: detail.costRecordId,
+      });
+      setChatKey((n) => n + 1);
+      window.dispatchEvent(new Event('taori:close-control-center'));
+    };
+    window.addEventListener('taori:focus-run-event', onFocusRun);
+    return () => window.removeEventListener('taori:focus-run-event', onFocusRun);
+  }, []);
 
   const onDeleteConv = async (id: string): Promise<void> => {
     if (!window.confirm('确认删除该对话？此操作不可恢复。')) return;
@@ -861,9 +1117,13 @@ function Workspace({
           onOpenSettings={onOpenSettings}
           onOpenModelCenter={onOpenModelCenter}
           onOpenTools={onOpenTools}
+          externalOverlayOpen={externalOverlayOpen}
           roundtableLaunchSeq={roundtableLaunchSeq}
+          timelineFocus={timelineFocus}
+          onTimelineFocusConsumed={() => setTimelineFocus(null)}
           onLoopbackToConversation={(id) => {
             setActiveConvId(id);
+            setTimelineFocus(null);
             void refreshConversations();
           }}
         />
@@ -900,6 +1160,27 @@ function bucketLabel(updated: number, now: number): string {
   return '更早';
 }
 
+function conversationTypeLabel(type: string): string {
+  if (type === 'roundtable') return '圆桌';
+  if (type === 'chat') return '对话';
+  return type;
+}
+
+function conversationTimeLabel(updated: number, now = Date.now()): string {
+  const diff = Math.max(0, now - updated);
+  const minute = 60 * 1000;
+  const hour = 60 * minute;
+  const day = 24 * hour;
+  if (diff < minute) return '刚刚';
+  if (diff < hour) return `${Math.floor(diff / minute)} 分钟前`;
+  if (diff < day) return `${Math.floor(diff / hour)} 小时前`;
+  if (diff < 2 * day) return '昨天';
+  return new Date(updated).toLocaleDateString('zh-CN', {
+    month: 'numeric',
+    day: 'numeric',
+  });
+}
+
 function parseTags(raw: string | null): string[] {
   if (!raw) return [];
   try {
@@ -926,14 +1207,38 @@ interface ConvRowCallbacks {
   setTagDraft: (s: string) => void;
 }
 
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function renderHighlightedText(text: string, query: string): JSX.Element | string {
+  const trimmed = query.trim();
+  if (!trimmed) return text;
+  const matcher = new RegExp(`(${escapeRegExp(trimmed)})`, 'ig');
+  const parts = text.split(matcher);
+  if (parts.length === 1) return text;
+  const lower = trimmed.toLocaleLowerCase();
+  return (
+    <>
+      {parts.map((part, index) =>
+        part.toLocaleLowerCase() === lower ? <mark key={`${part}-${index}`}>{part}</mark> : part,
+      )}
+    </>
+  );
+}
+
 function renderConvRow(
   c: ConversationSummary,
   active: boolean,
+  searchQuery: string,
   cb: ConvRowCallbacks,
 ): JSX.Element {
   const tags = parseTags(c.tags);
   const isEditingTags = cb.editingTagsForId === c.id;
   const checked = cb.selectedIds.has(c.id);
+  const title = c.title?.trim() || '未命名对话';
+  const metaType = conversationTypeLabel(c.type);
+  const metaTime = conversationTimeLabel(c.updated_at);
   return (
     <li
       key={c.id}
@@ -961,10 +1266,12 @@ function renderConvRow(
       )}
       <span
         className="conv-title"
-        title={c.title ?? '未命名对话'}
+        title={title}
       >
-        {c.pinned ? '📌 ' : ''}
-        {c.title ?? '未命名对话'}
+        {c.pinned ? <span className="conv-title-prefix" aria-hidden="true">📌</span> : null}
+        <span className={`conv-title-text${c.title?.trim() ? '' : ' is-placeholder'}`}>
+          {renderHighlightedText(title, searchQuery)}
+        </span>
       </span>
       <span className="conv-actions" onClick={(e) => e.stopPropagation()}>
         <button
@@ -1005,6 +1312,11 @@ function renderConvRow(
           🗑
         </button>
       </span>
+      <div className="conv-meta" aria-hidden="true">
+        <span className={`conv-meta-type${c.type === 'roundtable' ? ' is-roundtable' : ''}`}>{metaType}</span>
+        <span className="conv-meta-sep">·</span>
+        <span className="conv-meta-time">{metaTime}</span>
+      </div>
       {(tags.length > 0 || isEditingTags) && (
         <div className="conv-tags" data-testid="conv-tags">
           {!isEditingTags &&
@@ -1070,6 +1382,7 @@ function renderConvRow(
 function renderGroupedConversations(
   conversations: ConversationSummary[],
   activeId: string | null,
+  searchQuery: string,
   cb: ConvRowCallbacks,
 ): JSX.Element[] {
   const out: JSX.Element[] = [];
@@ -1081,7 +1394,7 @@ function renderGroupedConversations(
         📌 已置顶
       </li>,
     );
-    for (const c of pinned) out.push(renderConvRow(c, c.id === activeId, cb));
+    for (const c of pinned) out.push(renderConvRow(c, c.id === activeId, searchQuery, cb));
   }
   const now = Date.now();
   let curLabel: string | null = null;
@@ -1095,7 +1408,7 @@ function renderGroupedConversations(
         </li>,
       );
     }
-    out.push(renderConvRow(c, c.id === activeId, cb));
+    out.push(renderConvRow(c, c.id === activeId, searchQuery, cb));
   }
   return out;
 }
@@ -1200,10 +1513,27 @@ function Sidebar({
       <ul className="conv-list" data-testid="conv-list">
         {conversations.length === 0 ? (
           <li className="conv-empty">
-            {searchQuery ? '没有匹配的对话' : '暂无对话'}
+            {searchQuery ? (
+              <EmptyState
+                title="没有匹配的对话"
+                hint="试试换个关键词，或清空搜索查看全部对话。"
+                icon="⌕"
+                compact
+                tone="muted"
+                testId="conv-empty-search"
+              />
+            ) : (
+              <EmptyState
+                title="暂无对话"
+                hint="试试上方“新对话”开始第一轮交流。"
+                icon="💬"
+                compact
+                testId="conv-empty-default"
+              />
+            )}
           </li>
         ) : (
-          renderGroupedConversations(conversations, activeId, cb)
+          renderGroupedConversations(conversations, activeId, searchQuery, cb)
         )}
       </ul>
     </aside>
@@ -1225,7 +1555,10 @@ function ChatPanel({
   onOpenSettings,
   onOpenModelCenter,
   onOpenTools,
+  externalOverlayOpen,
   roundtableLaunchSeq,
+  timelineFocus,
+  onTimelineFocusConsumed,
   onLoopbackToConversation,
 }: {
   endpoint: { url: string; bearer: string };
@@ -1242,7 +1575,10 @@ function ChatPanel({
   onOpenSettings: () => void;
   onOpenModelCenter: () => void;
   onOpenTools: () => void;
+  externalOverlayOpen: boolean;
   roundtableLaunchSeq: number;
+  timelineFocus: RunTimelineFocusTarget | null;
+  onTimelineFocusConsumed: () => void;
   /** A4 — RoundtablePanel SummaryCard "↪ 带回原对话" callback. */
   onLoopbackToConversation: (id: string) => void;
 }): JSX.Element {
@@ -1256,7 +1592,7 @@ function ChatPanel({
   // be notified.
   const announcedConvIdRef = useRef<string | null>(null);
   const [costByMsg, setCostByMsg] = useState<
-    Record<string, { input_tokens: number | null; output_tokens: number | null; actual_usd: number | null }>
+    Record<string, MessageCost>
   >({});
   // M2.5 §F-CR — when the LLM calls the `image_generate` tool inside a chat
   // turn, the sidecar streams a `tool_image_result` annotation we use to
@@ -1319,6 +1655,18 @@ function ChatPanel({
     [clearFailureDecisionState, onModelChange],
   );
 
+  useEffect(() => {
+    window.__TAORI_AUTOMATION__ = {
+      ...(window.__TAORI_AUTOMATION__ ?? {}),
+      setActiveModel: changeModelAndClearFailure,
+    };
+    return () => {
+      if (window.__TAORI_AUTOMATION__?.setActiveModel === changeModelAndClearFailure) {
+        delete window.__TAORI_AUTOMATION__.setActiveModel;
+      }
+    };
+  }, [changeModelAndClearFailure]);
+
   // M2.2 — L3 stream cost badge: live-tracked input/output token counts plus
   // an "expanded" toggle for the details panel. We update during streaming
   // by polling messages[last].content via setInterval throttled to 200ms.
@@ -1328,6 +1676,13 @@ function ChatPanel({
     estimateUsd: number;
   } | null>(null);
   const [streamBadgeOpen, setStreamBadgeOpen] = useState(false);
+  const [modelHealthRows, setModelHealthRows] = useState<Map<string, ModelHealthRow>>(new Map());
+  const [slowResponseWarning, setSlowResponseWarning] = useState<{
+    elapsedMs: number;
+    thresholdMs: number;
+    suggestedModelId: string | null;
+  } | null>(null);
+  const slowResponseDismissedRef = useRef(false);
 
   // M2.2 — L4 pre-call confirmation memories. Loaded once per conversation
   // change. Keys: cost_confirm_threshold_usd, cost_confirm_image_always,
@@ -1343,6 +1698,8 @@ function ChatPanel({
     estimate: number;
     reason: 'threshold' | 'image' | 'budget';
     model?: Model;
+    allowCheaper?: boolean;
+    blocked?: boolean;
     budget?: {
       monthly_budget_usd: number;
       month_spent_usd: number;
@@ -1351,10 +1708,55 @@ function ChatPanel({
     onCheaper: () => void;
     onCancel: () => void;
   } | null>(null);
+  const [streamAutoResumeEnabled, setStreamAutoResumeEnabled] = useState(false);
+  const streamAutoResumeEnabledRef = useRef(false);
+  const currentStreamingRunIdRef = useRef<string | null>(null);
+  const [pendingInterruptedRunId, setPendingInterruptedRunId] = useState<string | null>(null);
+
+  useEffect(() => {
+    streamAutoResumeEnabledRef.current = streamAutoResumeEnabled;
+  }, [streamAutoResumeEnabled]);
+
+  useEffect(() => {
+    let cancelled = false;
+    api.modelsHealth()
+      .then((res) => {
+        if (!cancelled) setModelHealthRows(new Map(res.rows.map((row) => [row.model_id, row])));
+      })
+      .catch((e) => {
+        console.warn('[model health] load failed:', e);
+      });
+    return () => { cancelled = true; };
+  }, [chatModels.length]);
+
+  useEffect(() => {
+    let cancelled = false;
+    const loadStreamRecoverySetting = async (): Promise<void> => {
+      try {
+        const res = await api.getMemoryEffective('stream_auto_resume_enabled', null);
+        if (!cancelled) setStreamAutoResumeEnabled(res.data.value === 'true');
+      } catch (e) {
+        if (!cancelled) {
+          setStreamAutoResumeEnabled(false);
+          console.warn('[stream recovery] setting load failed:', e);
+        }
+      }
+    };
+    void loadStreamRecoverySetting();
+    const onChanged = (): void => {
+      void loadStreamRecoverySetting();
+    };
+    window.addEventListener('taori:stream-recovery-settings-changed', onChanged);
+    return () => {
+      cancelled = true;
+      window.removeEventListener('taori:stream-recovery-settings-changed', onChanged);
+    };
+  }, []);
 
   // M2.2 — session cost panel (right drawer). null = closed.
   const [costPanelScope, setCostPanelScope] = useState<'session' | 'today' | 'month' | null>(null);
   const [monthlyBudgetUsd, setMonthlyBudgetUsd] = useState<number | null>(null);
+  const [monthlyBudgetHardLimit, setMonthlyBudgetHardLimit] = useState(false);
   const [budgetAlertState, setBudgetAlertState] = useState<{
     month: string;
     seen: number[];
@@ -1380,6 +1782,11 @@ function ChatPanel({
     modelId: string;
   } | null>(null);
   const [imageModels, setImageModels] = useState<Model[]>([]);
+  const [selectedImageModelId, setSelectedImageModelId] = useState<string | null>(null);
+  const [imageModelMemoryScope, setImageModelMemoryScope] =
+    useState<MemoryScopeLabel>('default');
+  const [imageModelPreferenceBusy, setImageModelPreferenceBusy] = useState(false);
+  const [imageModelPreferenceError, setImageModelPreferenceError] = useState<string | null>(null);
   const [effectiveTools, setEffectiveTools] = useState<EffectiveTool[]>(
     () => tools.map((t) => ({ ...t, session_enabled: null, effective_enabled: t.enabled })),
   );
@@ -1393,6 +1800,8 @@ function ChatPanel({
   const [roundtableDialog, setRoundtableDialog] = useState<{
     initialTopic: string;
   } | null>(null);
+  const [quickCompare, setQuickCompare] = useState<QuickCompareUiState | null>(null);
+  const [quickCompareAdoptingId, setQuickCompareAdoptingId] = useState<string | null>(null);
   const [activeRoundtableId, setActiveRoundtableId] = useState<string | null>(
     null,
   );
@@ -1400,8 +1809,10 @@ function ChatPanel({
     string | null
   >(null);
   const [promptTemplates, setPromptTemplates] = useState<PromptTemplate[]>([]);
+  const [workflowRecipes, setWorkflowRecipes] = useState<WorkflowRecipe[]>([]);
   const [personas, setPersonas] = useState<Persona[]>([]);
-  const [selectedPersonaId, setSelectedPersonaId] = useState<string>('');
+  const [selectedPersonaId, setSelectedPersonaId] = useState<string>(() => getPendingPersonaDraft());
+  const [quickComparePickerOpen, setQuickComparePickerOpen] = useState(false);
   const [promptAssetsLoaded, setPromptAssetsLoaded] = useState(false);
   const activePersona = useMemo(
     () => personas.find((p) => p.id === selectedPersonaId) ?? null,
@@ -1413,6 +1824,11 @@ function ChatPanel({
     vars: string[];
     answers: Record<string, string>;
   } | null>(null);
+  const [recipeVarDraft, setRecipeVarDraft] = useState<{
+    template: WorkflowRecipeTemplateLike;
+    vars: string[];
+    answers: Record<string, string>;
+  } | null>(null);
   const [promptAssetsError, setPromptAssetsError] = useState<string | null>(null);
   const [sessionToolBusy, setSessionToolBusy] = useState<string | null>(null);
   const [profileCost, setProfileCost] = useState<{
@@ -1420,6 +1836,7 @@ function ChatPanel({
     current_conversation_calls: number;
   } | null>(null);
   const [runTimelineOpen, setRunTimelineOpen] = useState(false);
+  const [runTimelineFocus, setRunTimelineFocus] = useState<RunTimelineFocusTarget | null>(null);
   const [runEvents, setRunEvents] = useState<RunEvent[] | null>(null);
   const [runEventsError, setRunEventsError] = useState<string | null>(null);
   const [queuedTips, setQueuedTips] = useState<Array<keyof typeof TIPS>>([]);
@@ -1440,6 +1857,7 @@ function ChatPanel({
   // the `8:[{type:"failure_decision",...}]` annotation reliably even when
   // useChat discards the in-flight assistant message on error.
   const failureFetch = useCallback<typeof fetch>(async (input, init) => {
+    currentStreamingRunIdRef.current = null;
     // Strip role='system' from outgoing /v1/chat payload — those are
     // renderer-side notes (e.g. auto-fallback notice) that should be
     // displayed in the timeline but NOT sent to the LLM (M2 §1.4).
@@ -1487,18 +1905,23 @@ function ChatPanel({
         const arr = JSON.parse(line.slice(2));
         if (!Array.isArray(arr)) return;
         for (const ann of arr) {
-          if (ann?.type === 'meta' && typeof ann.message_id === 'string') {
-            pendingMsgId = ann.message_id;
+          const meta = ann && typeof ann === 'object'
+            ? parseChatMetaAnnotation(ann as Record<string, unknown>)
+            : null;
+          if (meta?.message_id) {
+            pendingMsgId = meta.message_id;
+          }
+          if (meta?.run_id) {
+            currentStreamingRunIdRef.current = meta.run_id;
           }
           if (
-            ann?.type === 'meta' &&
-            typeof ann.conversation_id === 'string' &&
-            conversationIdRef.current !== ann.conversation_id
+            meta &&
+            conversationIdRef.current !== meta.conversation_id
           ) {
             // Mirror to the ref only — invoking onConversationCreated here can
             // re-render mid-stream and disrupt useChat's in-flight error flow.
-            conversationIdRef.current = ann.conversation_id;
-            observedConversationId = ann.conversation_id;
+            conversationIdRef.current = meta.conversation_id;
+            observedConversationId = meta.conversation_id;
           }
           if (ann?.type === 'failure_decision' && pendingMsgId) {
             const decision: FailureDecision = {
@@ -1507,6 +1930,10 @@ function ChatPanel({
               recommended_model_id: (ann.recommended_model_id as string | null) ?? null,
               auto_fallback_enabled: ann.auto_fallback_enabled === true,
               detail: typeof ann.detail === 'string' ? (ann.detail as string) : undefined,
+              can_compact_context: ann.can_compact_context === true,
+              can_skip_tool: ann.can_skip_tool === true,
+              tool_name: typeof ann.tool_name === 'string' ? ann.tool_name : null,
+              tool_label: typeof ann.tool_label === 'string' ? ann.tool_label : null,
             };
             const id = pendingMsgId;
             setFailureByMsg((prev) => (prev[id] ? prev : { ...prev, [id]: decision }));
@@ -1595,7 +2022,7 @@ function ChatPanel({
   const loadImageModels = useCallback(async (): Promise<Model[]> => {
     const res = await api.listModels();
     const imgModels = res.models
-      .filter((m) => m.capability === 'image' && m.enabled)
+      .filter((m) => m.capability === 'image' && m.enabled && m.provider_id != null)
       .sort(
         (a, b) =>
           (a.price_per_call ?? a.price_per_image ?? 0) -
@@ -1605,6 +2032,111 @@ function ChatPanel({
     setImageModels(imgModels);
     return imgModels;
   }, []);
+
+  const normalizeImageModelId = useCallback(
+    (id: string | null | undefined): string | null => {
+      if (!id) return null;
+      return imageModels.find((m) => m.id === id)?.id ?? null;
+    },
+    [imageModels],
+  );
+
+  const selectedImageModel = useMemo(
+    () =>
+      (selectedImageModelId
+        ? imageModels.find((m) => m.id === selectedImageModelId)
+        : null) ??
+      imageModels[0] ??
+      null,
+    [imageModels, selectedImageModelId],
+  );
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      if (imageModels.length === 0) {
+        setSelectedImageModelId(null);
+        setImageModelMemoryScope('default');
+        return;
+      }
+      try {
+        let rememberedRaw: string | null = null;
+        let scope: MemoryScopeLabel = 'default';
+        if (conversationId) {
+          const session = await api.getMemory('session', 'image_model', conversationId);
+          if (session.data.value) {
+            rememberedRaw = session.data.value;
+            scope = 'session';
+          }
+        }
+        if (!rememberedRaw) {
+          const global = await api.getMemory('global', 'image_model_default');
+          if (global.data.value) {
+            rememberedRaw = global.data.value;
+            scope = 'global';
+          }
+        }
+        if (cancelled) return;
+        const remembered = normalizeImageModelId(rememberedRaw);
+        setSelectedImageModelId(remembered);
+        setImageModelMemoryScope(remembered ? scope : 'default');
+      } catch {
+        if (!cancelled) {
+          setSelectedImageModelId(null);
+          setImageModelMemoryScope('default');
+        }
+      }
+    })().catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [conversationId, imageModels, normalizeImageModelId]);
+
+  const persistImageModelPreference = useCallback(
+    async (modelId: string): Promise<void> => {
+      const normalized = normalizeImageModelId(modelId);
+      if (!normalized) return;
+      const conv = conversationIdRef.current ?? conversationId;
+      const scope: MemoryScopeLabel = conv ? 'session' : 'global';
+      setSelectedImageModelId(normalized);
+      setImageModelMemoryScope(scope);
+      setImageModelPreferenceError(null);
+      setImageModelPreferenceBusy(true);
+      try {
+        if (conv) {
+          await api.putMemory('session', 'image_model', normalized, conv);
+        } else {
+          await api.putMemory('global', 'image_model_default', normalized);
+        }
+      } catch (e) {
+        setImageModelPreferenceError(e instanceof Error ? e.message : '图像模型偏好保存失败');
+      } finally {
+        setImageModelPreferenceBusy(false);
+      }
+    },
+    [conversationId, normalizeImageModelId],
+  );
+
+  const clearImageModelPreference = useCallback(async (): Promise<void> => {
+    const conv = conversationIdRef.current ?? conversationId;
+    const scope = imageModelMemoryScope;
+    if (scope === 'default') return;
+    setImageModelPreferenceError(null);
+    setImageModelPreferenceBusy(true);
+    try {
+      if (scope === 'session' && conv) {
+        await api.deleteMemory('session', 'image_model', conv);
+      } else {
+        await api.deleteMemory('global', 'image_model_default');
+      }
+      setSelectedImageModelId(null);
+      setImageModelMemoryScope('default');
+    } catch (e) {
+      setImageModelPreferenceError(e instanceof Error ? e.message : '图像模型偏好清除失败');
+    } finally {
+      setImageModelPreferenceBusy(false);
+    }
+  }, [conversationId, imageModelMemoryScope]);
 
   useEffect(() => {
     let cancelled = false;
@@ -1647,20 +2179,39 @@ function ChatPanel({
     setQueuedTips((prev) => [...prev, tipId]);
   }, [activeTipId, hasSeenTipThisSession]);
 
+  useEffect(() => {
+    const tipStorageKeyToId = new Map(
+      Object.entries(TIPS).map(([tipId, tip]) => [tip.storageKey, tipId as keyof typeof TIPS]),
+    );
+    const onStorage = (event: StorageEvent): void => {
+      if (event.storageArea !== localStorage || !event.key || !event.newValue) return;
+      const tipId = tipStorageKeyToId.get(event.key);
+      if (!tipId) return;
+      queuedTipIdsRef.current.delete(tipId);
+      setQueuedTips((prev) => prev.filter((queuedTipId) => queuedTipId !== tipId));
+      setActiveTipId((prev) => (prev === tipId ? null : prev));
+    };
+    window.addEventListener('storage', onStorage);
+    return () => window.removeEventListener('storage', onStorage);
+  }, []);
+
   const loadPromptAssets = useCallback(async (): Promise<void> => {
     try {
-      const [templatesRes, personasRes] = await Promise.all([
+      const [templatesRes, personasRes, recipesRes] = await Promise.all([
         api.listPromptTemplates(),
         api.listPersonas(),
+        api.listWorkflowRecipes(),
       ]);
       setPromptTemplates(templatesRes.prompt_templates);
       setPersonas(personasRes.personas);
+      setWorkflowRecipes(recipesRes.workflow_recipes.filter((recipe) => recipe.enabled));
       setPromptAssetsLoaded(true);
-      setSelectedPersonaId((prev) =>
-        prev && !personasRes.personas.some((persona) => persona.id === prev)
-          ? ''
-          : prev,
-      );
+      setSelectedPersonaId((prev) => {
+        if (!prev) return prev;
+        if (personasRes.personas.some((persona) => persona.id === prev)) return prev;
+        if (!conversationIdRef.current) setPendingPersonaDraft('');
+        return '';
+      });
       setPromptAssetsError(null);
     } catch (e) {
       setPromptAssetsError(e instanceof Error ? e.message : String(e));
@@ -1684,9 +2235,10 @@ function ChatPanel({
   useEffect(() => {
     let cancelled = false;
     if (!conversationId) {
-      setSelectedPersonaId('');
+      setSelectedPersonaId(getPendingPersonaDraft());
       return;
     }
+    setPendingPersonaDraft('');
     api
       .getMemoryEffective('active_persona_id', conversationId)
       .then((res) => {
@@ -1806,11 +2358,67 @@ function ChatPanel({
     [],
   );
 
+  const insertRecipeWithAnswers = useCallback(
+    async (recipe: WorkflowRecipe, answers: Record<string, string>): Promise<void> => {
+      setActionError(null);
+      try {
+        const preview = await api.applyWorkflowRecipePreview(recipe.id, {
+          variables: answers,
+          conversation_id: conversationId,
+          current_model_id: model.id,
+        });
+        if (preview.missing_variables.length > 0) {
+          setActionError(`Recipe 缺少变量：${preview.missing_variables.join('、')}`);
+          return;
+        }
+        setInput((prev) => (prev.trim() ? `${prev}\n\n${preview.prompt}` : preview.prompt));
+        setRecipeVarDraft(null);
+        setTemplatePickerOpen(false);
+      } catch (e) {
+        setActionError(e instanceof Error ? e.message : '套用 Recipe 失败');
+      }
+    },
+    [conversationId, model.id],
+  );
+
+  const applyRecipe = useCallback(
+    (recipe: WorkflowRecipe): void => {
+      const declared = recipe.spec.variables.map((variable) => variable.name);
+      const extracted = extractTemplateVariables(recipe.spec.prompt_template);
+      const vars = Array.from(new Set([...declared, ...extracted]));
+      const template: WorkflowRecipeTemplateLike = {
+        recipe,
+        name: recipe.name,
+        description: recipe.description,
+        content: recipe.spec.prompt_template,
+      };
+      if (vars.length === 0) {
+        void insertRecipeWithAnswers(recipe, {});
+        return;
+      }
+      setRecipeVarDraft({
+        template,
+        vars,
+        answers: Object.fromEntries(
+          recipe.spec.variables
+            .filter((variable) => variable.default_value)
+            .map((variable) => [variable.name, variable.default_value ?? '']),
+        ),
+      });
+      setTemplatePickerOpen(false);
+    },
+    [insertRecipeWithAnswers],
+  );
+
   const onPersonaChange = useCallback(
     async (nextId: string): Promise<void> => {
       setSelectedPersonaId(nextId);
       setPromptAssetsError(null);
-      if (!conversationId) return;
+      if (!conversationId) {
+        setPendingPersonaDraft(nextId);
+        return;
+      }
+      setPendingPersonaDraft('');
       try {
         if (nextId) {
           await api.putMemory(
@@ -1840,7 +2448,6 @@ function ChatPanel({
     stop,
     setMessages,
     reload: regenerate,
-    append,
   } = useChat({
     api: `${endpoint.url}/v1/chat`,
     streamProtocol: 'data',
@@ -1852,19 +2459,27 @@ function ChatPanel({
       ...(activePersona ? { persona_id: activePersona.id } : {}),
     },
     onError: (e) => {
-      if ((lastUserStopAtRef.current > 0 || hasUserStopPending()) && isExpectedStopError(e)) {
+      if ((lastUserStopAtRef.current > 0 || hasUserStopPending()) && isExpectedUserStopError(e)) {
         lastUserStopAtRef.current = 0;
         setUserStopPending(false);
+        currentStreamingRunIdRef.current = null;
         console.info('[useChat] stream stopped by user');
         return;
       }
       if (isExpectedStopError(e)) {
+        const interruptedRunId = currentStreamingRunIdRef.current;
+        if (interruptedRunId) {
+          setPendingInterruptedRunId(interruptedRunId);
+          currentStreamingRunIdRef.current = null;
+        }
         console.warn('[useChat] recoverable stream interruption:', e);
         return;
       }
       console.error('[useChat] onError:', e);
     },
     onFinish: (msg, opts) => {
+      currentStreamingRunIdRef.current = null;
+      setPendingInterruptedRunId(null);
       // Vercel AI SDK attaches per-message annotations on msg.annotations;
       // older code paths used opts.annotations. Read both for safety
       // (M1 §1.2 — conversation_id propagation).
@@ -1937,6 +2552,33 @@ function ChatPanel({
       onConversationUpdated();
     },
   });
+
+  useEffect(() => {
+    if (!isLoading) {
+      slowResponseDismissedRef.current = false;
+      setSlowResponseWarning(null);
+      return;
+    }
+    const hasAssistantText = messages.some(
+      (message) => message.role === 'assistant' && message.content.trim().length > 0,
+    );
+    if (hasAssistantText) {
+      slowResponseDismissedRef.current = true;
+      setSlowResponseWarning(null);
+      return;
+    }
+    const thresholdMs = slowResponseThresholdMs(modelHealthRows.get(model.id));
+    const timer = window.setTimeout(() => {
+      if (slowResponseDismissedRef.current) return;
+      const suggested = pickFastAlternativeModel(model, chatModels, modelHealthRows);
+      setSlowResponseWarning({
+        elapsedMs: thresholdMs,
+        thresholdMs,
+        suggestedModelId: suggested?.id ?? null,
+      });
+    }, thresholdMs);
+    return () => window.clearTimeout(timer);
+  }, [chatModels, isLoading, messages, model, modelHealthRows]);
 
   const withCurrentConversation = useCallback(
     (body: Record<string, unknown> = {}): Record<string, unknown> => {
@@ -2036,6 +2678,7 @@ function ChatPanel({
       }
       const pick =
         (preferred && imgModels.find((m) => m.id === preferred)?.id) ??
+        (selectedImageModelId && imgModels.find((m) => m.id === selectedImageModelId)?.id) ??
         imgModels[0].id;
       // Spec §7 step 7: when session memory is set, the picker is skipped and
       // we proceed directly through the cost-confirm gate. The picker is only
@@ -2054,7 +2697,7 @@ function ChatPanel({
         }, 0);
       }
     },
-    [imageToolEnabled, loadImageModels, onConversationCreated],
+    [imageToolEnabled, loadImageModels, onConversationCreated, selectedImageModelId],
   );
 
   // Wire ref so the failureFetch tee reader (declared earlier) can fire it.
@@ -2162,13 +2805,9 @@ function ChatPanel({
       const conv = conversationIdRef.current;
       if (conv) {
         const r = await api.getConversationMessages(conv);
-        const mapped: AiMessage[] = r.messages
+        const mapped: ChatMessage[] = r.messages
           .filter((m) => m.role !== 'system')
-          .map((m) => ({
-            id: m.id,
-            role: m.role as 'user' | 'assistant',
-            content: m.content ?? '',
-          }));
+          .map(toChatMessage);
         setMessages(mapped);
         // Populate imagesByMsg for any assistant messages that have image attachments.
         await loadImagesForMessages(r.messages);
@@ -2352,13 +2991,9 @@ function ChatPanel({
   ): Promise<void> => {
     const res = await api.getConversationMessages(id);
     if (isCancelled?.()) return;
-    const mapped: AiMessage[] = res.messages
+    const mapped: ChatMessage[] = res.messages
       .filter((m) => m.role === 'user' || m.role === 'assistant' || m.role === 'system')
-      .map((m) => ({
-        id: m.id,
-        role: m.role as 'user' | 'assistant' | 'system',
-        content: m.content ?? '',
-    }));
+      .map(toChatMessage);
     setMessages(mapped);
     scrollMessagesToLatest();
     await loadImagesForMessages(res.messages);
@@ -2388,6 +3023,14 @@ function ChatPanel({
     };
   }, [conversationId, loadConversationMessages]);
 
+  useEffect(() => {
+    if (!timelineFocus || !conversationId || timelineFocus.runId.length === 0) return;
+    setRunTimelineFocus(timelineFocus);
+    setRunTimelineOpen(true);
+    void refreshRunTimeline();
+    onTimelineFocusConsumed();
+  }, [conversationId, onTimelineFocusConsumed, refreshRunTimeline, timelineFocus]);
+
   // M3.A.5/A4 — roundtable conversations restore the full panel. Chat
   // conversations with loopback content keep the message history visible and
   // expose an explicit "view process" entry instead.
@@ -2403,9 +3046,11 @@ function ChatPanel({
       .then((res) => {
         if (cancelled) return;
         setAssociatedRoundtableId(res.roundtable_id);
-        setActiveRoundtableId(
-          conversationType === 'roundtable' ? res.roundtable_id : null,
-        );
+        if (conversationType === 'roundtable') {
+          setActiveRoundtableId(res.roundtable_id);
+        } else if (conversationType != null) {
+          setActiveRoundtableId(null);
+        }
       })
       .catch((e) => console.warn('[roundtable] detect failed:', e));
     return () => {
@@ -2465,13 +3110,15 @@ function ChatPanel({
 
   const loadBudgetPrefs = useCallback(async (): Promise<void> => {
     try {
-      const [budgetRes, alertRes] = await Promise.all([
+      const [budgetRes, alertRes, hardRes] = await Promise.all([
         api.getMemoryEffective('monthly_budget_usd', null),
         api.getMemoryEffective('monthly_budget_alert_state', null),
+        api.getMemoryEffective('monthly_budget_hard_limit', null),
       ]);
       const rawBudget = budgetRes.data.value;
       const parsedBudget = rawBudget == null ? Number.NaN : Number(rawBudget);
       setMonthlyBudgetUsd(Number.isFinite(parsedBudget) && parsedBudget > 0 ? parsedBudget : null);
+      setMonthlyBudgetHardLimit(hardRes.data.value === 'true');
       const currentMonth = currentBudgetMonthKey();
       let nextState = { month: currentMonth, seen: [] as number[] };
       if (alertRes.data.value) {
@@ -2566,7 +3213,10 @@ function ChatPanel({
     activeRoundtableId != null
     || roundtableDialog != null
     || imagePicker != null
-    || pendingConfirm != null;
+    || pendingConfirm != null
+    || quickCompare != null
+    || quickComparePickerOpen
+    || externalOverlayOpen;
 
   useEffect(() => {
     if (activeTipId || tipBlocked || queuedTips.length === 0) return;
@@ -2614,17 +3264,18 @@ function ChatPanel({
       const anns = (m as { annotations?: unknown[] }).annotations;
       if (!Array.isArray(anns)) continue;
       for (const a of anns as Array<Record<string, unknown>>) {
-        if (a?.type === 'meta' && typeof a.conversation_id === 'string') {
+        const meta = parseChatMetaAnnotation(a);
+        if (meta) {
           // Guard: when the parent prop has already moved on to a different
           // conversation (e.g. user branched / switched), stale streamed
           // messages must NOT re-lift the prior conv id back onto the parent.
-          if (conversationId && conversationId !== a.conversation_id) continue;
-          if (conversationIdRef.current !== a.conversation_id) {
-            conversationIdRef.current = a.conversation_id;
+          if (conversationId && conversationId !== meta.conversation_id) continue;
+          if (conversationIdRef.current !== meta.conversation_id) {
+            conversationIdRef.current = meta.conversation_id;
           }
-          if (announcedConvIdRef.current !== a.conversation_id) {
-            announcedConvIdRef.current = a.conversation_id;
-            onConversationCreated(a.conversation_id);
+          if (announcedConvIdRef.current !== meta.conversation_id) {
+            announcedConvIdRef.current = meta.conversation_id;
+            onConversationCreated(meta.conversation_id);
           }
         }
         if (a?.type === 'cost' && typeof a.message_id === 'string') {
@@ -2684,6 +3335,10 @@ function ChatPanel({
             recommended_model_id: (a.recommended_model_id as string | null) ?? null,
             auto_fallback_enabled: a.auto_fallback_enabled === true,
             detail: typeof a.detail === 'string' ? (a.detail as string) : undefined,
+            can_compact_context: a.can_compact_context === true,
+            can_skip_tool: a.can_skip_tool === true,
+            tool_name: typeof a.tool_name === 'string' ? a.tool_name : null,
+            tool_label: typeof a.tool_label === 'string' ? a.tool_label : null,
           };
           setFailureByMsg((prev) =>
             prev[m.id] ? prev : { ...prev, [m.id]: decision },
@@ -2831,8 +3486,8 @@ function ChatPanel({
     let used = estimateInputTokens(input + '\n' + historyText);
     // Include pending text/PDF attachments — they end up inlined into the
     // upstream prompt so they consume the same context budget. Image tokens
-    // are model-specific and ignored here. base64 inflates source by 4/3, so
-    // decoded length ≈ b64.length * 0.75; estimateInputTokens is ~chars/4.
+    // are model-specific and ignored here; text/PDF attachments are approximated
+    // from decoded byte length until the sidecar prepares the final prompt.
     for (const p of pending) {
       if (p.kind === 'text' || p.kind === 'pdf') {
         used += Math.round((p.data_b64.length * 0.75) / 4);
@@ -2889,7 +3544,9 @@ function ChatPanel({
   const [editingDraft, setEditingDraft] = useState<string>('');
   const [editBusy, setEditBusy] = useState(false);
   const [branchBusy, setBranchBusy] = useState<string | null>(null);
+  const [exportBusy, setExportBusy] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
+  const [activeMsgActionsId, setActiveMsgActionsId] = useState<string | null>(null);
 
   // C2 — stop streaming + continue. wasStoppedRecently is set when the user
   // hits the composer "停止" button so the next assistant render can offer a
@@ -2897,8 +3554,10 @@ function ChatPanel({
   // starts (so a re-send hides the dangling continue affordance).
   const [wasStoppedRecently, setWasStoppedRecently] = useState(false);
   const [continueBusy, setContinueBusy] = useState(false);
+  const [recoverBusy, setRecoverBusy] = useState<string | null>(null);
   useEffect(() => {
     setWasStoppedRecently(false);
+    setQuickComparePickerOpen(false);
   }, [conversationId]);
   const onStopClick = useCallback((): void => {
     lastUserStopAtRef.current = Date.now();
@@ -2916,21 +3575,407 @@ function ChatPanel({
     window.setTimeout(refreshStoppedConversation, 250);
     window.setTimeout(refreshStoppedConversation, 1000);
   }, [loadConversationMessages, onConversationUpdated, stop]);
-  const onContinueClick = useCallback(async (): Promise<void> => {
+  const onContinueClick = useCallback(async (assistantMessageId?: string): Promise<void> => {
     if (continueBusy || isLoading) return;
+    const conv = conversationIdRef.current;
+    if (!conv) return;
+    const finish = async (): Promise<void> => {
+      await loadConversationMessages(conv);
+      await refreshRunTimeline();
+      void refreshRealtime();
+      onConversationUpdated();
+    };
+    const runConfirmed = async (runId: string): Promise<void> => {
+      await api.continueRun(runId, { confirmed_cost: true });
+      await finish();
+    };
+    const execute = async (confirmedCost = false): Promise<void> => {
+      const runsRes = await api.getConversationRuns(conv, 20);
+      const run = runsRes.data.runs.find((item) =>
+        item.status === 'incomplete' &&
+        (!assistantMessageId || item.assistant_message_id === assistantMessageId),
+      ) ?? runsRes.data.runs.find((item) => item.status === 'incomplete');
+      if (!run) {
+        throw new Error('没有找到可续写的中断运行');
+      }
+      const resumeState = await api.getRunResumeState(run.id);
+      if (!resumeState.data.can_continue) {
+        const reasonText =
+          resumeState.data.recommended_action === 'switch_model'
+            ? '原模型当前不可用，请切换模型后重试。'
+            : resumeState.data.reason === 'still_streaming'
+              ? '这条回复仍在生成中，请稍后再试。'
+              : resumeState.data.reason === 'message_failed'
+                ? '这条回复已失败，请使用重新生成或恢复操作。'
+                : '这条回复当前不可续写。';
+        throw new Error(reasonText);
+      }
+      try {
+        await api.continueRun(run.id, confirmedCost ? { confirmed_cost: true } : undefined);
+        await finish();
+      } catch (e) {
+        if (!confirmedCost && isCostConfirmationRequiredError(e)) {
+          const targetModel = chatModels.find((item) => item.id === e.details.model_id) ?? model;
+          setPendingConfirm({
+            estimate: e.details.estimate_usd,
+            reason: e.details.reason,
+            model: targetModel,
+            allowCheaper: false,
+            blocked: e.details.blocked === true,
+            budget: e.details.reason === 'budget'
+              ? {
+                  monthly_budget_usd: e.details.monthly_budget_usd ?? 0,
+                  month_spent_usd: e.details.month_spent_usd ?? 0,
+                }
+              : undefined,
+            onContinue: () => {
+              setPendingConfirm(null);
+              setContinueBusy(true);
+              void runConfirmed(run.id)
+                .catch((err) => setActionError(err instanceof Error ? err.message : '续写失败'))
+                .finally(() => setContinueBusy(false));
+            },
+            onCheaper: () => { setPendingConfirm(null); },
+            onCancel: () => {
+              setPendingConfirm(null);
+              setContinueBusy(false);
+            },
+          });
+          return;
+        }
+        throw e;
+      }
+    };
     setContinueBusy(true);
     setWasStoppedRecently(false);
     try {
-      await append({
-        role: 'user',
-        content: '请继续上文，不必重复已写过的内容。',
-      });
+      await execute(false);
     } catch (e) {
       setActionError(e instanceof Error ? e.message : '续写失败');
     } finally {
       setContinueBusy(false);
     }
-  }, [append, continueBusy, isLoading]);
+  }, [
+    continueBusy,
+    isLoading,
+    loadConversationMessages,
+    chatModels,
+    model,
+    onConversationUpdated,
+    refreshRealtime,
+    refreshRunTimeline,
+  ]);
+
+  useEffect(() => {
+    if (!pendingInterruptedRunId || isLoading || continueBusy) return;
+    let cancelled = false;
+    const runId = pendingInterruptedRunId;
+    const refreshInterruptedConversation = async (): Promise<void> => {
+      const conv = conversationIdRef.current;
+      if (!conv) return;
+      await loadConversationMessages(conv);
+      await refreshRunTimeline();
+      void refreshRealtime();
+      onConversationUpdated();
+    };
+    (async () => {
+      let usedAutoContinue = false;
+      try {
+        const resumeState = await api.getRunResumeState(runId);
+        if (cancelled || pendingInterruptedRunId !== runId) return;
+        if (!resumeState.data.can_continue) {
+          await refreshInterruptedConversation();
+          return;
+        }
+        if (!streamAutoResumeEnabledRef.current) {
+          await refreshInterruptedConversation();
+          return;
+        }
+        setContinueBusy(true);
+        usedAutoContinue = true;
+        setActionError(null);
+        await api.continueRun(runId);
+        if (!cancelled) await refreshInterruptedConversation();
+      } catch (e) {
+        if (!cancelled) {
+          setActionError(e instanceof Error ? e.message : '自动续接失败，请点击继续生成重试');
+        }
+      } finally {
+        if (!cancelled) {
+          if (usedAutoContinue) setContinueBusy(false);
+          setPendingInterruptedRunId(null);
+        }
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    continueBusy,
+    isLoading,
+    loadConversationMessages,
+    onConversationUpdated,
+    pendingInterruptedRunId,
+    refreshRealtime,
+    refreshRunTimeline,
+  ]);
+
+  const quickCompareEligibleModels = useMemo(
+    () => chatModels.filter((item) => isQuickCompareEligibleModel(item)),
+    [chatModels],
+  );
+
+  const defaultQuickCompareModelIds = useMemo(() => {
+    const currentModelEligible = isQuickCompareEligibleModel(model);
+    return [
+      ...(currentModelEligible ? [model.id] : []),
+      ...quickCompareEligibleModels
+        .filter((item) => item.id !== model.id)
+        .map((item) => item.id),
+    ].slice(0, 3);
+  }, [model, quickCompareEligibleModels]);
+  const quickCompareToolBlocked = hasQuickCompareToolIntent(input);
+  const quickCompareDisabledReason = !input.trim()
+    ? '先输入要比较的问题'
+    : quickCompareEligibleModels.length < 2
+      ? 'Quick Compare 至少需要 2 个可用聊天模型'
+      : pendingHasImage && !model.supports_vision
+        ? '当前模型不能处理待发送图片'
+        : quickCompareToolBlocked
+          ? '这条消息像是需要搜索/抓网页。请直接发送，让正式工具链先完成检索。'
+          : null;
+  const quickCompareDisabled = quickCompareDisabledReason !== null;
+
+  const runQuickCompare = useCallback(async (
+    modelIds: string[] = defaultQuickCompareModelIds,
+    confirmedCost = false,
+  ): Promise<void> => {
+    if (quickCompare?.running || isLoading) return;
+    const prompt = input.trim();
+    if (!prompt) return;
+    if (hasQuickCompareToolIntent(prompt)) {
+      setQuickCompare({
+        compareId: null,
+        running: false,
+        error: 'Quick Compare 不执行搜索/抓网页。请直接发送，让正式工具链完成检索后再对比草稿。',
+        outputs: [],
+      });
+      return;
+    }
+    const currentModelEligible = isQuickCompareEligibleModel(model);
+    const candidateIds = [...new Set(modelIds)].slice(0, 3);
+    if (candidateIds.length < 2) {
+      setQuickCompare({
+        compareId: null,
+        running: false,
+        error: currentModelEligible
+          ? 'Quick Compare 至少需要 2 个可用聊天模型。'
+          : '当前会话模型暂不可用于 Quick Compare，请切换到启用中的聊天或多模态模型后重试。',
+        outputs: [],
+      });
+      return;
+    }
+    setQuickCompare({ compareId: null, running: true, error: null, outputs: [] });
+    setActionError(null);
+    try {
+      const atts = pending.map(({ kind, mime, data_b64, name }) => ({ kind, mime, data_b64, name }));
+      const requestMessages = [
+        ...messages
+          .filter((message) => message.role === 'user' || message.role === 'assistant' || message.role === 'system')
+          .map((message) => ({ role: message.role as 'user' | 'assistant' | 'system', content: message.content })),
+        { role: 'user' as const, content: prompt },
+      ];
+      await api.quickCompare({
+          conversation_id: conversationIdRef.current ?? undefined,
+          messages: requestMessages,
+          model_ids: candidateIds,
+          ...(atts.length > 0 ? { attachments: atts } : {}),
+          ...(activePersona ? { persona_id: activePersona.id } : {}),
+          ...(confirmedCost ? { confirmed_cost: true } : {}),
+        },
+        {
+          onAnnotation: (annotation) => {
+            setQuickCompare((current) =>
+              applyQuickCompareAnnotation(
+                current ?? { compareId: null, running: true, error: null, outputs: [] },
+                annotation,
+              ),
+            );
+          },
+        },
+      );
+      setPending([]);
+      setDropError(null);
+      setInput('');
+      const conv = conversationIdRef.current;
+      if (conv) {
+        await loadConversationMessages(conv);
+        onConversationUpdated();
+      }
+    } catch (e) {
+      if (!confirmedCost && isCostConfirmationRequiredError(e)) {
+        const targetModel = chatModels.find((item) => item.id === e.details.model_id) ?? model;
+        setPendingConfirm({
+          estimate: e.details.estimate_usd,
+          reason: e.details.reason,
+          model: targetModel,
+          allowCheaper: false,
+          blocked: e.details.blocked === true,
+          budget: e.details.reason === 'budget'
+            ? {
+                monthly_budget_usd: e.details.monthly_budget_usd ?? 0,
+                month_spent_usd: e.details.month_spent_usd ?? 0,
+              }
+            : undefined,
+          onContinue: () => {
+            setPendingConfirm(null);
+            void runQuickCompare(candidateIds, true);
+          },
+          onCheaper: () => { setPendingConfirm(null); },
+          onCancel: () => {
+            setPendingConfirm(null);
+            setQuickCompare(null);
+          },
+        });
+        return;
+      }
+      setQuickCompare({
+        compareId: null,
+        running: false,
+        error: e instanceof Error ? e.message : 'Quick Compare 失败',
+        outputs: [],
+      });
+    }
+  }, [
+    activePersona,
+    defaultQuickCompareModelIds,
+    input,
+    isLoading,
+    loadConversationMessages,
+    messages,
+    model,
+    onConversationUpdated,
+    pending,
+    quickCompare?.running,
+    setInput,
+  ]);
+
+  const adoptQuickCompareOutput = useCallback(async (outputId: string): Promise<void> => {
+    if (!quickCompare?.compareId || quickCompareAdoptingId) return;
+    setQuickCompareAdoptingId(outputId);
+    setActionError(null);
+    try {
+      const res = await api.adoptQuickCompareOutput(quickCompare.compareId, outputId);
+      await loadConversationMessages(res.data.conversation_id);
+      onConversationCreated(res.data.conversation_id);
+      onConversationUpdated();
+      setQuickCompare(null);
+    } catch (e) {
+      setActionError(e instanceof Error ? e.message : '采纳失败');
+    } finally {
+      setQuickCompareAdoptingId(null);
+    }
+  }, [
+    loadConversationMessages,
+    onConversationCreated,
+    onConversationUpdated,
+    quickCompare?.compareId,
+    quickCompareAdoptingId,
+  ]);
+
+  const onRecoverClick = useCallback(async (
+    action: Extract<RecoverRunRequest['action'], 'retry_same_model' | 'switch_model' | 'compact_context' | 'skip_tool'>,
+    assistantMessageId?: string,
+    targetModelId?: string,
+    toolName?: string | null,
+  ): Promise<void> => {
+    if (recoverBusy || isLoading) return;
+    const conv = conversationIdRef.current;
+    if (!conv) return;
+    const busyKey = `${assistantMessageId ?? 'latest'}:${action}`;
+    setRecoverBusy(busyKey);
+    setActionError(null);
+    const finish = async (): Promise<void> => {
+      if (action === 'switch_model' && targetModelId) {
+        onModelChange(targetModelId);
+      }
+      clearFailureDecisionState();
+      await loadConversationMessages(conv);
+      await refreshRunTimeline();
+      void refreshRealtime();
+      onConversationUpdated();
+    };
+    const buildBody = (confirmedCost = false): RecoverRunRequest => ({
+      action,
+      ...(targetModelId ? { model_id: targetModelId } : {}),
+      ...(toolName ? { tool_name: toolName } : {}),
+      ...(confirmedCost ? { confirmed_cost: true } : {}),
+    });
+    const runConfirmed = async (runId: string): Promise<void> => {
+      await api.recoverRun(runId, buildBody(true));
+      await finish();
+    };
+    try {
+      const runsRes = await api.getConversationRuns(conv, 50);
+      const run = runsRes.data.runs.find((item) =>
+        item.status === 'failed' &&
+        (!assistantMessageId || item.assistant_message_id === assistantMessageId),
+      ) ?? runsRes.data.runs.find((item) => item.status === 'failed');
+      if (!run) {
+        throw new Error('没有找到可恢复的失败运行');
+      }
+      try {
+        await api.recoverRun(run.id, buildBody(false));
+        await finish();
+      } catch (e) {
+        if (isCostConfirmationRequiredError(e)) {
+          const targetModel = chatModels.find((item) => item.id === e.details.model_id) ?? model;
+          setPendingConfirm({
+            estimate: e.details.estimate_usd,
+            reason: e.details.reason,
+            model: targetModel,
+            allowCheaper: false,
+            blocked: e.details.blocked === true,
+            budget: e.details.reason === 'budget'
+              ? {
+                  monthly_budget_usd: e.details.monthly_budget_usd ?? 0,
+                  month_spent_usd: e.details.month_spent_usd ?? 0,
+                }
+              : undefined,
+            onContinue: () => {
+              setPendingConfirm(null);
+              setRecoverBusy(busyKey);
+              void runConfirmed(run.id)
+                .catch((err) => setActionError(err instanceof Error ? err.message : '恢复失败'))
+                .finally(() => setRecoverBusy(null));
+            },
+            onCheaper: () => { setPendingConfirm(null); },
+            onCancel: () => {
+              setPendingConfirm(null);
+              setRecoverBusy(null);
+            },
+          });
+          return;
+        }
+        throw e;
+      }
+    } catch (e) {
+      setActionError(e instanceof Error ? e.message : '恢复失败');
+    } finally {
+      setRecoverBusy(null);
+    }
+  }, [
+    clearFailureDecisionState,
+    chatModels,
+    isLoading,
+    loadConversationMessages,
+    model,
+    onConversationUpdated,
+    onModelChange,
+    recoverBusy,
+    refreshRealtime,
+    refreshRunTimeline,
+  ]);
 
   const submitEdit = useCallback(
     async (messageId: string) => {
@@ -2996,6 +4041,29 @@ function ChatPanel({
     [conversationId, messages, onConversationCreated, onConversationUpdated],
   );
 
+  const exportConversation = useCallback(async (): Promise<void> => {
+    if (!conversationId) return;
+    setExportBusy(true);
+    setActionError(null);
+    try {
+      const { blob, filename } = await api.exportConversationMarkdown(conversationId, {
+        includeTimeline: 'summary',
+      });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = filename;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+    } catch (e) {
+      setActionError(e instanceof Error ? e.message : '导出失败');
+    } finally {
+      setExportBusy(false);
+    }
+  }, [conversationId]);
+
   return (
     <div className="chat" data-testid="chat-panel" data-active-conv={conversationId ?? ''}>
       <div className="chat-header">
@@ -3053,34 +4121,35 @@ function ChatPanel({
             👁
           </span>
         )}
+        {conversationType !== 'roundtable' && (
+          <button
+            type="button"
+            className="header-chip-btn"
+            data-testid="chat-export-markdown"
+            disabled={!conversationId || exportBusy}
+            onClick={() => void exportConversation()}
+            title={conversationId ? '导出当前会话为 Markdown' : '发送第一条消息后可导出'}
+          >
+            {exportBusy ? '导出中…' : '导出'}
+          </button>
+        )}
       </div>
       {promptAssetsError && (
         <div className="prompt-assets-error" data-testid="prompt-assets-error" role="alert">
           {promptAssetsError}
         </div>
       )}
-      <SessionProfileStrip
-        model={model}
-        personaName={
-          selectedPersonaId
-            ? personas.find((persona) => persona.id === selectedPersonaId)?.name ?? 'Persona'
-            : null
-        }
-        conversationId={conversationId}
-        tools={effectiveTools}
-        cost={realtime ?? profileCost}
-        busyToolName={sessionToolBusy}
-        onSetToolOverride={(name, enabled) => void setSessionToolOverride(name, enabled)}
-        onOpenTools={onOpenTools}
-        onOpenRunTimeline={() => {
-          setRunTimelineOpen(true);
-          void refreshRunTimeline();
-        }}
-      />
       <CapabilityPreflight
         model={model}
         chatModels={chatModels}
+        tools={effectiveTools}
+        cost={realtime ?? profileCost}
+        busyToolName={sessionToolBusy}
         imageModels={imageModels}
+        selectedImageModel={selectedImageModel}
+        imageModelMemoryScope={imageModelMemoryScope}
+        imageModelPreferenceBusy={imageModelPreferenceBusy}
+        imageModelPreferenceError={imageModelPreferenceError}
         providers={providers}
         activePersona={activePersona}
         conversationId={conversationId}
@@ -3092,9 +4161,16 @@ function ChatPanel({
         inputHasText={input.trim().length > 0}
         inputText={input}
         pendingHasImage={pendingHasImage}
+        onSetToolOverride={(name, enabled) => void setSessionToolOverride(name, enabled)}
         onOpenModelCenter={onOpenModelCenter}
         onOpenTools={onOpenTools}
+        onOpenRunTimeline={() => {
+          setRunTimelineOpen(true);
+          void refreshRunTimeline();
+        }}
         onSelectModel={changeModelAndClearFailure}
+        onSelectImageModel={(id) => void persistImageModelPreference(id)}
+        onSelectImageAuto={() => void clearImageModelPreference()}
       />
       {activeRoundtableId ? (
         <RoundtablePanel
@@ -3160,6 +4236,7 @@ function ChatPanel({
           </div>
         )}
         {messages.map((m) => {
+          const msgMeta = m as ChatMessage;
           const anns =
             ((m as { annotations?: Array<Record<string, unknown>> }).annotations ?? []);
           const annMessageId = anns.find((a) => a?.type === 'cost')?.message_id as
@@ -3174,9 +4251,20 @@ function ChatPanel({
             : null;
           const isLastAssistant =
             m.role === 'assistant' && m === messages[messages.length - 1];
+          const canContinue =
+            m.role === 'assistant' &&
+            isLastAssistant &&
+            (wasStoppedRecently || msgMeta.status === 'incomplete');
           return (
-            <div key={m.id} className={`msg ${m.role}`} data-role={m.role} data-msg-id={m.id}>
-              <div className="msg-role">{m.role}</div>
+            <div
+              key={m.id}
+              className={`msg ${m.role}`}
+              data-role={m.role}
+              data-msg-id={m.id}
+              onMouseEnter={() => setActiveMsgActionsId(m.id)}
+              onFocusCapture={() => setActiveMsgActionsId(m.id)}
+            >
+              <div className="msg-role">{messageRoleLabel(msgMeta, chatModels, providers, model)}</div>
               {m.role === 'user' && editingMsgId === m.id ? (
                 <div className="msg-content msg-edit-block">
                   <textarea
@@ -3206,10 +4294,7 @@ function ChatPanel({
                   </div>
                 </div>
               ) : m.role === 'assistant' ? (
-                <div
-                  className="msg-content msg-md"
-                  dangerouslySetInnerHTML={{ __html: renderMarkdown(m.content) }}
-                />
+                <MarkdownView content={m.content} />
               ) : (
                 <div className="msg-content">{m.content}</div>
               )}
@@ -3260,29 +4345,41 @@ function ChatPanel({
               {m.role === 'assistant' && toolTraceSteps.length > 0 && (
                 <ToolTraceTimeline steps={toolTraceSteps} />
               )}
-              {m.role === 'assistant' && contextSnapshot && (
-                <ContextSnapshotCard snapshot={contextSnapshot} />
+              {m.role === 'assistant' && (contextSnapshot || cost) && (
+                <MessageContextDetails
+                  snapshot={contextSnapshot}
+                  cost={cost}
+                />
               )}
-              {m.role === 'assistant' && cost && (
-                <div className="msg-cost" data-testid="msg-cost">
-                  {formatTokenCount(cost.input_tokens)} in · {formatTokenCount(cost.output_tokens)} out ·{' '}
-                  {cost.actual_usd != null ? formatUsd(cost.actual_usd) : '—'}
-                  {(cost.input_tokens == null || cost.output_tokens == null) && (
-                    <span className="msg-cost-note" title="当前供应商没有返回 token usage，费用只能显示可用部分。">
-                      token 未返回
-                    </span>
-                  )}
+              {canContinue && msgMeta.status === 'incomplete' && (
+                <div className="resume-banner" data-testid="resume-banner">
+                  <div>
+                    <strong>这条回复未完成</strong>
+                    <span>Taori 已保留已生成内容，可以从中断处继续。</span>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => void onContinueClick(m.id)}
+                    disabled={continueBusy || isLoading}
+                    data-testid="resume-continue"
+                  >
+                    {continueBusy ? '续写中…' : '继续生成'}
+                  </button>
                 </div>
               )}
               {!isLoading && m.content && editingMsgId !== m.id && (
-                <div className="msg-actions" data-testid="msg-actions">
+                <div
+                  className={`msg-actions${canContinue || activeMsgActionsId === m.id ? ' msg-actions--visible' : ''}`}
+                  data-testid="msg-actions"
+                >
                   <button
                     type="button"
                     onClick={() => void copyToClipboard(m.content)}
                     data-testid="msg-copy"
                     title="复制"
+                    aria-label="复制"
                   >
-                    ⧉ 复制
+                    ⧉
                   </button>
                   {m.role === 'user' && conversationId && (
                     <button
@@ -3294,8 +4391,9 @@ function ChatPanel({
                         setEditingMsgId(m.id);
                         setEditingDraft(m.content ?? '');
                       }}
+                      aria-label="编辑并重新生成"
                     >
-                      ✎ 编辑重发
+                      ✎
                     </button>
                   )}
                   {m.role === 'assistant' && isLastAssistant && (
@@ -3307,19 +4405,21 @@ function ChatPanel({
                       }}
                       data-testid="msg-regenerate"
                       title="重新生成"
+                      aria-label="重新生成"
                     >
-                      ↻ 重新生成
+                      ↻
                     </button>
                   )}
-                  {m.role === 'assistant' && isLastAssistant && wasStoppedRecently && (
+                  {canContinue && (
                     <button
                       type="button"
-                      onClick={() => void onContinueClick()}
+                      onClick={() => void onContinueClick(m.id)}
                       data-testid="msg-continue"
                       title="继续上文"
                       disabled={continueBusy}
+                      aria-label={continueBusy ? '续写中' : '继续上文'}
                     >
-                      {continueBusy ? '续写中…' : '✏️ 续写'}
+                      {continueBusy ? '…' : '✏️'}
                     </button>
                   )}
                   {conversationId && (m.role === 'user' || m.role === 'assistant') && (
@@ -3329,8 +4429,9 @@ function ChatPanel({
                       title="基于此消息创建分支会话"
                       disabled={branchBusy === m.id}
                       onClick={() => void branchFromMessage(m.id)}
+                      aria-label={branchBusy === m.id ? '创建分支中' : '基于此消息创建分支会话'}
                     >
-                      {branchBusy === m.id ? '创建分支…' : '⎇ 分支'}
+                      {branchBusy === m.id ? '…' : '⎇'}
                     </button>
                   )}
                 </div>
@@ -3340,15 +4441,12 @@ function ChatPanel({
                   decision={failureByMsg[m.id]!}
                   chatModels={chatModels}
                   providers={providers}
-                  onRetry={() => {
-                    clearFailureDecisionState();
-                    regenerateWithCurrentConversation({ model_id: model.id });
-                  }}
-                  onSwitch={(targetId) => {
-                    changeModelAndClearFailure(targetId);
-                    regenerateWithCurrentConversation({ model_id: targetId });
-                  }}
+                  onRetry={() => void onRecoverClick('retry_same_model', m.id)}
+                  onSwitch={(targetId) => void onRecoverClick('switch_model', m.id, targetId)}
+                  onCompact={() => void onRecoverClick('compact_context', m.id)}
+                  onSkipTool={(toolName) => void onRecoverClick('skip_tool', m.id, undefined, toolName)}
                   onOpenSettings={() => onOpenSettings()}
+                  busy={recoverBusy != null}
                 />
               )}
             </div>
@@ -3381,6 +4479,50 @@ function ChatPanel({
                 <div className="hint">实时估算，最终以服务返回为准</div>
               </div>
             )}
+            {slowResponseWarning && (
+              <div className="slow-response-card" data-testid="slow-response-card">
+                <strong>首 token 等待超过 {Math.round(slowResponseWarning.thresholdMs / 1000)} 秒</strong>
+                <p className="hint">该模型这次响应偏慢，可以继续等、取消，或先切到历史更快的模型后重发。</p>
+                <div className="slow-response-actions">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      slowResponseDismissedRef.current = true;
+                      setSlowResponseWarning(null);
+                    }}
+                    data-testid="slow-response-wait"
+                  >
+                    继续等
+                  </button>
+                  {slowResponseWarning.suggestedModelId && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        const next = chatModels.find((item) => item.id === slowResponseWarning.suggestedModelId);
+                        if (!next) return;
+                        stop();
+                        changeModelAndClearFailure(next.id);
+                        setDropError(`已切换到更快模型：${modelDisplayWithProvider(next, providers)}。可重新发送当前问题。`);
+                        setSlowResponseWarning(null);
+                      }}
+                      data-testid="slow-response-switch"
+                    >
+                      切到更快模型
+                    </button>
+                  )}
+                  <button
+                    type="button"
+                    onClick={() => {
+                      stop();
+                      setSlowResponseWarning(null);
+                    }}
+                    data-testid="slow-response-cancel"
+                  >
+                    取消本次
+                  </button>
+                </div>
+              </div>
+            )}
           </div>
         )}
         {/*
@@ -3398,20 +4540,68 @@ function ChatPanel({
                 decision={failureByMsg[lastFailureMsgId]!}
                 chatModels={chatModels}
                 providers={providers}
-                onRetry={() => {
-                  clearFailureDecisionState();
-                  regenerateWithCurrentConversation({ model_id: model.id });
-                }}
-                onSwitch={(targetId) => {
-                  changeModelAndClearFailure(targetId);
-                  regenerateWithCurrentConversation({ model_id: targetId });
-                }}
+                onRetry={() => void onRecoverClick('retry_same_model', lastFailureMsgId)}
+                onSwitch={(targetId) => void onRecoverClick('switch_model', lastFailureMsgId, targetId)}
+                onCompact={() => void onRecoverClick('compact_context', lastFailureMsgId)}
+                onSkipTool={(toolName) => void onRecoverClick('skip_tool', lastFailureMsgId, undefined, toolName)}
                 onOpenSettings={() => onOpenSettings()}
+                busy={recoverBusy != null}
               />
             </div>
           )}
       </div>
       {error && <ChatErrorBanner error={error} />}
+      {quickCompare && (
+        <section className="quick-compare-card" data-testid="quick-compare-card">
+          <div className="quick-compare-head">
+            <div>
+              <strong>Quick Compare</strong>
+              <span>一次对比多个模型回答，采纳后才写入正式上下文。</span>
+            </div>
+            <button type="button" onClick={() => setQuickCompare(null)} data-testid="quick-compare-close">
+              关闭
+            </button>
+          </div>
+          {quickCompare.running && <p className="hint">正在并行请求候选模型…</p>}
+          {quickCompare.error && <p className="err" data-testid="quick-compare-error">{quickCompare.error}</p>}
+          {quickCompare.outputs.length > 0 && (
+            <div className="quick-compare-grid" data-testid="quick-compare-grid">
+              {quickCompare.outputs.map((output) => {
+                const outputModel = chatModels.find((item) => item.id === output.modelId) ?? null;
+                return (
+                  <article
+                    className={`quick-compare-output quick-compare-${output.status}`}
+                    key={output.outputId}
+                    data-testid="quick-compare-output"
+                  >
+                    <header>
+                      <strong>{outputModel ? modelDisplayWithProvider(outputModel, providers) : output.modelId}</strong>
+                      <span>{output.status === 'failed' ? '失败' : output.status === 'complete' ? '完成' : '生成中'}</span>
+                    </header>
+                    {output.status === 'failed' ? (
+                      <p className="err">{output.error ?? '候选生成失败'}</p>
+                    ) : (
+                      <MarkdownView
+                        content={output.content || '（暂无内容）'}
+                        className="quick-compare-content msg-md"
+                      />
+                    )}
+                    <button
+                      type="button"
+                      className="quick-compare-adopt"
+                      disabled={output.status !== 'complete' || quickCompareAdoptingId === output.outputId}
+                      onClick={() => void adoptQuickCompareOutput(output.outputId)}
+                      data-testid="quick-compare-adopt"
+                    >
+                      {quickCompareAdoptingId === output.outputId ? '采纳中…' : '采纳这版'}
+                    </button>
+                  </article>
+                );
+              })}
+            </div>
+          )}
+        </section>
+      )}
       <AttachmentBar
         attachments={pending}
         onRemove={(idx) => setPending((p) => p.filter((_, i) => i !== idx))}
@@ -3463,6 +4653,7 @@ function ChatPanel({
             setPendingConfirm({
               estimate: estimate.point ?? 0,
               reason: 'budget',
+              blocked: monthlyBudgetHardLimit,
               budget: {
                 monthly_budget_usd: monthlyBudgetUsd,
                 month_spent_usd: realtime.month_usd,
@@ -3616,6 +4807,16 @@ function ChatPanel({
           <>
             <button
               type="button"
+              data-testid="composer-quick-compare"
+              className="roundtable-btn quick-compare-btn"
+              title={quickCompareDisabledReason ?? '一键并行对比 2-3 个模型回答'}
+              disabled={quickCompareDisabled}
+              onClick={() => setQuickComparePickerOpen(true)}
+            >
+              ⚡ 对比
+            </button>
+            <button
+              type="button"
               data-testid="composer-roundtable"
               className="roundtable-btn"
               title="🔍 圆桌讨论：让多个模型从不同视角围绕同一话题讨论"
@@ -3663,8 +4864,12 @@ function ChatPanel({
           model={pendingConfirm.model ?? model}
           providers={providers}
           conversationId={conversationId}
-          hasCheaperPeer={findKnownCheaperPeer(chatModels, pendingConfirm.model ?? model) != null}
+          hasCheaperPeer={
+            pendingConfirm.allowCheaper !== false &&
+            findKnownCheaperPeer(chatModels, pendingConfirm.model ?? model) != null
+          }
           budget={pendingConfirm.budget}
+          blocked={pendingConfirm.blocked === true}
           onContinue={pendingConfirm.onContinue}
           onCheaper={pendingConfirm.onCheaper}
           onCancel={pendingConfirm.onCancel}
@@ -3693,6 +4898,7 @@ function ChatPanel({
         <RunTimelinePanel
           events={runEvents}
           error={runEventsError}
+          focusTarget={runTimelineFocus}
           onRefresh={() => void refreshRunTimeline()}
           onClose={() => setRunTimelineOpen(false)}
         />
@@ -3729,8 +4935,10 @@ function ChatPanel({
       {templatePickerOpen && (
         <TemplatePickerDialog
           templates={promptTemplates}
+          recipes={workflowRecipes}
           onClose={() => setTemplatePickerOpen(false)}
           onApply={(template) => void applyTemplate(template)}
+          onApplyRecipe={(recipe) => applyRecipe(recipe)}
         />
       )}
       {templateVarDraft && (
@@ -3745,6 +4953,31 @@ function ChatPanel({
           onSubmit={(answers) => insertTemplateWithAnswers(templateVarDraft.template, answers)}
         />
       )}
+      {recipeVarDraft && (
+        <TemplateVariablesDialog
+          template={recipeVarDraft.template}
+          vars={recipeVarDraft.vars}
+          answers={recipeVarDraft.answers}
+          onAnswersChange={(answers) =>
+            setRecipeVarDraft((draft) => (draft ? { ...draft, answers } : draft))
+          }
+          onCancel={() => setRecipeVarDraft(null)}
+          onSubmit={(answers) => insertRecipeWithAnswers(recipeVarDraft.template.recipe, answers)}
+        />
+      )}
+      {quickComparePickerOpen && (
+        <QuickCompareModelPickerDialog
+          models={quickCompareEligibleModels}
+          selectedIds={defaultQuickCompareModelIds}
+          providers={providers}
+          currentModelId={model.id}
+          onCancel={() => setQuickComparePickerOpen(false)}
+          onSubmit={(modelIds) => {
+            setQuickComparePickerOpen(false);
+            void runQuickCompare(modelIds, false);
+          }}
+        />
+      )}
       {roundtableDialog && (
         <RoundtableLaunchDialog
           initialTopic={roundtableDialog.initialTopic}
@@ -3753,13 +4986,14 @@ function ChatPanel({
           onCancel={() => setRoundtableDialog(null)}
           onLaunched={(result) => {
             setRoundtableDialog(null);
+            onConversationCreated(result.conversation_id);
             setActiveRoundtableId(result.id);
             // Pull the new conversation into the sidebar list.
             onConversationUpdated();
           }}
         />
       )}
-      {activeTipId && (
+      {activeTipId && !tipBlocked && (
         <DiscoverableTip
           content={TIPS[activeTipId]}
           onDismiss={() => setActiveTipId(null)}
@@ -3772,12 +5006,16 @@ function ChatPanel({
 
 function TemplatePickerDialog({
   templates,
+  recipes,
   onClose,
   onApply,
+  onApplyRecipe,
 }: {
   templates: PromptTemplate[];
+  recipes: WorkflowRecipe[];
   onClose: () => void;
   onApply: (template: TemplateLike) => void;
+  onApplyRecipe: (recipe: WorkflowRecipe) => void;
 }): JSX.Element {
   const hasTemplates = templates.length > 0;
   return (
@@ -3810,9 +5048,39 @@ function TemplatePickerDialog({
               <code>{template.content.slice(0, 140)}</code>
             </button>
           ))}
+          <div className="picker-dialog-section-title">Workflow Recipe</div>
+          {recipes.length === 0 ? (
+            <EmptyState
+              title="还没有 Recipe"
+              hint="可以在控制中心的模板与 Persona 里创建。"
+              icon="🧪"
+              compact
+              tone="muted"
+            />
+          ) : (
+            recipes.map((recipe) => (
+              <button
+                key={recipe.id}
+                type="button"
+                className="picker-dialog-item workflow-template"
+                data-testid="workflow-recipe-item"
+                onClick={() => onApplyRecipe(recipe)}
+              >
+                <strong>{recipe.name}</strong>
+                {recipe.description && <span>{recipe.description}</span>}
+                <code>{recipe.spec.prompt_template.slice(0, 140)}</code>
+              </button>
+            ))
+          )}
           <div className="picker-dialog-section-title">我的模板</div>
           {!hasTemplates ? (
-            <p className="hint">还没有自定义模板。可以先到设置里创建一个。</p>
+            <EmptyState
+              title="还没有自定义模板"
+              hint="可以先到设置里创建一个。"
+              icon="🗂"
+              compact
+              tone="muted"
+            />
           ) : (
             <>
               {templates.map((template) => (
@@ -3872,129 +5140,124 @@ function ToolTraceTimeline({ steps }: { steps: ToolTraceStep[] }): JSX.Element {
   );
 }
 
-function SessionProfileStrip({
-  model,
-  personaName,
-  conversationId,
-  tools,
-  cost,
-  busyToolName,
-  onSetToolOverride,
-  onOpenTools,
-  onOpenRunTimeline,
-}: {
-  model: Model;
-  personaName: string | null;
-  conversationId: string | null;
-  tools: EffectiveTool[];
-  cost: {
-    current_conversation_usd: number;
-    current_conversation_calls: number;
-  } | null;
-  busyToolName: string | null;
-  onSetToolOverride: (name: string, enabled: boolean | null) => void;
-  onOpenTools: () => void;
-  onOpenRunTimeline: () => void;
-}): JSX.Element {
-  const toolNames = ['builtin.web_search', 'builtin.web_fetch', 'builtin.image_generate'];
-  const visibleTools = tools.filter((toolItem) => toolNames.includes(toolItem.name));
-  const enabledCount = tools.filter((toolItem) => toolItem.effective_enabled).length;
-  return (
-    <div className="session-profile-strip" data-testid="session-profile-strip">
-      <div className="session-profile-main">
-        <span data-testid="session-profile-model">模型：{modelBaseDisplayName(model)}</span>
-        <span data-testid="session-profile-persona">
-          Persona：{personaName ?? '无'}
-        </span>
-        <span data-testid="session-profile-tools">
-          工具：{enabledCount}/{tools.length}
-        </span>
-        <span data-testid="session-profile-cost">
-          本会话：{formatUsd(cost?.current_conversation_usd ?? 0)}
-        </span>
-      </div>
-      <div className="session-tool-policy" data-testid="session-tool-policy">
-        {visibleTools.map((toolItem) => {
-          const disabled = !conversationId || !toolItem.enabled || busyToolName === toolItem.name;
-          const next = toolItem.session_enabled === false ? null : false;
-          const label =
-            toolItem.name === 'builtin.web_search'
-              ? '搜索'
-              : toolItem.name === 'builtin.web_fetch'
-                ? '抓网页'
-                : '生图';
-          return (
-            <button
-              key={toolItem.name}
-              type="button"
-              className={`session-tool-chip ${toolItem.effective_enabled ? 'on' : 'off'}`}
-              data-testid={`session-tool-policy-${toolItem.name}`}
-              disabled={disabled}
-              title={
-                conversationId
-                  ? toolItem.enabled
-                    ? '只影响当前会话；再次点击恢复继承全局设置。'
-                    : '该工具已在全局关闭，请到工具中心开启。'
-                  : '发送第一条消息后可设置当前会话工具策略。'
-              }
-              onClick={() => onSetToolOverride(toolItem.name, next)}
-            >
-              {label} {toolItem.effective_enabled ? '开' : '关'}
-            </button>
-          );
-        })}
-        <button
-          type="button"
-          className="session-tool-chip"
-          data-testid="session-tool-policy-open-tools"
-          onClick={onOpenTools}
-        >
-          工具中心
-        </button>
-        <button
-          type="button"
-          className="session-tool-chip"
-          data-testid="open-run-timeline"
-          disabled={!conversationId}
-          onClick={onOpenRunTimeline}
-          title={conversationId ? '查看当前会话最近的运行过程' : '发送第一条消息后可查看运行过程'}
-        >
-          运行过程
-        </button>
-      </div>
-    </div>
-  );
-}
-
-function ContextSnapshotCard({
+function MessageContextDetails({
   snapshot,
+  cost,
 }: {
-  snapshot: ContextSnapshotAnnotation;
+  snapshot: ContextSnapshotAnnotation | null;
+  cost?: MessageCost;
 }): JSX.Element {
-  const sources = Array.isArray(snapshot.context_sources)
+  const sources = Array.isArray(snapshot?.context_sources)
     ? snapshot.context_sources
     : [];
+  const activeSources = sources.filter((source) => source.active);
+  const inactiveSources = sources.filter((source) => !source.active);
+  const visibleSources = activeSources.length > 0 ? activeSources : sources.slice(0, 2);
+  const summaryText = messageContextSummary(snapshot);
+  const tokenSummary = cost
+    ? `${formatTokenCount(cost.input_tokens)} in · ${formatTokenCount(cost.output_tokens)} out`
+    : 'Token 未返回';
+  const costSummary = cost?.actual_usd != null ? formatUsd(cost.actual_usd) : '—';
+  const summaryTitle = [
+    summaryText !== '上下文' ? summaryText : null,
+    cost ? `费用 ${costSummary}` : null,
+    cost ? tokenSummary : null,
+    cost && (cost.input_tokens == null || cost.output_tokens == null)
+      ? '当前供应商没有返回 token usage，费用只能显示可用部分。'
+      : null,
+    '点击展开详情',
+  ]
+    .filter(Boolean)
+    .join(' · ');
   return (
-    <div className="context-snapshot-card" data-testid="context-snapshot-card">
-      <div className="context-snapshot-title">
-        <span>本次上下文</span>
+    <details className="context-snapshot-card" data-testid="context-snapshot-card">
+      <summary className="context-snapshot-title" title={summaryTitle}>
+        {cost ? (
+          <span className="msg-cost context-snapshot-cost" data-testid="msg-cost">
+            <span aria-hidden="true">💰</span>
+            <strong>{costSummary}</strong>
+            <span className="sr-only">
+              {` ${tokenSummary}`}
+              {summaryText !== '上下文' ? ` ${summaryText}` : ''}
+              {cost.input_tokens == null || cost.output_tokens == null ? ' token 未返回。' : ''}
+            </span>
+          </span>
+        ) : (
+          <span className="context-snapshot-label">详情</span>
+        )}
+        <span className="context-snapshot-info" aria-hidden="true">ⓘ</span>
+        <span className="sr-only">查看本条消息的上下文详情。</span>
+      </summary>
+      {summaryText !== '上下文' && (
+        <p className="context-detail-summary">{summaryText}</p>
+      )}
+      {visibleSources.length > 0 && (
+        <div className="context-source-list compact">
+          {visibleSources.map((source, index) => (
+            <span
+              key={`${source.type}-${index}`}
+              className={`context-source-chip ${source.active ? 'active' : 'inactive'}`}
+              data-testid="context-source-chip"
+              title={`${source.scope} · ${source.type}`}
+            >
+              {source.label}
+            </span>
+          ))}
+        </div>
+      )}
+      <div className="context-detail-grid">
         <span>
-          {(snapshot.active_tool_names ?? []).length} 个工具可见
+          <small>工具</small>
+          <strong>{snapshot ? `${(snapshot.active_tool_names ?? []).length} 个可见` : '未记录'}</strong>
+        </span>
+        <span>
+          <small>消息</small>
+          <strong>
+            {snapshot?.context_window
+              ? `${snapshot.context_window.sent_message_count}/${snapshot.context_window.original_message_count}`
+              : '未记录'}
+          </strong>
+        </span>
+        <span>
+          <small>费用</small>
+          <strong>{cost?.actual_usd != null ? formatUsd(cost.actual_usd) : '—'}</strong>
+        </span>
+        <span>
+          <small>Token</small>
+          <strong>
+            {cost
+              ? `${formatTokenCount(cost.input_tokens)} in / ${formatTokenCount(cost.output_tokens)} out`
+              : '未返回'}
+          </strong>
         </span>
       </div>
-      <div className="context-source-list">
-        {sources.map((source, index) => (
-          <span
-            key={`${source.type}-${index}`}
-            className={`context-source-chip ${source.active ? 'active' : 'inactive'}`}
-            data-testid="context-source-chip"
-            title={`${source.scope} · ${source.type}`}
-          >
+      {inactiveSources.length > 0 && (
+        <div className="context-source-list muted">
+          {inactiveSources.map((source, index) => (
+            <span
+              key={`${source.type}-inactive-${index}`}
+              className="context-source-chip inactive"
+              title={`${source.scope} · ${source.type}`}
+            >
+              {source.label}
+            </span>
+          ))}
+        </div>
+      )}
+      {sources.length > visibleSources.length && (
+        <div className="context-source-list sr-only">
+          {sources.map((source, index) => (
+            <span
+              key={`${source.type}-${index}`}
+              className={`context-source-chip ${source.active ? 'active' : 'inactive'}`}
+              title={`${source.scope} · ${source.type}`}
+            >
             {source.label}
           </span>
-        ))}
-      </div>
-    </div>
+          ))}
+        </div>
+      )}
+    </details>
   );
 }
 
@@ -4003,11 +5266,32 @@ function runEventStatusText(status: RunEvent['status']): string {
   if (status === 'progress') return '进行中';
   if (status === 'completed') return '完成';
   if (status === 'cancelled') return '已停止';
+  if (status === 'stopped') return '已停止';
+  if (status === 'incomplete') return '可续写';
+  if (status === 'retrying') return '恢复中';
   return '失败';
 }
 
 function runEventMeta(event: RunEvent): string {
   const payload = event.payload ?? {};
+  if (event.kind === 'context.snapshot') {
+    const activeTools = Array.isArray(payload.active_tool_names)
+      ? `${payload.active_tool_names.length} 个工具可见`
+      : null;
+    const contextWindow = contextWindowFromPayload(payload);
+    const strategy = contextWindow?.strategy === 'sliding_window' ? '滑动窗口' : '完整上下文';
+    const omitted = contextWindow?.omitted_message_count
+      ? `裁剪 ${contextWindow.omitted_message_count} 条`
+      : null;
+    return [activeTools, strategy, omitted].filter(Boolean).join(' · ');
+  }
+  if (event.kind === 'context.file_chunks') {
+    const chunks = Array.isArray(payload.chunks) ? `${payload.chunks.length} 个片段` : null;
+    const tokenEstimate = typeof payload.token_estimate === 'number'
+      ? `${payload.token_estimate} tok`
+      : null;
+    return [chunks, tokenEstimate].filter(Boolean).join(' · ');
+  }
   if (event.kind.startsWith('tool.')) {
     const tool = typeof payload.tool === 'string' ? payload.tool : null;
     const duration = typeof payload.duration_ms === 'number' ? `${payload.duration_ms}ms` : null;
@@ -4016,8 +5300,26 @@ function runEventMeta(event: RunEvent): string {
   if (event.kind === 'cost.recorded') {
     const input = typeof payload.input_tokens === 'number' ? `${payload.input_tokens} in` : null;
     const output = typeof payload.output_tokens === 'number' ? `${payload.output_tokens} out` : null;
-    const usd = typeof payload.actual_usd === 'number' ? formatUsd(payload.actual_usd) : null;
-    return [input, output, usd].filter(Boolean).join(' · ');
+    const actual =
+      typeof payload.actual_usd === 'number'
+        ? payload.actual_usd
+        : typeof payload.actual_cost_usd === 'number'
+          ? payload.actual_cost_usd
+          : null;
+    const usd = typeof actual === 'number' ? formatUsd(actual) : null;
+    const costId = typeof payload.cost_record_id === 'string'
+      ? `Cost ${payload.cost_record_id.slice(0, 10)}`
+      : null;
+    return [input, output, usd, costId].filter(Boolean).join(' · ');
+  }
+  if (event.kind.startsWith('memory.')) {
+    const ids = Array.isArray(payload.memory_ids) ? `${payload.memory_ids.length} 条` : null;
+    const types = Array.isArray(payload.memory_types)
+      ? [...new Set(payload.memory_types.filter((type): type is string => typeof type === 'string'))]
+          .map((type) => memoryEventTypeLabel(type))
+          .join(' / ')
+      : null;
+    return [ids, types].filter(Boolean).join(' · ');
   }
   if (event.kind.startsWith('model.')) {
     const duration = typeof payload.duration_ms === 'number' ? `${payload.duration_ms}ms` : null;
@@ -4027,14 +5329,126 @@ function runEventMeta(event: RunEvent): string {
   return event.kind;
 }
 
+function memoryEventTypeLabel(type: string): string {
+  if (type === 'preference') return '偏好';
+  if (type === 'project_fact') return '项目事实';
+  if (type === 'profile') return '用户画像';
+  return '其他';
+}
+
+function dispatchCostCallFocus(event: RunEvent): void {
+  const costRecordId = event.payload?.cost_record_id;
+  if (typeof costRecordId !== 'string') return;
+  window.dispatchEvent(
+    new CustomEvent<CostCallFocusDetail>('taori:focus-cost-call', {
+      detail: {
+        costRecordId,
+        runId: event.run_id,
+        runEventId: event.id,
+      },
+    }),
+  );
+}
+
+function contextWindowFromPayload(payload: Record<string, unknown>): ContextWindowStats | null {
+  const raw = payload.context_window;
+  if (!raw || typeof raw !== 'object') return null;
+  const value = raw as Record<string, unknown>;
+  const original = value.original_message_count;
+  const sent = value.sent_message_count;
+  const omitted = value.omitted_message_count;
+  const estimated = value.estimated_input_tokens;
+  const strategy = value.strategy;
+  if (
+    typeof original !== 'number' ||
+    typeof sent !== 'number' ||
+    typeof omitted !== 'number' ||
+    typeof estimated !== 'number' ||
+    (strategy !== 'full' && strategy !== 'sliding_window')
+  ) {
+    return null;
+  }
+  return {
+    original_message_count: original,
+    sent_message_count: sent,
+    omitted_message_count: omitted,
+    estimated_input_tokens: estimated,
+    budget_tokens: typeof value.budget_tokens === 'number' ? value.budget_tokens : null,
+    model_context_length: typeof value.model_context_length === 'number' ? value.model_context_length : null,
+    strategy,
+  };
+}
+
+function RunEventContextWindow({
+  event,
+}: {
+  event: RunEvent;
+}): JSX.Element | null {
+  if (event.kind !== 'context.snapshot') return null;
+  const stats = contextWindowFromPayload(event.payload ?? {});
+  if (!stats) return null;
+  const strategyText = stats.strategy === 'sliding_window' ? '滑动窗口' : '完整上下文';
+  return (
+    <div className="run-event-context-window" data-testid="context-window-detail">
+      <span>
+        <small>策略</small>
+        <strong>{strategyText}</strong>
+      </span>
+      <span>
+        <small>消息</small>
+        <strong>{stats.sent_message_count}/{stats.original_message_count}</strong>
+      </span>
+      <span>
+        <small>裁剪</small>
+        <strong>{stats.omitted_message_count} 条</strong>
+      </span>
+      <span>
+        <small>估算</small>
+        <strong>
+          {stats.estimated_input_tokens}
+          {stats.budget_tokens ? `/${stats.budget_tokens}` : ''}
+        </strong>
+      </span>
+    </div>
+  );
+}
+
+function RunEventFileChunks({
+  event,
+}: {
+  event: RunEvent;
+}): JSX.Element | null {
+  if (event.kind !== 'context.file_chunks') return null;
+  const chunks = Array.isArray(event.payload?.chunks)
+    ? event.payload.chunks.filter((item): item is Record<string, unknown> => Boolean(item) && typeof item === 'object')
+    : [];
+  if (chunks.length === 0) return null;
+  return (
+    <div className="run-event-file-chunks" data-testid="run-event-file-chunks">
+      {chunks.slice(0, 6).map((chunk, index) => {
+        const fileId = typeof chunk.file_id === 'string' ? chunk.file_id : 'file';
+        const chunkIndex = typeof chunk.chunk_index === 'number' ? chunk.chunk_index : index;
+        const score = typeof chunk.score === 'number' ? chunk.score.toFixed(3) : null;
+        return (
+          <span key={`${fileId}-${chunkIndex}-${index}`} title={typeof chunk.chunk_id === 'string' ? chunk.chunk_id : undefined}>
+            {fileId.slice(0, 10)} · chunk {chunkIndex}{score ? ` · ${score}` : ''}
+          </span>
+        );
+      })}
+    </div>
+  );
+}
+
 function RunTimelinePanel({
   events,
   error,
+  focusTarget,
   onRefresh,
   onClose,
 }: {
   events: RunEvent[] | null;
   error: string | null;
+  focusTarget: RunTimelineFocusTarget | null;
   onRefresh: () => void;
   onClose: () => void;
 }): JSX.Element {
@@ -4056,6 +5470,14 @@ function RunTimelinePanel({
     return () => window.removeEventListener('keydown', onKey);
   }, [onClose]);
 
+  useEffect(() => {
+    if (!focusTarget) return;
+    const target = focusTarget.runEventId
+      ? document.querySelector(`[data-testid="run-event"][data-event-id="${focusTarget.runEventId}"]`)
+      : document.querySelector(`[data-testid="run-group"][data-run-id="${focusTarget.runId}"]`);
+    target?.scrollIntoView({ block: 'center', behavior: 'smooth' });
+  }, [events, focusTarget]);
+
   return (
     <aside className="run-timeline-panel" data-testid="run-timeline-panel">
       <header>
@@ -4073,29 +5495,64 @@ function RunTimelinePanel({
         </div>
       </header>
       <div className="panel-body">
-        {error && <div className="error" role="alert">加载失败: {error}</div>}
-        {!error && events == null && <div className="hint">加载中…</div>}
+        {error && (
+          <StatusNotice
+            tone="error"
+            title="加载运行事件失败"
+            detail={error}
+            compact
+            testId="run-timeline-error"
+          />
+        )}
+        {!error && events == null && (
+          <StatusNotice
+            tone="loading"
+            title="加载中…"
+            detail="正在读取本次运行的事件流。"
+            compact
+            testId="run-timeline-loading"
+          />
+        )}
         {!error && events != null && events.length === 0 && (
-          <div className="hint" data-testid="run-timeline-empty">
-            暂无运行事件
-          </div>
+          <EmptyState
+            title="暂无运行事件"
+            hint="当模型开始调用工具或进入执行流后，这里会显示完整过程。"
+            icon="🧵"
+            compact
+            tone="muted"
+            testId="run-timeline-empty"
+          />
         )}
         {!error && groups.length > 0 && (
           <div className="run-groups">
             {groups.map(([runId, list]) => (
-              <section className="run-group" data-testid="run-group" key={runId}>
+              <section
+                className={`run-group${focusTarget?.runId === runId ? ' run-group-focused' : ''}`}
+                data-testid="run-group"
+                data-run-id={runId}
+                key={runId}
+              >
                 <div className="run-group-head">
                   <strong>{runId}</strong>
                   <span>{new Date(list[0]!.created_at).toLocaleTimeString()}</span>
                 </div>
                 <ol>
-                  {list.map((event) => (
+                  {list.map((event) => {
+                    const focused = focusTarget?.runEventId
+                      ? focusTarget.runEventId === event.id
+                      : focusTarget?.runId === event.run_id &&
+                        event.kind === 'cost.recorded' &&
+                        typeof event.payload?.cost_record_id === 'string' &&
+                        event.payload.cost_record_id === focusTarget.costRecordId;
+                    return (
                     <li
                       key={event.id}
-                      className={`run-event run-event-${event.status}`}
+                      className={`run-event run-event-${event.status}${focused ? ' run-event-focused' : ''}`}
                       data-testid="run-event"
+                      data-event-id={event.id}
                       data-kind={event.kind}
                       data-status={event.status}
+                      data-focused={focused ? '1' : '0'}
                     >
                       <span className="run-event-dot" aria-hidden="true" />
                       <div className="run-event-body">
@@ -4105,13 +5562,30 @@ function RunTimelinePanel({
                         </div>
                         <div className="run-event-meta">
                           {runEventMeta(event)}
+                          {event.kind === 'cost.recorded' &&
+                            typeof event.payload?.cost_record_id === 'string' && (
+                              <button
+                                type="button"
+                                className="run-event-cost-link"
+                                data-testid="run-event-focus-cost"
+                                onClick={() => {
+                                  dispatchCostCallFocus(event);
+                                  onClose();
+                                }}
+                              >
+                                查看成本
+                              </button>
+                            )}
                         </div>
                         {event.summary && (
                           <p>{event.summary}</p>
                         )}
+                        <RunEventContextWindow event={event} />
+                        <RunEventFileChunks event={event} />
                       </div>
                     </li>
-                  ))}
+                    );
+                  })}
                 </ol>
               </section>
             ))}
@@ -4201,10 +5675,124 @@ function TemplateVariablesDialog({
   );
 }
 
+function QuickCompareModelPickerDialog({
+  models,
+  selectedIds,
+  providers,
+  currentModelId,
+  onCancel,
+  onSubmit,
+}: {
+  models: Model[];
+  selectedIds: string[];
+  providers: Provider[];
+  currentModelId: string;
+  onCancel: () => void;
+  onSubmit: (modelIds: string[]) => void;
+}): JSX.Element {
+  const [draftIds, setDraftIds] = useState<string[]>(() => selectedIds.slice(0, 3));
+  const canSubmit = draftIds.length >= 2 && draftIds.length <= 3;
+  const toggleModel = (modelId: string): void => {
+    setDraftIds((prev) => {
+      if (prev.includes(modelId)) return prev.filter((id) => id !== modelId);
+      if (prev.length >= 3) return prev;
+      return [...prev, modelId];
+    });
+  };
+  return (
+    <div
+      className="dialog-backdrop"
+      data-testid="quick-compare-picker"
+      onClick={(e) => {
+        if (e.target === e.currentTarget) onCancel();
+      }}
+    >
+      <form
+        className="picker-dialog quick-compare-picker-dialog"
+        role="dialog"
+        aria-label="选择 Quick Compare 模型"
+        onSubmit={(e) => {
+          e.preventDefault();
+          if (canSubmit) onSubmit(draftIds);
+        }}
+      >
+        <div className="picker-dialog-head">
+          <div>
+            <h3>选择对比模型</h3>
+            <p className="hint">选择 2-3 个可用聊天模型。默认已按当前模型、低成本和能力候选预选。</p>
+          </div>
+          <button type="button" className="settings-close" onClick={onCancel}>
+            ✕
+          </button>
+        </div>
+        <div className="quick-compare-model-list">
+          {models.map((candidate) => {
+            const checked = draftIds.includes(candidate.id);
+            const disabled = !checked && draftIds.length >= 3;
+            const provider = providers.find((item) => item.id === candidate.provider_id);
+            return (
+              <label
+                key={candidate.id}
+                className={`quick-compare-model-option${checked ? ' is-selected' : ''}${disabled ? ' is-disabled' : ''}`}
+                data-testid={`quick-compare-model-option-${candidate.id}`}
+              >
+                <input
+                  type="checkbox"
+                  checked={checked}
+                  disabled={disabled}
+                  onChange={() => toggleModel(candidate.id)}
+                  data-testid={`quick-compare-model-check-${candidate.id}`}
+                />
+                <span className="quick-compare-model-main">
+                  <strong>{modelDisplayWithProvider(candidate, providers)}</strong>
+                  <small>
+                    {candidate.id === currentModelId ? '当前模型' : '候选模型'}
+                    {provider ? ` · ${provider.name}` : ''}
+                  </small>
+                </span>
+                <span className="quick-compare-model-tags">
+                  {candidate.supports_tools && <span>tools</span>}
+                  {candidate.supports_vision && <span>vision</span>}
+                  {candidate.context_length ? <span>{formatTokenCount(candidate.context_length)} ctx</span> : null}
+                  {candidate.price_input_per_1m != null && (
+                    <span>{formatUsd(candidate.price_input_per_1m)}/1M in</span>
+                  )}
+                </span>
+              </label>
+            );
+          })}
+        </div>
+        <div className="modal-actions">
+          <span className="quick-compare-picker-count" data-testid="quick-compare-picker-count">
+            已选 {draftIds.length}/3
+          </span>
+          <button type="button" onClick={onCancel}>
+            取消
+          </button>
+          <button
+            type="submit"
+            data-testid="quick-compare-picker-submit"
+            disabled={!canSubmit}
+          >
+            开始对比
+          </button>
+        </div>
+      </form>
+    </div>
+  );
+}
+
 function CapabilityPreflight({
   model,
   chatModels,
+  tools,
+  cost,
+  busyToolName,
   imageModels,
+  selectedImageModel,
+  imageModelMemoryScope,
+  imageModelPreferenceBusy,
+  imageModelPreferenceError,
   providers,
   activePersona,
   conversationId,
@@ -4216,13 +5804,24 @@ function CapabilityPreflight({
   inputHasText,
   inputText,
   pendingHasImage,
+  onSetToolOverride,
   onOpenModelCenter,
   onOpenTools,
+  onOpenRunTimeline,
   onSelectModel,
+  onSelectImageModel,
+  onSelectImageAuto,
 }: {
   model: Model;
   chatModels: Model[];
+  tools: EffectiveTool[];
+  cost: { current_conversation_usd?: number | null } | null;
+  busyToolName: string | null;
   imageModels: Model[];
+  selectedImageModel: Model | null;
+  imageModelMemoryScope: MemoryScopeLabel;
+  imageModelPreferenceBusy: boolean;
+  imageModelPreferenceError: string | null;
   providers: Provider[];
   activePersona: Persona | null;
   conversationId: string | null;
@@ -4239,10 +5838,17 @@ function CapabilityPreflight({
   inputHasText: boolean;
   inputText: string;
   pendingHasImage: boolean;
+  onSetToolOverride: (name: string, enabled: boolean | null) => void;
   onOpenModelCenter: () => void;
   onOpenTools: () => void;
+  onOpenRunTimeline: () => void;
   onSelectModel: (modelId: string) => void;
+  onSelectImageModel: (modelId: string) => void;
+  onSelectImageAuto: () => void;
 }): JSX.Element {
+  const toolNames = ['builtin.web_search', 'builtin.web_fetch', 'builtin.image_generate'];
+  const visibleTools = tools.filter((toolItem) => toolNames.includes(toolItem.name));
+  const enabledCount = tools.filter((toolItem) => toolItem.effective_enabled).length;
   const hasImageModel = imageModels.length > 0;
   const visionPeer = chatModels.find(
     (m) =>
@@ -4292,20 +5898,50 @@ function CapabilityPreflight({
       : '图片生成：工具已关闭，且未配置 image 模型'
     : model.supports_tools
     ? hasImageModel
-      ? `图片生成：模型可自主调用工具（默认 ${imageModels[0] ? modelDisplayWithProvider(imageModels[0], providers) : 'image model'}）`
+      ? `图片生成：模型可自主调用工具（当前 ${selectedImageModel ? modelDisplayWithProvider(selectedImageModel, providers) : 'image model'}）`
       : '图片生成：聊天模型支持工具，但未配置 image 模型'
     : hasImageModel
       ? '图片生成：当前聊天模型不支持工具；图片请求会打开生成器'
       : '图片生成：未配置 image 模型';
+  const imageLabel = !imageToolEnabled
+    ? hasImageModel
+      ? '生图：工具关'
+      : '生图：未配置'
+    : model.supports_tools
+      ? hasImageModel
+        ? '生图：自动'
+        : '生图：缺模型'
+      : hasImageModel
+        ? '生图：生成器'
+        : '生图：未配置';
   const visionState = model.supports_vision ? 'ready' : hasVisionPeer ? 'fallback' : 'off';
   const visionText = model.supports_vision
     ? '图片输入：当前模型可看图'
     : hasVisionPeer
       ? '图片输入：拖图时会自动切换视觉模型'
       : '图片输入：未配置视觉模型';
+  const visionLabel = model.supports_vision
+    ? '看图'
+    : hasVisionPeer
+      ? '看图'
+      : '无看图';
+  const imageSelectValue = selectedImageModel?.id ?? imageModels[0]?.id ?? '';
+  const imageGeneratorLabel = selectedImageModel
+    ? modelDisplayWithProvider(selectedImageModel, providers)
+    : imageModels[0]
+      ? modelDisplayWithProvider(imageModels[0], providers)
+      : '未配置';
+  const imageModeText = imageModelPreferenceBusy
+    ? '保存中'
+    : imageModelMemoryScope === 'session'
+      ? '本会话'
+      : imageModelMemoryScope === 'global'
+        ? '固定'
+        : '自动';
   const personaText = activePersona
     ? `Persona：${activePersona.name}${conversationId ? '（本会话）' : '（发送后绑定会话）'}`
     : 'Persona：未绑定';
+  const personaLabel = activePersona ? `Persona：${activePersona.name}` : 'Persona：无';
   const costState = skipCostConfirm
     ? 'muted'
     : budgetOver
@@ -4320,6 +5956,13 @@ function CapabilityPreflight({
       : thresholdWillConfirm
         ? `成本确认：预计超过阈值 ${formatUsd(confirmPrefs.threshold)}`
       : `成本确认：阈值 ${formatUsd(confirmPrefs.threshold)}`;
+  const costLabel = skipCostConfirm
+    ? '确认：跳过'
+    : budgetOver
+      ? '确认：超预算'
+      : thresholdWillConfirm
+        ? `确认：>${formatUsd(confirmPrefs.threshold)}`
+        : `确认：${formatUsd(confirmPrefs.threshold)}`;
   const text = inputText.trim().toLowerCase();
   const wantsWeb =
     /https?:\/\//.test(text) ||
@@ -4348,8 +5991,18 @@ function CapabilityPreflight({
 
   return (
     <div className="capability-preflight" data-testid="capability-preflight">
-      <span
-        className={`preflight-chip preflight-${imageState}`}
+      <span className="preflight-inline-metric preflight-session-summary" data-testid="session-profile-strip">
+        <span data-testid="session-profile-tools">工具 {enabledCount}/{tools.length}</span>
+        <span data-testid="session-profile-cost">会话 {formatUsd(cost?.current_conversation_usd ?? 0)}</span>
+        <span className="sr-only" data-testid="session-profile-model">
+          模型：{modelBaseDisplayName(model)}
+        </span>
+        <span className="sr-only" data-testid="session-profile-persona">
+          {personaLabel}
+        </span>
+      </span>
+      <div
+        className={`preflight-select-card preflight-${imageState}`}
         data-testid="preflight-image"
         data-state={imageState}
         title={
@@ -4360,28 +6013,89 @@ function CapabilityPreflight({
             : '当前聊天模型不能自主调用 tools；明确的图片生成请求会直接打开图像生成器，/image 命令也可用。'
         }
       >
-        {imageText}
-      </span>
+        <button
+          type="button"
+          className={`preflight-mode-toggle ${imageModelMemoryScope === 'default' ? 'active' : ''}`}
+          disabled={imageModelPreferenceBusy || !imageToolEnabled || !hasImageModel || imageModelMemoryScope === 'default'}
+          onClick={onSelectImageAuto}
+          title={
+            imageModelMemoryScope === 'default'
+              ? `自动使用 ${imageGeneratorLabel}`
+              : '恢复为自动选择图像模型'
+          }
+        >
+          生图 · {imageModeText}
+        </button>
+        <select
+          value={imageSelectValue}
+          onChange={(e) => {
+            onSelectImageModel(e.target.value);
+          }}
+          disabled={imageModelPreferenceBusy || !imageToolEnabled || !hasImageModel}
+          data-testid="preflight-image-model-select"
+          aria-label="选择图像生成模型"
+        >
+          {imageModels.map((m) => (
+            <option key={m.id} value={m.id}>
+              {modelDisplayWithProvider(m, providers)}
+            </option>
+          ))}
+        </select>
+        <span className="sr-only">
+          {imageText}
+          {' '}
+          {imageLabel}
+          {' '}
+          自主调用工具
+          {' '}
+          不支持工具
+          {' '}
+          打开生成器
+          {' '}
+          工具已关闭
+        </span>
+        <span className="sr-only" data-testid="preflight-image-model-scope">
+          {imageModelPreferenceBusy
+            ? '保存中'
+            : imageModelMemoryScope === 'session'
+              ? '会话'
+              : imageModelMemoryScope === 'global'
+                ? '全局'
+                : '自动'}
+        </span>
+      </div>
+      {imageModelPreferenceError && (
+        <span className="preflight-error" data-testid="preflight-image-model-error">
+          {imageModelPreferenceError}
+        </span>
+      )}
       <span
         className={`preflight-chip preflight-${visionState}`}
         data-testid="preflight-vision"
         data-state={visionState}
+        title={visionText}
+        aria-label={visionText}
       >
-        {visionText}
+        <span>{visionLabel}</span>
+        <span className="sr-only">{visionText} 看图：可用 看图：自动 看图：未配置</span>
       </span>
       <span
-        className={`preflight-chip ${activePersona ? 'preflight-ready' : 'preflight-muted'}`}
+        className={`preflight-chip preflight-persona-chip ${activePersona ? 'preflight-ready' : 'preflight-muted'}`}
         data-testid="preflight-persona"
         data-state={activePersona ? 'ready' : 'muted'}
+        title={personaText}
       >
-        {personaText}
+        <span>{personaLabel}</span>
+        <span className="sr-only">{personaText}</span>
       </span>
       <span
         className={`preflight-chip preflight-${costState}`}
         data-testid="preflight-cost"
         data-state={costState}
+        title={costText}
       >
-        {costText}
+        <span>{costLabel}</span>
+        <span className="sr-only">{costText}</span>
       </span>
       {!hasImageModel || !imageToolEnabled || (!model.supports_tools && hasImageModel) ? (
         <button
@@ -4393,6 +6107,55 @@ function CapabilityPreflight({
           检查模型配置
         </button>
       ) : null}
+      <div className="session-tool-policy" data-testid="session-tool-policy">
+        {visibleTools.map((toolItem) => {
+          const disabled = !conversationId || !toolItem.enabled || busyToolName === toolItem.name;
+          const next = toolItem.session_enabled === false ? null : false;
+          const label =
+            toolItem.name === 'builtin.web_search'
+              ? '搜索'
+              : toolItem.name === 'builtin.web_fetch'
+                ? '抓网页'
+                : '生图';
+          return (
+            <button
+              key={toolItem.name}
+              type="button"
+              className={`session-tool-chip ${toolItem.effective_enabled ? 'on' : 'off'}`}
+              data-testid={`session-tool-policy-${toolItem.name}`}
+              disabled={disabled}
+              title={
+                conversationId
+                  ? toolItem.enabled
+                    ? '只影响当前会话；再次点击恢复继承全局设置。'
+                    : '该工具已在全局关闭，请到工具中心开启。'
+                  : '发送第一条消息后可设置当前会话工具策略。'
+              }
+              onClick={() => onSetToolOverride(toolItem.name, next)}
+            >
+              {label} {toolItem.effective_enabled ? '开' : '关'}
+            </button>
+          );
+        })}
+        <button
+          type="button"
+          className="session-tool-chip"
+          data-testid="session-tool-policy-open-tools"
+          onClick={onOpenTools}
+        >
+          工具中心
+        </button>
+        <button
+          type="button"
+          className="session-tool-chip"
+          data-testid="open-run-timeline"
+          disabled={!conversationId}
+          onClick={onOpenRunTimeline}
+          title={conversationId ? '查看当前会话最近的运行过程' : '发送第一条消息后可查看运行过程'}
+        >
+          运行过程
+        </button>
+      </div>
       {suggestion && (
         <div
           className="preflight-suggestion"
@@ -4436,6 +6199,7 @@ function CostConfirmDialog({
   conversationId,
   hasCheaperPeer,
   budget,
+  blocked = false,
   onContinue,
   onCheaper,
   onCancel,
@@ -4451,6 +6215,7 @@ function CostConfirmDialog({
     monthly_budget_usd: number;
     month_spent_usd: number;
   };
+  blocked?: boolean;
   onContinue: () => void;
   onCheaper: () => void;
   onCancel: () => void;
@@ -4471,6 +6236,9 @@ function CostConfirmDialog({
   const nextStepLabel = hasCheaperPeer
     ? '可以继续、取消，或切换到已知价格更低的同能力模型。'
     : '可以继续或取消；当前没有已知价格更低的同能力模型。';
+  const effectiveNextStepLabel = blocked
+    ? '硬预算模式已阻止本次调用。请先到设置里调高预算或关闭硬上限。'
+    : nextStepLabel;
   const modelLabel = modelDisplayWithProvider(model, providers);
 
   const persist = useCallback(async () => {
@@ -4516,34 +6284,40 @@ function CostConfirmDialog({
       <div className="modal-card">
         <h3>
           {reason === 'budget'
-            ? `本月预算已达 ${formatUsd(budget?.monthly_budget_usd ?? 0)}`
+              ? blocked
+                ? `本月硬预算上限已达 ${formatUsd(budget?.monthly_budget_usd ?? 0)}`
+                : `本月预算已达 ${formatUsd(budget?.monthly_budget_usd ?? 0)}`
             : `本次调用预估 ≈ ${formatUsd(estimate)}`}
         </h3>
         <p className="hint">
           {reason === 'image'
             ? `图像模型「${modelLabel}」每次调用都会按设置确认。`
             : reason === 'budget'
-              ? `本月已消费 ${formatUsd(budget?.month_spent_usd ?? 0)}。继续使用模型「${modelLabel}」前请再次确认。`
+              ? blocked
+                ? `本月已消费 ${formatUsd(budget?.month_spent_usd ?? 0)}。硬上限模式下不能继续确认绕过。`
+                : `本月已消费 ${formatUsd(budget?.month_spent_usd ?? 0)}。继续使用模型「${modelLabel}」前请再次确认。`
               : `模型「${modelLabel}」此次预估超过阈值，请确认是否继续。`}
         </p>
         <div className="decision-rationale" data-testid="cost-confirm-rationale">
           <div><strong>触发原因</strong><span>{reasonLabel}</span></div>
           <div><strong>当前模型</strong><span>{modelLabel}</span></div>
           <div><strong>偏好范围</strong><span>{scopeLabel}</span></div>
-          <div><strong>下一步</strong><span>{nextStepLabel}</span></div>
+          <div><strong>下一步</strong><span>{effectiveNextStepLabel}</span></div>
         </div>
         <div className="modal-actions">
-          <button type="button" data-testid="cost-confirm-continue" autoFocus onClick={async () => { await persist(); onContinue(); }}>
-            继续
-          </button>
+          {!blocked && (
+            <button type="button" data-testid="cost-confirm-continue" autoFocus onClick={async () => { await persist(); onContinue(); }}>
+              继续
+            </button>
+          )}
           <button
             type="button"
             data-testid="cost-confirm-cheaper"
-            disabled={!hasCheaperPeer}
+            disabled={blocked || !hasCheaperPeer}
             title={hasCheaperPeer ? undefined : '没有已知价格更低的同能力模型可切换'}
             onClick={async () => { await persist(); onCheaper(); }}
           >
-            改用低成本模型
+            {blocked ? '已被硬上限阻止' : '改用低成本模型'}
           </button>
           <button type="button" data-testid="cost-confirm-cancel" onClick={() => { onCancel(); }}>
             取消
@@ -4655,10 +6429,33 @@ function SessionCostPanel({
         </button>
       </header>
       <div className="panel-body">
-        {error && <div className="error">加载失败: {error}</div>}
-        {!error && rows == null && <div className="hint">加载中…</div>}
+        {error && (
+          <StatusNotice
+            tone="error"
+            title="加载消费记录失败"
+            detail={error}
+            compact
+            testId="session-cost-error"
+          />
+        )}
+        {!error && rows == null && (
+          <StatusNotice
+            tone="loading"
+            title="加载中…"
+            detail="正在汇总当前范围内的费用记录。"
+            compact
+            testId="session-cost-loading"
+          />
+        )}
         {!error && rows != null && rows.length === 0 && (
-          <div className="hint" data-testid="session-cost-empty">暂无消费记录</div>
+          <EmptyState
+            title="暂无消费记录"
+            hint="本会话或当前范围内还没有产生任何计费调用。"
+            icon="💸"
+            compact
+            tone="muted"
+            testId="session-cost-empty"
+          />
         )}
         {!error && rows != null && rows.length > 0 && (
           <>
@@ -4743,9 +6540,14 @@ function ImagePickerDialog({
           图像生成提示词：&ldquo;{prompt.slice(0, 120)}{prompt.length > 120 ? '…' : ''}&rdquo;
         </p>
         {imageModels.length === 0 ? (
-          <div className="error" data-testid="image-picker-empty">
-            没有可用的图像模型。请到「设置 → 模型」启用一个 image 模型。
-          </div>
+          <EmptyState
+            title="没有可用的图像模型"
+            hint="请到“设置 → 模型”启用一个 image 模型后再试。"
+            icon="🖼"
+            compact
+            tone="warn"
+            testId="image-picker-empty"
+          />
         ) : (
           <ul className="image-model-list" data-testid="image-model-list">
             {imageModels.map((m) => (
@@ -4806,7 +6608,13 @@ function ImagePickerDialog({
               : '全局默认会影响之后的新会话；已有会话的本会话默认仍优先。'}
         </p>
         {errorMsg && (
-          <div className="error" data-testid="image-picker-error">{errorMsg}</div>
+          <StatusNotice
+            tone="error"
+            title="图像模型请求失败"
+            detail={errorMsg}
+            compact
+            testId="image-picker-error"
+          />
         )}
         {submitting && (
           <div className="image-generation-progress" data-testid="image-picker-progress" aria-live="polite">
@@ -4985,9 +6793,10 @@ function ModelSelector({
         })}
       </select>
       <span
-        className={`scope-chip scope-${memoryScope}`}
+        className={`scope-chip scope-${memoryScope} model-scope-chip`}
         data-testid="model-memory-scope"
         title={scopeTitle}
+        aria-label={scopeText}
       >
         {scopeText}
       </span>
@@ -5256,6 +7065,10 @@ interface FailureDecision {
   recommended_model_id: string | null;
   auto_fallback_enabled: boolean;
   detail?: string;
+  can_compact_context?: boolean;
+  can_skip_tool?: boolean;
+  tool_name?: string | null;
+  tool_label?: string | null;
 }
 
 const FAILURE_CLASS_LABEL: Record<FailureClassification, string> = {
@@ -5286,14 +7099,20 @@ function FailureDecisionCard({
   providers,
   onRetry,
   onSwitch,
+  onCompact,
+  onSkipTool,
   onOpenSettings,
+  busy = false,
 }: {
   decision: FailureDecision;
   chatModels: Model[];
   providers: Provider[];
   onRetry: () => void;
   onSwitch: (targetId: string) => void;
+  onCompact: () => void;
+  onSkipTool: (toolName: string) => void;
   onOpenSettings: () => void;
+  busy?: boolean;
 }): JSX.Element {
   const current = decision.current_model_id
     ? chatModels.find((m) => m.id === decision.current_model_id) ?? null
@@ -5314,6 +7133,9 @@ function FailureDecisionCard({
     : decision.classification === 'content_filter'
       ? '这是内容策略问题，系统不会推荐换模型绕过。'
       : '当前没有可用推荐模型，先按分类提示处理。';
+  const showCompact = decision.can_compact_context === true;
+  const showSkipTool = decision.can_skip_tool === true && Boolean(decision.tool_name);
+  const toolLabel = decision.tool_label ?? decision.tool_name ?? '失败工具';
   const [useMobilePortal, setUseMobilePortal] = useState(() =>
     typeof window === 'undefined' ? false : window.matchMedia('(max-width: 760px)').matches,
   );
@@ -5378,8 +7200,9 @@ function FailureDecisionCard({
           onClick={onRetry}
           data-testid="fdc-retry"
           title="使用当前模型重试"
+          disabled={busy}
         >
-          ↻ 重试
+          {busy ? '恢复中…' : '↻ 重试'}
         </button>
         {showSwitch && (
           <button
@@ -5387,8 +7210,31 @@ function FailureDecisionCard({
             onClick={() => onSwitch(recommended!.id)}
             data-testid="fdc-switch"
             title={`切换到 ${recommendedLabel ?? recommended!.display_name}`}
+            disabled={busy}
           >
-            ⇄ 切换到「{recommendedLabel ?? recommended!.display_name}」并重试
+            {busy ? '恢复中…' : `⇄ 切换到「${recommendedLabel ?? recommended!.display_name}」并重试`}
+          </button>
+        )}
+        {showCompact && (
+          <button
+            type="button"
+            onClick={onCompact}
+            data-testid="fdc-compact"
+            title="压缩较早上下文后重试"
+            disabled={busy}
+          >
+            {busy ? '恢复中…' : '压缩上下文后重试'}
+          </button>
+        )}
+        {showSkipTool && (
+          <button
+            type="button"
+            onClick={() => onSkipTool(decision.tool_name!)}
+            data-testid="fdc-skip-tool"
+            title={`跳过 ${toolLabel} 后继续`}
+            disabled={busy}
+          >
+            {busy ? '恢复中…' : `跳过「${toolLabel}」继续`}
           </button>
         )}
         <button

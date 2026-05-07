@@ -118,3 +118,31 @@ test('R7 abort mid-stream → resume with a new prompt', async ({ page }) => {
     page.locator('.msg.user', { hasText: 'second prompt' }),
   ).toBeVisible();
 });
+
+test('R7 interrupted assistant shows guarded resume action', async ({ page }) => {
+  await resetSidecar(env);
+  await seed(env);
+  await page.addInitScript(() => {
+    localStorage.setItem('tip_roundtable_first_seen', 'true');
+  });
+
+  await page.goto('/');
+  await expect(page.getByTestId('composer-form')).toBeVisible({ timeout: 15_000 });
+
+  await page.getByTestId('composer-input').fill('please stop and continue this answer');
+  await page.getByTestId('composer-send').click();
+  await expect(page.getByTestId('composer-stop')).toBeVisible({ timeout: 10_000 });
+  await page.getByTestId('composer-stop').click();
+
+  await expect(page.getByTestId('resume-banner')).toBeVisible({ timeout: 15_000 });
+  await expect(page.getByTestId('resume-banner')).toContainText('这条回复未完成');
+  if (await page.getByTestId('tip-got-it').isVisible().catch(() => false)) {
+    await page.getByTestId('tip-got-it').click();
+  }
+
+  await page.getByTestId('resume-continue').click();
+  await expect(page.getByTestId('resume-banner')).toHaveCount(0, { timeout: 30_000 });
+  await expect(page.locator('.msg.assistant').last()).toContainText('分层定价', {
+    timeout: 30_000,
+  });
+});

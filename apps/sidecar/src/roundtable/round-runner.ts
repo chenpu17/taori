@@ -28,6 +28,7 @@ import {
 import type {
   CostsRepo,
   ModelsRepo,
+  RunEventInsert,
   RoundtableMessageRow,
   RoundtableMessagesRepo,
   RoundtableRow,
@@ -37,6 +38,7 @@ import type {
 } from '../db/repos/index.js';
 import type { KeyStore } from '../keystore.js';
 import { classifyProviderError } from '../providers/registry.js';
+import { normalizeOllamaOpenAiBaseUrl } from '../providers/ollama.js';
 import type { CapabilityBus } from '../bus/index.js';
 
 export interface RoundRunnerDeps {
@@ -48,7 +50,16 @@ export interface RoundRunnerDeps {
   keystore: KeyStore;
   bus?: CapabilityBus | null;
   memoriesRepo?: MemoriesRepo | null;
+  runEvents?: RoundtableRunEvents | null;
   log: { info: (...a: unknown[]) => void; warn: (...a: unknown[]) => void; error: (...a: unknown[]) => void };
+}
+
+export interface RoundtableRunEvents {
+  runId: string;
+  conversationId: string;
+  append: (input: Omit<RunEventInsert, 'run_id' | 'conversation_id' | 'message_id'> & {
+    message_id?: string | null;
+  }) => void;
 }
 
 export interface RunRoundArgs {
@@ -165,6 +176,21 @@ function buildToolsForParticipant(args: {
       execute: async (input) => {
         const callId = `${args.msgRow.id}:${aiName}:${Date.now()}`;
         const startedAt = Date.now();
+        args.deps.runEvents?.append({
+          kind: 'tool.started',
+          status: 'started',
+          label: item.description,
+          summary: item.name,
+          payload: {
+            tool_name: item.name,
+            tool_label: item.description,
+            roundtable_id: args.rt.id,
+            round: args.round,
+            participant_index: args.participantIndex,
+            roundtable_message_id: args.msgRow.id,
+            call_id: callId,
+          },
+        });
         writeAnnotation(args.stream, [
           {
             type: 'rt.tool_trace',
@@ -182,6 +208,23 @@ function buildToolsForParticipant(args: {
           sourceMessageId: args.msgRow.id,
         });
         const output = result.ok ? result.output : result.error?.message;
+        args.deps.runEvents?.append({
+          kind: result.ok ? 'tool.completed' : 'tool.failed',
+          status: result.ok ? 'completed' : 'failed',
+          label: item.description,
+          summary: summarizeToolValue(output),
+          payload: {
+            tool_name: item.name,
+            tool_label: item.description,
+            roundtable_id: args.rt.id,
+            round: args.round,
+            participant_index: args.participantIndex,
+            roundtable_message_id: args.msgRow.id,
+            call_id: callId,
+            duration_ms: Date.now() - startedAt,
+            ok: result.ok,
+          },
+        });
         writeAnnotation(args.stream, [
           {
             type: 'rt.tool_trace',
@@ -241,8 +284,24 @@ async function runOneParticipant(
   let accumulated = '';
   try {
     deps.rtMsgRepo.update(msgRow.id, { status: 'streaming' });
+    deps.runEvents?.append({
+      kind: 'model.started',
+      status: 'started',
+      label: `${participant.role_label} · ${model.display_name ?? model.model_name}`,
+      summary: `第 ${round} 轮发言开始`,
+      payload: {
+        model_id: model.id,
+        model_name: model.model_name,
+        roundtable_id: rt.id,
+        round,
+        participant_index: index,
+        roundtable_message_id: msgRow.id,
+      },
+    });
     const aiProvider = createOpenAI({
-      baseURL: provider.base_url.replace(/\/$/, ''),
+      baseURL: provider.type === 'ollama'
+        ? normalizeOllamaOpenAiBaseUrl(provider.base_url)
+        : provider.base_url.replace(/\/$/, ''),
       apiKey,
     });
     const roundtableTools = buildToolsForParticipant({
@@ -305,6 +364,38 @@ async function runOneParticipant(
         success: false,
         duration_ms: Date.now() - startedAt,
       });
+      deps.runEvents?.append({
+        kind: 'cost.recorded',
+        status: 'failed',
+        label: '参与者成本',
+        summary: 'content_filter',
+        payload: {
+          cost_record_id: cost.id,
+          model_id: model.id,
+          roundtable_id: rt.id,
+          round,
+          participant_index: index,
+          roundtable_message_id: msgRow.id,
+          success: false,
+          classification: 'content_filter',
+        },
+      });
+      deps.runEvents?.append({
+        kind: 'model.failed',
+        status: 'failed',
+        label: `${participant.role_label} · ${model.display_name ?? model.model_name}`,
+        summary: '内容被供应商安全策略拦截',
+        payload: {
+          model_id: model.id,
+          model_name: model.model_name,
+          roundtable_id: rt.id,
+          round,
+          participant_index: index,
+          roundtable_message_id: msgRow.id,
+          classification: 'content_filter',
+          duration_ms: Date.now() - startedAt,
+        },
+      });
       writeAnnotation(stream, [
         {
           type: 'rt.participant_failed',
@@ -351,7 +442,43 @@ async function runOneParticipant(
       success: true,
       duration_ms: Date.now() - startedAt,
     });
+    deps.runEvents?.append({
+      kind: 'cost.recorded',
+      status: 'completed',
+      label: '参与者成本',
+      summary: actualCost == null ? null : `$${actualCost.toFixed(6)}`,
+      payload: {
+        cost_record_id: costRow.id,
+        model_id: model.id,
+        roundtable_id: rt.id,
+        round,
+        participant_index: index,
+        roundtable_message_id: msgRow.id,
+        input_tokens: promptTokens,
+        output_tokens: completionTokens,
+        actual_cost_usd: actualCost,
+        success: true,
+      },
+    });
     deps.modelsRepo.recordSuccess(model.id);
+    deps.runEvents?.append({
+      kind: 'model.completed',
+      status: 'completed',
+      label: `${participant.role_label} · ${model.display_name ?? model.model_name}`,
+      summary: accumulated.slice(0, 160),
+      payload: {
+        model_id: model.id,
+        model_name: model.model_name,
+        roundtable_id: rt.id,
+        round,
+        participant_index: index,
+        roundtable_message_id: msgRow.id,
+        input_tokens: promptTokens,
+        output_tokens: completionTokens,
+        duration_ms: Date.now() - startedAt,
+        cost_record_id: costRow.id,
+      },
+    });
 
     writeAnnotation(stream, [
       {
@@ -395,6 +522,37 @@ async function runOneParticipant(
     if (cls.classification !== 'content_filter') {
       deps.modelsRepo.recordFailure(model.id, cls.classification);
     }
+    deps.runEvents?.append({
+      kind: 'cost.recorded',
+      status: 'failed',
+      label: '参与者成本',
+      summary: cls.classification,
+      payload: {
+        model_id: model.id,
+        roundtable_id: rt.id,
+        round,
+        participant_index: index,
+        roundtable_message_id: msgRow.id,
+        success: false,
+        classification: cls.classification,
+      },
+    });
+    deps.runEvents?.append({
+      kind: 'model.failed',
+      status: 'failed',
+      label: `${participant.role_label} · ${model.display_name ?? model.model_name}`,
+      summary: cls.message || message,
+      payload: {
+        model_id: model.id,
+        model_name: model.model_name,
+        roundtable_id: rt.id,
+        round,
+        participant_index: index,
+        roundtable_message_id: msgRow.id,
+        classification: cls.classification,
+        duration_ms: Date.now() - startedAt,
+      },
+    });
     writeAnnotation(stream, [
       {
         type: 'rt.participant_failed',
@@ -469,11 +627,25 @@ export async function runRound(
     const provider = model?.provider_id
       ? deps.providersRepo.get(model.provider_id)
       : null;
-    if (!model || !provider || !provider.api_key_ref) {
+    if (!model || !provider || (!provider.api_key_ref && provider.type !== 'ollama')) {
       deps.rtMsgRepo.update(msgRow.id, {
         status: 'failed',
         classification: 'unknown',
         error_message: 'model_or_provider_unavailable',
+      });
+      deps.runEvents?.append({
+        kind: 'model.failed',
+        status: 'failed',
+        label: p.display_name,
+        summary: 'model_or_provider_unavailable',
+        payload: {
+          model_id: p.model_id,
+          roundtable_id: rt.id,
+          round,
+          participant_index: i,
+          roundtable_message_id: msgRow.id,
+          classification: 'unknown',
+        },
       });
       writeAnnotation(stream, [
         {
@@ -487,16 +659,35 @@ export async function runRound(
       return { index: i, ok: false, classification: 'unknown' } as ParticipantRunResult;
     }
     let apiKey: string | null = null;
-    try {
-      apiKey = await deps.keystore.read(provider.api_key_ref);
-    } catch (e) {
-      deps.log.warn({ err: e, model_id: model.id }, 'roundtable.round.keystore_read_failed');
+    if (provider.type === 'ollama') {
+      apiKey = 'ollama-local';
+    } else {
+      try {
+        apiKey = await deps.keystore.read(provider.api_key_ref as string);
+      } catch (e) {
+        deps.log.warn({ err: e, model_id: model.id }, 'roundtable.round.keystore_read_failed');
+      }
     }
     if (!apiKey) {
       deps.rtMsgRepo.update(msgRow.id, {
         status: 'failed',
         classification: 'unknown',
         error_message: 'no_api_key',
+      });
+      deps.runEvents?.append({
+        kind: 'model.failed',
+        status: 'failed',
+        label: model.display_name ?? model.model_name,
+        summary: 'no_api_key',
+        payload: {
+          model_id: model.id,
+          model_name: model.model_name,
+          roundtable_id: rt.id,
+          round,
+          participant_index: i,
+          roundtable_message_id: msgRow.id,
+          classification: 'unknown',
+        },
       });
       writeAnnotation(stream, [
         {

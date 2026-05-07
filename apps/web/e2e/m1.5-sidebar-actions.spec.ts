@@ -204,7 +204,10 @@ test('msg-actions: copy + regenerate visible after streaming completes', async (
     timeout: 15_000,
   });
 
-  const actions = page.getByTestId('msg-actions').last();
+  const assistantMsg = page.locator('.msg.assistant').last();
+  await assistantMsg.hover();
+
+  const actions = assistantMsg.getByTestId('msg-actions');
   await expect(actions).toBeVisible();
   await expect(actions.getByTestId('msg-copy')).toBeVisible();
   await expect(actions.getByTestId('msg-regenerate')).toBeVisible();

@@ -277,6 +277,50 @@ describe('models test endpoint (MC-4)', () => {
     expect(body.error?.classification).toBe('key_missing');
   });
 
+  it('POST /v1/models/:id/test allows Ollama providers without an API key', async () => {
+    const provider = await app.inject({
+      method: 'POST',
+      url: '/v1/providers',
+      headers: authJson,
+      payload: { name: 'ollama', type: 'ollama', base_url: 'http://127.0.0.1:11434' },
+    });
+    const providerId = (provider.json() as { id: string }).id;
+    const model = await app.inject({
+      method: 'POST',
+      url: '/v1/models',
+      headers: authJson,
+      payload: {
+        provider_id: providerId,
+        model_name: 'llama3.2:latest',
+        capability: 'chat',
+        display_name: 'Llama 3.2',
+      },
+    });
+    const modelId = (model.json() as { id: string }).id;
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async (url, init) => {
+      expect(String(url)).toBe('http://127.0.0.1:11434/v1/chat/completions');
+      expect((init?.headers as Headers | Record<string, string> | undefined)).toBeDefined();
+      return new Response(
+        JSON.stringify({
+          id: 'chatcmpl-ollama',
+          object: 'chat.completion',
+          choices: [{ index: 0, message: { role: 'assistant', content: 'ok' }, finish_reason: 'stop' }],
+          usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
+        }),
+        { status: 200, headers: { 'content-type': 'application/json' } },
+      );
+    });
+
+    const res = await app.inject({
+      method: 'POST',
+      url: `/v1/models/${modelId}/test`,
+      headers: auth,
+    });
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toMatchObject({ ok: true });
+    expect(fetchSpy).toHaveBeenCalled();
+  });
+
   it('POST /v1/models/:id/test on missing model returns 404', async () => {
     const res = await app.inject({
       method: 'POST',

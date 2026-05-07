@@ -35,7 +35,7 @@ interface MockModelListItem {
   version?: string;
   context_length?: number;
   pricing?: { prompt?: string; completion?: string };
-  architecture?: { modality?: string; input_modalities?: string[] };
+  architecture?: { modality?: string; input_modalities?: string[]; output_modalities?: string[] };
 }
 
 function textOf(m: ChatMessage): string {
@@ -393,12 +393,19 @@ export function startMockOpenAI(
     imageToolCalls?: boolean;
     webToolCalls?: boolean;
     mcpToolCalls?: boolean;
+    failAfterToolResult?: boolean;
     models?: MockModelListItem[];
     onChatRequest?: (body: ChatRequest) => void;
   } = {},
 ): http.Server {
   const server = http.createServer((req, res) => {
-    if (req.method === 'GET' && req.url?.endsWith('/models')) {
+    const path = req.url ? new URL(req.url, 'http://127.0.0.1').pathname : '';
+    if (req.method === 'GET' && path.endsWith('/key')) {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ data: { label: 'mock-key' } }));
+      return;
+    }
+    if (req.method === 'GET' && path.endsWith('/models')) {
       res.writeHead(200, { 'content-type': 'application/json' });
       res.end(
         JSON.stringify({
@@ -446,6 +453,11 @@ export function startMockOpenAI(
         return;
       }
       opts.onChatRequest?.(body);
+      if (opts.failAfterToolResult && hasToolResult(body.messages)) {
+        res.writeHead(500, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({ error: { message: 'mock upstream failed after tool result' } }));
+        return;
+      }
       const { kind, role } = classifyAndRoleFromMessages(body.messages);
       const text =
         opts.fixedReply ??

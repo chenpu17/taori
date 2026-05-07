@@ -25,19 +25,26 @@ import { registerModelsRoute } from './routes/models.js';
 import { registerCostsRoute } from './routes/costs.js';
 import { registerMemoriesRoute } from './routes/memories.js';
 import { registerConversationsRoute } from './routes/conversations.js';
+import { registerFilesRoute } from './routes/files.js';
 import { registerAdminRoute } from './routes/admin.js';
 import { registerToolsRoute, toolEnabledKey } from './routes/tools.js';
 import { registerRoundtableRoute } from './routes/roundtable.js';
+import { registerQuickCompareRoute } from './routes/quick-compare.js';
 import { registerCatalogRoute } from './routes/catalog.js';
 import { registerMcpRoute, restoreMcpToolsAtStartup } from './routes/mcp.js';
+import { registerDiagnosticsRoute } from './routes/diagnostics.js';
+import { closeAllMcpSessions } from './mcp/client.js';
+import type { MemoryProvider } from './memory/provider.js';
 import { registerTemplatesPersonasRoute } from './routes/templates-personas.js';
+import { registerWorkflowRecipesRoute } from './routes/workflow-recipes.js';
 import { scheduleCatalogSync } from './catalog/index.js';
 import { CapabilityBus } from './bus/index.js';
 import { createFileReadTool } from './bus/builtins/file_read.js';
+import { createFileSearchTool } from './bus/builtins/file_search.js';
 import { createImageGenerateTool } from './bus/builtins/image_generate.js';
-import { createWebFetchTool } from './bus/builtins/web_fetch.js';
-import { createWebSearchTool } from './bus/builtins/web_search.js';
-import { CostsRepo, FilesRepo, ProvidersRepo, ModelsRepo, MessagesRepo, ConversationsRepo, MemoriesRepo } from './db/repos/index.js';
+import { createWebFetchTool, createWebFetchToolWithDeps } from './bus/builtins/web_fetch.js';
+import { createWebSearchTool, createWebSearchToolWithDeps } from './bus/builtins/web_search.js';
+import { CostsRepo, FilesRepo, FileChunksRepo, ProvidersRepo, ModelsRepo, MessagesRepo, ConversationsRepo, MemoriesRepo } from './db/repos/index.js';
 import path from 'node:path';
 
 export interface BuildServerArgs {
@@ -52,6 +59,7 @@ export interface BuildServerArgs {
    * Defaults to undefined for legacy callers + existing tests.
    */
   bus?: CapabilityBus;
+  memoryProvider?: MemoryProvider;
 }
 
 export function buildServer(args: BuildServerArgs): FastifyInstance {
@@ -148,12 +156,19 @@ export function buildServer(args: BuildServerArgs): FastifyInstance {
   // route can attach `image_generate` as an LLM tool — M2.5 §F-CR / batch A2).
   const costs = new CostsRepo(args.db);
   const files = new FilesRepo(args.db);
+  const fileChunks = new FileChunksRepo(args.db);
   const memories = new MemoriesRepo(args.db);
   const bus = args.bus ?? new CapabilityBus(costs);
   if (!args.bus) {
     bus.register(createFileReadTool(files));
-    bus.register(createWebSearchTool());
-    bus.register(createWebFetchTool());
+    bus.register(createFileSearchTool({ filesRepo: files, chunksRepo: fileChunks }));
+    if (process.env.TAORI_E2E_HERMETIC_WEB === '1') {
+      bus.register(createWebSearchToolWithDeps({ fetch: hermeticWebFetch }));
+      bus.register(createWebFetchToolWithDeps({ fetch: hermeticWebFetch }));
+    } else {
+      bus.register(createWebSearchTool());
+      bus.register(createWebFetchTool());
+    }
     const filesDir = path.join(path.dirname(args.config.dbPath), 'files');
     bus.register(
       createImageGenerateTool({
@@ -176,19 +191,65 @@ export function buildServer(args: BuildServerArgs): FastifyInstance {
   }
 
   const argsWithBus = { ...args, bus };
+  app.addHook('onClose', async () => {
+    closeAllMcpSessions();
+  });
   registerChatRoute(app, argsWithBus);
   registerProvidersRoute(app, { ...argsWithBus, keystore: args.keystore });
   registerModelsRoute(app, argsWithBus);
   registerCostsRoute(app, argsWithBus);
   registerMemoriesRoute(app, argsWithBus);
+  registerFilesRoute(app, argsWithBus);
   registerConversationsRoute(app, argsWithBus);
   registerAdminRoute(app, argsWithBus);
   registerTemplatesPersonasRoute(app, argsWithBus);
+  registerWorkflowRecipesRoute(app, argsWithBus);
 
-  registerToolsRoute(app, { bus, memories });
+  registerToolsRoute(app, { bus, memories, costs });
   registerMcpRoute(app, { ...argsWithBus, bus });
   registerRoundtableRoute(app, argsWithBus);
+  registerQuickCompareRoute(app, argsWithBus);
   registerCatalogRoute(app, { ...argsWithBus, keystore: args.keystore });
+  registerDiagnosticsRoute(app, argsWithBus);
 
   return app;
+}
+
+async function hermeticWebFetch(
+  input: Parameters<typeof fetch>[0],
+  init?: Parameters<typeof fetch>[1],
+): Promise<Response> {
+  const rawUrl = input instanceof Request ? input.url : String(input);
+  const url = new URL(rawUrl);
+  if (url.hostname === 'html.duckduckgo.com') {
+    const q = url.searchParams.get('q') ?? 'Taori';
+    return new Response(
+      `<!doctype html><html><body>
+        <a class="result__a" href="https://example.com/taori">Taori 多模型助手</a>
+        <a class="result__snippet">关于 ${escapeHtml(q)} 的测试搜索结果。</a>
+        <a class="result__a" href="https://example.com/runtime">Agent Runtime</a>
+        <a class="result__snippet">用于 E2E 的可控网页搜索材料。</a>
+      </body></html>`,
+      { status: 200, headers: { 'content-type': 'text/html; charset=utf-8' } },
+    );
+  }
+  if (url.hostname === 'example.com') {
+    return new Response(
+      `<!doctype html><html><head><title>Example Domain</title></head><body>
+        <h1>Example Domain</h1>
+        <p>This page is a deterministic Taori E2E fixture for web_fetch.</p>
+      </body></html>`,
+      { status: 200, headers: { 'content-type': 'text/html; charset=utf-8' } },
+    );
+  }
+  return fetch(input, init);
+}
+
+function escapeHtml(value: string): string {
+  return value
+    .replaceAll('&', '&amp;')
+    .replaceAll('<', '&lt;')
+    .replaceAll('>', '&gt;')
+    .replaceAll('"', '&quot;')
+    .replaceAll("'", '&#39;');
 }

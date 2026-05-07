@@ -28,7 +28,16 @@
 
 ## 当前状态
 
-🚧 **设计阶段（M0 前）** —— 产品与技术架构设计已定稿，代码尚未启动。
+✅ **Browser-first 发布候选** —— WebUI + Sidecar 主链路已实现并有回归验证；Desktop 壳与系统 Keychain 体验继续作为 follow-up 演进。
+
+当前已可验证的能力：
+
+- 多轮聊天、模型切换、停止与续写
+- Model Center、成本看板、Run Timeline、Help Center
+- Prompt 模板与 Persona（含会话级绑定与内置 `OpenClaw 行动派助手`）
+- Quick Compare、失败恢复、多模型圆桌
+
+发布证据与已知风险见 [`docs/product/15-browser-first-release-candidate.md`](./docs/product/15-browser-first-release-candidate.md)。
 
 文档体系：
 - 📘 [产品设计](./docs/product/) — 定位、功能、三主线专题、关键决策、M1 详细规格
@@ -36,6 +45,13 @@
 - 📦 [模块清单](./docs/modules/inventory.md) — 灰盒治理视角
 
 完整索引见 [`docs/README.md`](./docs/README.md)。
+
+## 开发与验证
+
+- `pnpm dev`：启动本地浏览器开发模式（WebUI + Sidecar）
+- `pnpm verify:web`：跑通 typecheck、sidecar tests 与 Playwright E2E
+- `pnpm verify:browser-rc`：Browser-first 发布前主门禁
+- `pnpm verify:real:report`：只读取最近一次真实 Provider 验证产物，不发起 live 调用
 
 ## 路线图
 

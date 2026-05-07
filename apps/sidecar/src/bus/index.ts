@@ -16,6 +16,7 @@
  * generation M2.4 will fill in `actual_cost_usd` after upstream return.
  */
 import { z } from 'zod';
+import { tool as aiTool } from 'ai';
 import {
   TOOL_ERROR_CLASSIFICATIONS,
   type Tool,
@@ -67,6 +68,27 @@ export interface ToolDescriptor<I = unknown, O = unknown> {
        *  emitted, not the user message that triggered the invocation. */
       assistant_message_id?: string | null;
     };
+  }>;
+}
+
+export interface AiSdkToolTrace {
+  call_id: string;
+  ai_tool_name: string;
+  tool: string;
+  label: string;
+  input?: string | null;
+  output?: string | null;
+  ok?: boolean;
+  duration_ms?: number;
+}
+
+export interface AiSdkToolsResult {
+  tools: Record<string, unknown>;
+  exposed: Array<{
+    ai_name: string;
+    bus_name: string;
+    description: string;
+    source: ToolDescriptor['source'];
   }>;
 }
 
@@ -126,14 +148,14 @@ export class CapabilityBus {
   ): Promise<ToolInvokeResult> {
     const tool = this.tools.get(name);
     if (!tool) {
-      this.recordCost(null, ctx, 'file', false, 0);
+      this.recordCost(null, ctx, 'file', false, 0, undefined, undefined, 'validation_error');
       return {
         ok: false,
         error: { classification: 'validation_error', message: `Unknown tool: ${name}` },
       };
     }
     if (!tool.enabled) {
-      this.recordCost(tool, ctx, tool.capability, false, 0);
+      this.recordCost(tool, ctx, tool.capability, false, 0, undefined, undefined, 'permission_denied');
       return {
         ok: false,
         error: { classification: 'permission_denied', message: `Tool disabled: ${name}` },
@@ -142,7 +164,7 @@ export class CapabilityBus {
 
     const parsed = tool.inputSchema.safeParse(rawInput);
     if (!parsed.success) {
-      this.recordCost(tool, ctx, tool.capability, false, 0);
+      this.recordCost(tool, ctx, tool.capability, false, 0, undefined, undefined, 'validation_error');
       return {
         ok: false,
         error: {
@@ -172,12 +194,73 @@ export class CapabilityBus {
         err && typeof err === 'object' && typeof (err as { billedCost?: unknown }).billedCost === 'number'
           ? ((err as { billedCost: number }).billedCost)
           : 0;
-      this.recordCost(tool, ctx, tool.capability, false, billed, Date.now() - start);
+      this.recordCost(tool, ctx, tool.capability, false, billed, Date.now() - start, undefined, classification);
       return {
         ok: false,
         error: { classification, message },
       };
     }
+  }
+
+  toAISDKTools(options: {
+    names: string[];
+    context: ToolContext;
+    callIdPrefix: string;
+    labelFor?: (tool: ToolDescriptor<unknown, unknown>) => string;
+    summarizeInput?: (value: unknown, tool: ToolDescriptor<unknown, unknown>) => string;
+    summarizeOutput?: (value: unknown, tool: ToolDescriptor<unknown, unknown>) => string;
+    onStart?: (trace: AiSdkToolTrace) => void;
+    onFinish?: (trace: AiSdkToolTrace) => void;
+  }): AiSdkToolsResult {
+    const used = new Set<string>();
+    const out: Record<string, unknown> = {};
+    const exposed: AiSdkToolsResult['exposed'] = [];
+
+    for (const name of options.names) {
+      const descriptor = this.tools.get(name);
+      if (!descriptor || !descriptor.enabled) continue;
+
+      const aiName = safeAiToolName(descriptor.name, used);
+      const label = options.labelFor?.(descriptor) ?? descriptor.description;
+      exposed.push({
+        ai_name: aiName,
+        bus_name: descriptor.name,
+        description: descriptor.description,
+        source: descriptor.source,
+      });
+
+      out[aiName] = aiTool({
+        description: descriptor.description,
+        parameters: descriptor.inputSchema,
+        execute: async (input: unknown) => {
+          const callId = `${options.callIdPrefix}:${aiName}:${Date.now()}`;
+          const startedAt = Date.now();
+          options.onStart?.({
+            call_id: callId,
+            ai_tool_name: aiName,
+            tool: descriptor.name,
+            label,
+            input: options.summarizeInput?.(input, descriptor) ?? summarizeToolValue(input),
+          });
+
+          const result = await this.invoke(descriptor.name, input, options.context);
+          const output = result.ok ? result.output : result.error?.message;
+          options.onFinish?.({
+            call_id: callId,
+            ai_tool_name: aiName,
+            tool: descriptor.name,
+            label,
+            ok: result.ok,
+            output: options.summarizeOutput?.(output, descriptor) ?? summarizeToolValue(output),
+            duration_ms: Date.now() - startedAt,
+          });
+
+          return result.ok ? result.output : { ok: false, error: result.error };
+        },
+      });
+    }
+
+    return { tools: out, exposed };
   }
 
   private recordCost(
@@ -195,6 +278,7 @@ export class CapabilityBus {
       price_per_call_snapshot?: number | null;
       assistant_message_id?: string | null;
     },
+    classification?: ToolErrorClassification | null,
   ): void {
     const featureCol: CostInsert['feature'] =
       capability === 'image' ? 'image' : 'tool_call';
@@ -214,9 +298,31 @@ export class CapabilityBus {
       estimated_cost_usd: null,
       actual_cost_usd: actual_usd,
       success,
+      classification: classification ?? null,
       duration_ms: duration_ms ?? null,
     };
     this.costs.insert(insert);
+  }
+}
+
+export function safeAiToolName(busName: string, used: Set<string>): string {
+  const base = busName.replace(/^builtin\./, '').replace(/[^A-Za-z0-9_-]/g, '_').slice(0, 58) || 'tool';
+  let name = base;
+  let i = 2;
+  while (used.has(name)) {
+    name = `${base.slice(0, 54)}_${i++}`;
+  }
+  used.add(name);
+  return name;
+}
+
+function summarizeToolValue(value: unknown): string {
+  if (value == null) return '';
+  if (typeof value === 'string') return value.slice(0, 220);
+  try {
+    return JSON.stringify(value).slice(0, 220);
+  } catch {
+    return String(value).slice(0, 220);
   }
 }
 

@@ -5,9 +5,9 @@ import { readSidecarEnv, resetSidecar, seedDefaultModel } from './_helpers';
  * Round-3 (Settings / browse-only / model CRUD) Playwright coverage — v0.7
  *
  * v0.7 polish moved Provider/Model list & test/delete UI from Settings into
- * the new Model Center (open via 🧬 toolbar button). Settings now only carries
- * AutoFallback, "重新打开 Onboarding" and the Danger Zone. Tests below cover
- * BOTH surfaces.
+ * the new Model Center (open via 🧬 toolbar button). Settings now carries
+ * cross-cutting reliability/cost/memory toggles plus "重新打开 Onboarding" and
+ * the Danger Zone. Tests below cover BOTH surfaces.
  */
 
 test('skip path: clean sidecar → "暂不配置" → browse-only banner with Configure button', async ({
@@ -31,7 +31,7 @@ test('skip path: clean sidecar → "暂不配置" → browse-only banner with Co
   await expect(page.getByTestId('onboarding')).toBeVisible();
 });
 
-test('settings (slim): only AutoFallback + Reopen Onboarding + Danger Zone — no model UI', async ({
+test('settings (slim): reliability toggles + Reopen Onboarding + Danger Zone — no model UI', async ({
   page,
 }) => {
   const env = readSidecarEnv();
@@ -42,8 +42,10 @@ test('settings (slim): only AutoFallback + Reopen Onboarding + Danger Zone — n
   await page.getByTestId('open-settings').click();
   await expect(page.getByTestId('settings-overlay')).toBeVisible();
 
-  // The slim Settings retains only these surfaces.
+  // The slim Settings retains only cross-cutting surfaces.
   await expect(page.getByTestId('settings-auto-fallback')).toBeVisible();
+  await expect(page.getByTestId('settings-stream-recovery')).toBeVisible();
+  await expect(page.getByTestId('stream-auto-resume-toggle')).toBeVisible();
   await expect(page.getByTestId('settings-add-provider')).toBeVisible();
   await expect(page.getByTestId('settings-danger-zone')).toBeVisible();
 
@@ -52,6 +54,24 @@ test('settings (slim): only AutoFallback + Reopen Onboarding + Danger Zone — n
   await expect(page.getByTestId('settings-model-item')).toHaveCount(0);
   await expect(page.getByTestId('settings-test')).toHaveCount(0);
   await expect(page.getByTestId('settings-delete')).toHaveCount(0);
+});
+
+test('settings: stream auto-resume toggle persists globally', async ({ page }) => {
+  const env = readSidecarEnv();
+  await resetSidecar(env);
+  await seedDefaultModel(env);
+  await page.goto('/');
+  await expect(page.getByTestId('chat-panel')).toBeVisible();
+
+  await page.getByTestId('open-settings').click();
+  const toggle = page.getByTestId('stream-auto-resume-toggle');
+  await expect(toggle).not.toBeChecked();
+  await toggle.check();
+  await expect(toggle).toBeChecked();
+  await page.getByTestId('settings-close').click();
+
+  await page.getByTestId('open-settings').click();
+  await expect(page.getByTestId('stream-auto-resume-toggle')).toBeChecked();
 });
 
 test('settings: Escape key closes the modal (a11y)', async ({ page }) => {
@@ -90,6 +110,8 @@ test('settings: tools tab lists builtin tools and persists toggles', async ({ pa
   await expect(page.getByTestId('settings-tool-builtin.web_fetch')).toContainText('网页抓取');
   await expect(page.getByTestId('settings-tool-builtin.image_generate')).toContainText('图像生成');
   await expect(page.getByTestId('settings-tools')).toContainText('图像理解不是独立工具');
+  await expect(page.getByTestId('settings-tool-builtin.web_fetch')).toContainText('24h 调用');
+  await expect(page.getByTestId('settings-tool-builtin.web_fetch')).toContainText('最近失败');
 
   const toggle = page.getByTestId('tool-toggle-builtin.web_fetch');
   await expect(toggle).toContainText('已启用');

@@ -11,7 +11,15 @@
  */
 
 import { useState } from 'react';
-import { DEFAULT_OPENROUTER_BASE_URL, priceTier, PRICE_TIER_LABEL } from '@taori/shared';
+import {
+  DEFAULT_OPENROUTER_BASE_URL,
+  DEFAULT_DEEPSEEK_BASE_URL,
+  DEFAULT_PACKYAPI_BASE_URL,
+  DEFAULT_SILICONFLOW_BASE_URL,
+  isChatCapable,
+  priceTier,
+  PRICE_TIER_LABEL,
+} from '@taori/shared';
 import type { ProviderType } from '@taori/shared';
 import { api } from './api.js';
 
@@ -54,6 +62,21 @@ const PROVIDER_PRESETS: Partial<
     label: '华为云 MaaS（盘古 / DeepSeek / Kimi / Qwen）',
     default_base_url: 'https://api.modelarts-maas.com/openai/v1',
     help: '华为云 ModelArts MaaS，兼容 OpenAI Chat Completions。',
+  },
+  deepseek: {
+    label: 'DeepSeek 官方',
+    default_base_url: DEFAULT_DEEPSEEK_BASE_URL,
+    help: 'DeepSeek 官方 OpenAI 兼容接口，支持 deepseek-v4-flash / deepseek-v4-pro。',
+  },
+  packyapi: {
+    label: 'PackyAPI / PackyCode（GPT Image 2）',
+    default_base_url: DEFAULT_PACKYAPI_BASE_URL,
+    help: 'OpenAI 兼容图像生成端点，默认导入 gpt-image-2。',
+  },
+  siliconflow: {
+    label: '硅基流动 SiliconFlow',
+    default_base_url: DEFAULT_SILICONFLOW_BASE_URL,
+    help: 'OpenAI 兼容聊天、多模态与图像生成服务。',
   },
   custom: {
     label: '自定义（OpenAI 兼容）',
@@ -118,13 +141,19 @@ export function Onboarding({ onDone, onSkip }: OnboardingProps): JSX.Element {
       setError('请输入供应商名称');
       return;
     }
-    if (!apiKey.trim()) {
+    const trimmedApiKey = apiKey.trim();
+    const requiresApiKey = type !== 'ollama';
+    if (requiresApiKey && !trimmedApiKey) {
       setError('请输入 API Key');
       return;
     }
     setStep('testing');
     try {
-      const test = await api.testProvider({ type, base_url: baseUrl, api_key: apiKey });
+      const test = await api.testProvider({
+        type,
+        base_url: baseUrl,
+        ...(trimmedApiKey ? { api_key: trimmedApiKey } : {}),
+      });
       if (!test.ok) {
         setStep('enter-key');
         setError(test.error?.message ?? '凭据校验失败');
@@ -135,7 +164,7 @@ export function Onboarding({ onDone, onSkip }: OnboardingProps): JSX.Element {
         name: trimmedProviderName,
         type,
         base_url: baseUrl,
-        api_key: apiKey,
+        ...(trimmedApiKey ? { api_key: trimmedApiKey } : {}),
       });
       setStep('discovering');
       const disc = await api.discoverModels(provider.id);
@@ -150,7 +179,7 @@ export function Onboarding({ onDone, onSkip }: OnboardingProps): JSX.Element {
             display_name: m.display_name,
             capability: m.capability,
             supports_vision: m.supports_vision,
-            supports_tools: m.supports_tools ?? false,
+            supports_tools: m.supports_tools ?? isChatCapable(m.capability),
             price_input_per_1m: m.price_input_per_1m,
             price_output_per_1m: m.price_output_per_1m,
             price_per_image: m.price_per_image ?? null,
@@ -249,10 +278,30 @@ export function Onboarding({ onDone, onSkip }: OnboardingProps): JSX.Element {
     });
   };
 
+  const statusCopy: Partial<Record<Step, { title: string; hint: string }>> = {
+    testing: {
+      title: type === 'ollama' ? '正在连接 Ollama' : '正在校验 API Key',
+      hint: '验证通过后会自动创建供应商并继续发现模型。',
+    },
+    discovering: {
+      title: '正在拉取可用模型',
+      hint: 'Taori 会自动识别推荐模型，并帮你预选一组适合起步的候选。',
+    },
+    saving: {
+      title: '正在保存模型配置',
+      hint: '导入完成后即可直接开始聊天、作图或发起圆桌。',
+    },
+  };
+
   return (
     <div className="onboarding" data-testid="onboarding">
       <h2>欢迎使用 Taori</h2>
       <p className="hint">先配一个模型供应商，配置后即可开始聊天。</p>
+      <div className="onboarding-highlights" aria-hidden="true">
+        <span>多模型切换</span>
+        <span>成本透明</span>
+        <span>本地优先</span>
+      </div>
 
       {step === 'enter-key' && (
         <form onSubmit={submitKey} className="onboarding-form">
@@ -295,14 +344,14 @@ export function Onboarding({ onDone, onSkip }: OnboardingProps): JSX.Element {
             />
           </label>
           <label>
-            API Key
+            {type === 'ollama' ? 'API Key（Ollama 本地无需填写）' : 'API Key'}
             <input
               type="password"
               value={apiKey}
               onChange={(e) => setApiKey(e.target.value)}
               autoComplete="off"
               spellCheck={false}
-              placeholder="sk-or-..."
+              placeholder={type === 'ollama' ? '留空即可使用本地 Ollama' : 'sk-or-...'}
               data-testid="onb-api-key"
             />
           </label>
@@ -325,12 +374,19 @@ export function Onboarding({ onDone, onSkip }: OnboardingProps): JSX.Element {
         </form>
       )}
 
-      {step === 'testing' && <p data-testid="onb-status">正在校验 API Key…</p>}
-      {step === 'discovering' && <p data-testid="onb-status">正在拉取可用模型…</p>}
+      {(step === 'testing' || step === 'discovering' || step === 'saving') && (
+        <div className="onboarding-status-card" data-testid="onb-status">
+          <span className="onboarding-status-card__spinner" aria-hidden="true" />
+          <div>
+            <strong>{statusCopy[step]?.title ?? '处理中'}</strong>
+            <span>{statusCopy[step]?.hint ?? '请稍候…'}</span>
+          </div>
+        </div>
+      )}
 
       {step === 'pick-model' && discovery && (
         <div className="onboarding-pick" data-testid="onb-pick">
-          <p>
+          <p className="onboarding-pick-intro">
             选择要导入的模型（可多选）。文本/多模态模型可设为默认聊天模型；图像/视频模型仅可在画图/视频流程中使用。
           </p>
           <ul className="onboarding-candidates" data-testid="onb-candidates">

@@ -1,25 +1,32 @@
 {
   "name": "taori",
   "private": true,
-  "version": "0.0.0",
+  "version": "0.0.1",
   "description": "Taori — multi-model desktop AI assistant. Workspace root.",
   "packageManager": "pnpm@9.15.0",
   "engines": {
     "node": ">=20.10.0"
   },
   "scripts": {
-    "build:shared": "pnpm --filter @taori/shared build",
-    "dev": "pnpm build:shared && pnpm dev:browser",
+    "build:shared": "pnpm --filter @chenpu17/taori build",
+    "dev": "node ./scripts/dev-local.mjs",
+    "dev:clean": "node ./scripts/dev-clean.mjs",
     "dev:sidecar": "pnpm --filter @taori/sidecar dev",
     "dev:web": "pnpm --filter @taori/web dev",
-    "dev:desktop": "pnpm --filter @taori/desktop tauri dev",
+    "dev:desktop": "node ./scripts/dev-desktop.mjs",
     "dev:browser": "node ./scripts/dev-browser.mjs",
     "build:sidecar": "pnpm --filter @taori/sidecar build",
     "test": "pnpm -r --parallel test",
     "test:sidecar": "pnpm --filter @taori/sidecar test",
     "test:e2e": "pnpm --filter @taori/web test:e2e",
     "typecheck": "pnpm -r --parallel typecheck",
-    "verify:real": "node ./scripts/verify-real-journey.mjs"
+    "verify:web": "pnpm typecheck && pnpm test:sidecar && pnpm --filter @taori/web exec playwright test --workers=1",
+    "verify:real": "node ./scripts/verify-real-journey.mjs",
+    "verify:real:report": "node ./scripts/verify-real-journey.mjs --report",
+    "verify:browser-rc": "node ./scripts/verify-browser-rc.mjs",
+    "verify:browser-rc:report": "node ./scripts/verify-browser-rc.mjs --report",
+    "verify:desktop": "node ./scripts/verify-desktop-smoke.mjs",
+    "verify:desktop-ui": "node ./scripts/verify-desktop-ui.mjs"
   },
   "devDependencies": {
     "typescript": "5.6.3"

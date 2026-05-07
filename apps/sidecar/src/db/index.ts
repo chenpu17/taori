@@ -94,6 +94,31 @@ CREATE TABLE IF NOT EXISTS files (
 );
 CREATE INDEX IF NOT EXISTS files_conv_idx ON files(conversation_id);
 
+CREATE TABLE IF NOT EXISTS file_chunks (
+  id TEXT PRIMARY KEY,
+  file_id TEXT NOT NULL REFERENCES files(id) ON DELETE CASCADE,
+  conversation_id TEXT REFERENCES conversations(id) ON DELETE CASCADE,
+  message_id TEXT REFERENCES messages(id) ON DELETE SET NULL,
+  chunk_index INTEGER NOT NULL,
+  content TEXT NOT NULL,
+  token_count INTEGER,
+  char_start INTEGER NOT NULL,
+  char_end INTEGER NOT NULL,
+  content_hash TEXT NOT NULL,
+  created_at INTEGER NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS file_chunks_file_index_uniq ON file_chunks(file_id, chunk_index);
+CREATE INDEX IF NOT EXISTS file_chunks_conv_file_idx ON file_chunks(conversation_id, file_id);
+CREATE INDEX IF NOT EXISTS file_chunks_hash_idx ON file_chunks(content_hash);
+
+CREATE VIRTUAL TABLE IF NOT EXISTS file_chunk_fts USING fts5(
+  content,
+  chunk_id UNINDEXED,
+  file_id UNINDEXED,
+  conversation_id UNINDEXED,
+  tokenize = 'unicode61'
+);
+
 CREATE TABLE IF NOT EXISTS cost_records (
   id TEXT PRIMARY KEY,
   conversation_id TEXT REFERENCES conversations(id) ON DELETE SET NULL,
@@ -151,6 +176,24 @@ CREATE INDEX IF NOT EXISTS run_events_conv_idx ON run_events(conversation_id, cr
 CREATE INDEX IF NOT EXISTS run_events_run_idx ON run_events(run_id, created_at);
 CREATE INDEX IF NOT EXISTS run_events_msg_idx ON run_events(message_id, created_at);
 
+CREATE TABLE IF NOT EXISTS agent_runs (
+  id TEXT PRIMARY KEY,
+  conversation_id TEXT REFERENCES conversations(id) ON DELETE CASCADE,
+  parent_run_id TEXT,
+  kind TEXT NOT NULL,
+  status TEXT NOT NULL,
+  model_id TEXT,
+  user_message_id TEXT,
+  assistant_message_id TEXT,
+  recovery_policy TEXT,
+  event_count INTEGER NOT NULL DEFAULT 0,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS agent_runs_conv_idx ON agent_runs(conversation_id, updated_at);
+CREATE INDEX IF NOT EXISTS agent_runs_parent_idx ON agent_runs(parent_run_id);
+CREATE INDEX IF NOT EXISTS agent_runs_status_idx ON agent_runs(status, updated_at);
+
 CREATE TABLE IF NOT EXISTS memories (
   id TEXT PRIMARY KEY,
   scope TEXT NOT NULL,
@@ -161,6 +204,23 @@ CREATE TABLE IF NOT EXISTS memories (
   updated_at INTEGER NOT NULL
 );
 CREATE UNIQUE INDEX IF NOT EXISTS memories_scope_key_uniq ON memories(scope, scope_id, key);
+
+CREATE TABLE IF NOT EXISTS structured_memories (
+  id TEXT PRIMARY KEY,
+  scope TEXT NOT NULL,
+  scope_id TEXT,
+  type TEXT NOT NULL,
+  content TEXT NOT NULL,
+  source_conversation_id TEXT REFERENCES conversations(id) ON DELETE SET NULL,
+  source_message_id TEXT REFERENCES messages(id) ON DELETE SET NULL,
+  enabled INTEGER NOT NULL DEFAULT 1,
+  deleted_at INTEGER,
+  last_used_at INTEGER,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS structured_memories_scope_idx ON structured_memories(scope, scope_id, enabled, updated_at);
+CREATE INDEX IF NOT EXISTS structured_memories_source_idx ON structured_memories(source_conversation_id, source_message_id);
 
 CREATE TABLE IF NOT EXISTS prompt_templates (
   id TEXT PRIMARY KEY,
@@ -179,6 +239,18 @@ CREATE TABLE IF NOT EXISTS personas (
   created_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS workflow_recipes (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  description TEXT,
+  schema_version INTEGER NOT NULL DEFAULT 1,
+  spec_json TEXT NOT NULL,
+  enabled INTEGER NOT NULL DEFAULT 1,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS workflow_recipes_enabled_idx ON workflow_recipes(enabled, updated_at);
 
 CREATE TABLE IF NOT EXISTS roundtables (
   id TEXT PRIMARY KEY,
@@ -216,6 +288,39 @@ CREATE TABLE IF NOT EXISTS roundtable_messages (
 );
 CREATE INDEX IF NOT EXISTS roundtable_messages_rt_idx ON roundtable_messages(roundtable_id, round, participant_index);
 CREATE UNIQUE INDEX IF NOT EXISTS roundtable_messages_uniq ON roundtable_messages(roundtable_id, round, participant_index);
+
+CREATE TABLE IF NOT EXISTS quick_compare_runs (
+  id TEXT PRIMARY KEY,
+  conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+  source_user_message_id TEXT REFERENCES messages(id) ON DELETE SET NULL,
+  run_id TEXT NOT NULL,
+  status TEXT NOT NULL,
+  model_ids TEXT NOT NULL,
+  adopted_output_id TEXT,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS quick_compare_runs_conv_idx ON quick_compare_runs(conversation_id, updated_at);
+CREATE INDEX IF NOT EXISTS quick_compare_runs_run_idx ON quick_compare_runs(run_id);
+
+CREATE TABLE IF NOT EXISTS quick_compare_outputs (
+  id TEXT PRIMARY KEY,
+  compare_id TEXT NOT NULL REFERENCES quick_compare_runs(id) ON DELETE CASCADE,
+  participant_index INTEGER NOT NULL,
+  model_id TEXT NOT NULL REFERENCES models(id) ON DELETE CASCADE,
+  provider_id TEXT REFERENCES providers(id) ON DELETE SET NULL,
+  content TEXT NOT NULL DEFAULT '',
+  status TEXT NOT NULL DEFAULT 'pending',
+  error_classification TEXT,
+  error_message TEXT,
+  cost_record_id TEXT REFERENCES cost_records(id) ON DELETE SET NULL,
+  first_token_ms INTEGER,
+  duration_ms INTEGER,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS quick_compare_outputs_compare_idx ON quick_compare_outputs(compare_id, participant_index);
+CREATE UNIQUE INDEX IF NOT EXISTS quick_compare_outputs_uniq ON quick_compare_outputs(compare_id, participant_index);
 `;
 
 export type Db = BetterSQLite3Database<typeof schema>;

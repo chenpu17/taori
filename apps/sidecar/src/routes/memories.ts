@@ -15,7 +15,8 @@
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import type { BuildServerArgs } from '../server.js';
-import { MemoriesRepo } from '../db/repos/index.js';
+import { MemoriesRepo, StructuredMemoriesRepo } from '../db/repos/index.js';
+import { LocalKvMemoryProvider } from '../memory/provider.js';
 
 const SCOPES = ['global', 'session', 'user'] as const;
 
@@ -43,8 +44,19 @@ const EffectiveQuery = z.object({
   key: z.string().min(1).max(128),
 });
 
+const StructuredListQuery = z.object({
+  include_disabled: z.coerce.boolean().optional(),
+  include_deleted: z.coerce.boolean().optional(),
+  limit: z.coerce.number().int().min(1).max(200).optional(),
+});
+
+const StructuredPatchBody = z.object({
+  enabled: z.boolean(),
+});
+
 export function registerMemoriesRoute(app: FastifyInstance, deps: BuildServerArgs): void {
-  const repo = new MemoriesRepo(deps.db);
+  const provider = deps.memoryProvider ?? new LocalKvMemoryProvider(new MemoriesRepo(deps.db));
+  const structuredRepo = new StructuredMemoriesRepo(deps.db);
 
   app.get('/v1/memories', async (req, reply) => {
     const parsed = GetQuery.safeParse(req.query);
@@ -55,7 +67,11 @@ export function registerMemoriesRoute(app: FastifyInstance, deps: BuildServerArg
     if (scope !== 'global' && !scope_id) {
       return reply.code(400).send({ ok: false, error: { code: 'scope_id_required' } });
     }
-    const value = repo.get(scope, scope === 'global' ? null : scope_id ?? null, key);
+    const value = await provider.get({
+      scope,
+      scopeId: scope === 'global' ? null : scope_id ?? null,
+      key,
+    });
     return { ok: true, data: { scope, scope_id: scope_id ?? null, key, value } };
   });
 
@@ -65,7 +81,7 @@ export function registerMemoriesRoute(app: FastifyInstance, deps: BuildServerArg
       return reply.code(400).send({ ok: false, error: { code: 'invalid_query' } });
     }
     const { conversation_id, key } = parsed.data;
-    const value = repo.getEffective(conversation_id ?? null, key);
+    const value = await provider.getEffective(conversation_id ?? null, key);
     return { ok: true, data: { key, value } };
   });
 
@@ -78,7 +94,12 @@ export function registerMemoriesRoute(app: FastifyInstance, deps: BuildServerArg
     if (scope !== 'global' && !scope_id) {
       return reply.code(400).send({ ok: false, error: { code: 'scope_id_required' } });
     }
-    repo.set(scope, scope === 'global' ? null : scope_id ?? null, key, value);
+    await provider.set({
+      scope,
+      scopeId: scope === 'global' ? null : scope_id ?? null,
+      key,
+      value,
+    });
     return { ok: true, data: { scope, scope_id: scope_id ?? null, key, value } };
   });
 
@@ -91,7 +112,44 @@ export function registerMemoriesRoute(app: FastifyInstance, deps: BuildServerArg
     if (scope !== 'global' && !scope_id) {
       return reply.code(400).send({ ok: false, error: { code: 'scope_id_required' } });
     }
-    repo.delete(scope, scope === 'global' ? null : scope_id ?? null, key);
+    await provider.delete({
+      scope,
+      scopeId: scope === 'global' ? null : scope_id ?? null,
+      key,
+    });
+    return { ok: true };
+  });
+
+  app.get('/v1/structured-memories', async (req, reply) => {
+    const parsed = StructuredListQuery.safeParse(req.query);
+    if (!parsed.success) {
+      return reply.code(400).send({ ok: false, error: { code: 'invalid_query' } });
+    }
+    return {
+      ok: true,
+      data: {
+        memories: structuredRepo.list({
+          includeDisabled: parsed.data.include_disabled,
+          includeDeleted: parsed.data.include_deleted,
+          limit: parsed.data.limit ?? 100,
+        }),
+      },
+    };
+  });
+
+  app.patch<{ Params: { id: string } }>('/v1/structured-memories/:id', async (req, reply) => {
+    const parsed = StructuredPatchBody.safeParse(req.body);
+    if (!parsed.success) {
+      return reply.code(400).send({ ok: false, error: { code: 'invalid_body' } });
+    }
+    const row = structuredRepo.setEnabled(req.params.id, parsed.data.enabled);
+    if (!row) return reply.code(404).send({ ok: false, error: { code: 'not_found' } });
+    return { ok: true, data: row };
+  });
+
+  app.delete<{ Params: { id: string } }>('/v1/structured-memories/:id', async (req, reply) => {
+    const row = structuredRepo.softDelete(req.params.id);
+    if (!row) return reply.code(404).send({ ok: false, error: { code: 'not_found' } });
     return { ok: true };
   });
 }

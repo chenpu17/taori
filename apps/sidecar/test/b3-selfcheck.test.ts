@@ -1,8 +1,9 @@
 /**
  * B3 — GET /v1/selfcheck integration tests.
  *
- * Verifies the four checks (sidecar/keystore/database/default_model) and
- * the overall status aggregation (ok / warn / error).
+ * Verifies the checks (sidecar/keystore/database/default_model) and the overall
+ * status aggregation (ok / warn / error). Keychain probing is opt-in so the
+ * default in-app self-check does not trigger OS prompts.
  */
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { buildServer } from '../src/server.js';
@@ -71,10 +72,10 @@ describe('B3 — GET /v1/selfcheck', () => {
     await teardown(ctx);
   });
 
-  async function get() {
+  async function get(includeKeychain = false) {
     return ctx.app.inject({
       method: 'GET',
-      url: '/v1/selfcheck',
+      url: `/v1/selfcheck${includeKeychain ? '?include_keychain=1' : ''}`,
       headers: { authorization: `Bearer ${bearer}` },
     });
   }
@@ -95,9 +96,10 @@ describe('B3 — GET /v1/selfcheck', () => {
       'database',
       'default_model',
     ]);
-    // sidecar / keystore / database always ok in test env
+    // sidecar / database always ok in test env; keystore is skipped by default.
     expect(body.checks[0].ok).toBe(true);
     expect(body.checks[1].ok).toBe(true);
+    expect(body.checks[1].level).toBe('warn');
     expect(body.checks[2].ok).toBe(true);
     // No models → default_model fails
     expect(body.checks[3].ok).toBe(false);
@@ -152,18 +154,19 @@ describe('B3 — GET /v1/selfcheck', () => {
       overall: string;
       checks: { id: string; level: string; detail: string }[];
     };
-    expect(body.overall).toBe('ok');
+    expect(body.overall).toBe('warn');
     expect(body.ok).toBe(true);
-    expect(body.checks.every((c) => c.level === 'ok')).toBe(true);
+    expect(body.checks.find((c) => c.id === 'keystore')!.level).toBe('warn');
     const m = body.checks.find((c) => c.id === 'default_model')!;
     expect(m.detail).toContain('Mini');
   });
 
-  it('keystore probe round-trips and cleans up after', async () => {
-    const res = await get();
+  it('keystore probe is opt-in, round-trips, and cleans up after', async () => {
+    const res = await get(true);
     const body = res.json() as {
-      checks: { id: string; ok: boolean }[];
+      checks: { id: string; ok: boolean; level: string }[];
     };
     expect(body.checks.find((c) => c.id === 'keystore')!.ok).toBe(true);
+    expect(body.checks.find((c) => c.id === 'keystore')!.level).toBe('ok');
   });
 });

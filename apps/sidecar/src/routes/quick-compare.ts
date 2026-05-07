@@ -1,0 +1,680 @@
+import type { FastifyInstance } from 'fastify';
+import type { PassThrough } from 'node:stream';
+import { createOpenAI } from '@ai-sdk/openai';
+import { streamText } from 'ai';
+import {
+  QuickCompareRequestSchema,
+  QuickCompareAdoptRequestSchema,
+  QuickCompareRetryRequestSchema,
+  TaoriError,
+  calculateCostUsd,
+  estimateInputTokens,
+  makeId,
+  type ChatAttachment,
+  type Model,
+  type Provider,
+  type QuickCompareAnnotation,
+} from '@taori/shared';
+import type { BuildServerArgs } from '../server.js';
+import {
+  ConversationsRepo,
+  CostsRepo,
+  MemoriesRepo,
+  MessagesRepo,
+  ModelsRepo,
+  PersonasRepo,
+  ProvidersRepo,
+  QuickCompareRepo,
+  RunEventsRepo,
+} from '../db/repos/index.js';
+import { classifyProviderError } from '../providers/registry.js';
+import { normalizeOllamaOpenAiBaseUrl } from '../providers/ollama.js';
+import { throwIfBudgetBlockedOrNeedsConfirmation } from '../cost/budget-guard.js';
+import { openDataStream } from '../chat/stream-dispatch.js';
+import { appendRunEvent } from '../chat/run-stream.js';
+import { pickQuickCompareModels } from '../quick-compare/model-picker.js';
+
+function writeAnnotation(stream: PassThrough, annotations: QuickCompareAnnotation[]): void {
+  stream.write(`8:${JSON.stringify(annotations)}\n`);
+}
+
+function validationError(message: string): TaoriError {
+  return new TaoriError({ code: 'validation_error', message });
+}
+
+function lastUserText(messages: Array<{ role: string; content: string }>): string {
+  return [...messages].reverse().find((message) => message.role === 'user')?.content ?? '';
+}
+
+function attachmentNotice(attachments: ChatAttachment[] | undefined): string | null {
+  if (!attachments || attachments.length === 0) return null;
+  const names = attachments.map((item) => item.name ?? item.mime).join(', ');
+  return `\n\n【附件提示】本次 Quick Compare 收到 ${attachments.length} 个附件：${names}。如果模型无法直接读取附件，请基于对话中已提取的信息回答。`;
+}
+
+function buildCompareMessages(args: {
+  requestMessages: Array<{ role: 'user' | 'assistant' | 'system'; content: string }>;
+  personaPrompt: string | null;
+  attachments?: ChatAttachment[];
+}): Array<{ role: 'user' | 'assistant' | 'system'; content: string }> {
+  const system = [
+    args.personaPrompt,
+    '你正在参加 Taori Quick Compare。请独立给出高质量回答，不要提及其他候选模型。回答要直接、可执行、避免空话。',
+    'Quick Compare 不会调用工具、搜索网页或抓取 URL。不要声称已经搜索、浏览、抓取或调用工具；如果需要外部资料，请明确说明应先在正式对话中完成检索。',
+  ].filter(Boolean).join('\n\n');
+  const messages = system
+    ? [{ role: 'system' as const, content: system }, ...args.requestMessages]
+    : [...args.requestMessages];
+  const notice = attachmentNotice(args.attachments);
+  if (!notice) return messages;
+  const lastUserIndex = messages.map((message) => message.role).lastIndexOf('user');
+  if (lastUserIndex < 0) return messages;
+  return messages.map((message, index) =>
+    index === lastUserIndex
+      ? { ...message, content: `${message.content}${notice}` }
+      : message,
+  );
+}
+
+function estimateCompareCostUsd(models: Model[], inputText: string): number {
+  const inputTokens = estimateInputTokens(inputText);
+  return models.reduce((sum, model) => {
+    const cost = calculateCostUsd({
+      inputTokens,
+      outputTokens: 800,
+      priceInputPer1m: model.price_input_per_1m,
+      priceOutputPer1m: model.price_output_per_1m,
+      pricePerCall: model.price_per_call,
+    });
+    return sum + (cost ?? 0);
+  }, 0);
+}
+
+async function runCompareParticipant(args: {
+  stream: PassThrough;
+  signal: AbortSignal;
+  compareId: string;
+  conversationId: string;
+  runId: string;
+  outputId: string;
+  index: number;
+  model: Model;
+  provider: Provider | null;
+  apiKey: string | null;
+  messages: Array<{ role: 'user' | 'assistant' | 'system'; content: string }>;
+  qcRepo: QuickCompareRepo;
+  costsRepo: CostsRepo;
+  modelsRepo: ModelsRepo;
+  runEventsRepo: RunEventsRepo;
+  log: { info: (...a: unknown[]) => void; warn: (...a: unknown[]) => void; error: (...a: unknown[]) => void };
+}): Promise<{ outputId: string; ok: boolean }> {
+  const startedAt = Date.now();
+  let firstTokenMs: number | null = null;
+  let accumulated = '';
+  args.qcRepo.patchOutput(args.outputId, { status: 'streaming' });
+  appendRunEvent(args.log, args.runEventsRepo, {
+    run_id: args.runId,
+    conversation_id: args.conversationId,
+    message_id: null,
+    kind: 'quick_compare.participant_started',
+    status: 'started',
+    label: `对比候选 ${args.index + 1} 开始`,
+    summary: args.model.display_name,
+    payload: {
+      compare_id: args.compareId,
+      output_id: args.outputId,
+      participant_index: args.index,
+      model_id: args.model.id,
+    },
+  });
+  writeAnnotation(args.stream, [{
+    type: 'qc.participant_start',
+    output_id: args.outputId,
+    index: args.index,
+    model_id: args.model.id,
+  }]);
+
+  try {
+    if (args.provider && args.apiKey) {
+      const provider = createOpenAI({
+        baseURL: args.provider.type === 'ollama'
+          ? normalizeOllamaOpenAiBaseUrl(args.provider.base_url)
+          : args.provider.base_url.replace(/\/$/, ''),
+        apiKey: args.apiKey,
+      });
+      const result = await streamText({
+        model: provider.chat(args.model.model_name),
+        messages: args.messages,
+        maxTokens: 1200,
+        temperature: 0.6,
+        maxRetries: 0,
+        abortSignal: args.signal,
+      });
+      for await (const delta of result.textStream) {
+        if (args.signal.aborted) break;
+        if (firstTokenMs == null) firstTokenMs = Date.now() - startedAt;
+        accumulated += delta;
+        writeAnnotation(args.stream, [{
+          type: 'qc.participant_delta',
+          output_id: args.outputId,
+          index: args.index,
+          model_id: args.model.id,
+          text_chunk: delta,
+        }]);
+      }
+      const usage = await result.usage.catch(() => undefined);
+      const promptTokens = usage?.promptTokens ?? null;
+      const completionTokens = usage?.completionTokens ?? null;
+      const actualCost = calculateCostUsd({
+        inputTokens: promptTokens ?? 0,
+        outputTokens: completionTokens ?? 0,
+        priceInputPer1m: args.model.price_input_per_1m,
+        priceOutputPer1m: args.model.price_output_per_1m,
+        pricePerCall: args.model.price_per_call,
+      });
+      const cost = args.costsRepo.insert({
+        conversation_id: args.conversationId,
+        source_type: 'quick_compare_output',
+        source_id: args.outputId,
+        feature: 'quick_compare',
+        model_id: args.model.id,
+        model_name_snapshot: args.model.model_name,
+        input_tokens: promptTokens,
+        output_tokens: completionTokens,
+        call_count: 1,
+        price_input_per_1m_snapshot: args.model.price_input_per_1m,
+        price_output_per_1m_snapshot: args.model.price_output_per_1m,
+        price_per_call_snapshot: args.model.price_per_call,
+        estimated_cost_usd: null,
+        actual_cost_usd: actualCost ?? null,
+        success: true,
+        duration_ms: Date.now() - startedAt,
+      });
+      args.qcRepo.patchOutput(args.outputId, {
+        content: accumulated,
+        status: 'complete',
+        cost_record_id: cost.id,
+        first_token_ms: firstTokenMs,
+        duration_ms: Date.now() - startedAt,
+      });
+      args.modelsRepo.recordSuccess(args.model.id);
+      appendRunEvent(args.log, args.runEventsRepo, {
+        run_id: args.runId,
+        conversation_id: args.conversationId,
+        message_id: null,
+        kind: 'quick_compare.participant_completed',
+        status: 'completed',
+        label: `对比候选 ${args.index + 1} 完成`,
+        summary: actualCost == null ? null : `$${actualCost.toFixed(6)}`,
+        payload: {
+          compare_id: args.compareId,
+          output_id: args.outputId,
+          participant_index: args.index,
+          model_id: args.model.id,
+          cost_record_id: cost.id,
+          first_token_ms: firstTokenMs,
+          duration_ms: Date.now() - startedAt,
+        },
+      });
+      writeAnnotation(args.stream, [{
+        type: 'qc.participant_done',
+        output_id: args.outputId,
+        index: args.index,
+        model_id: args.model.id,
+        content: accumulated,
+        cost_record_id: cost.id,
+        first_token_ms: firstTokenMs,
+        duration_ms: Date.now() - startedAt,
+      }]);
+      return { outputId: args.outputId, ok: true };
+    }
+
+    accumulated = `【${args.model.display_name}】Quick Compare 本地预览：${lastUserText(args.messages).slice(0, 240)}`;
+    args.qcRepo.patchOutput(args.outputId, {
+      content: accumulated,
+      status: 'complete',
+      first_token_ms: 0,
+      duration_ms: Date.now() - startedAt,
+    });
+    writeAnnotation(args.stream, [{
+      type: 'qc.participant_delta',
+      output_id: args.outputId,
+      index: args.index,
+      model_id: args.model.id,
+      text_chunk: accumulated,
+    }]);
+    writeAnnotation(args.stream, [{
+      type: 'qc.participant_done',
+      output_id: args.outputId,
+      index: args.index,
+      model_id: args.model.id,
+      content: accumulated,
+      cost_record_id: null,
+      first_token_ms: 0,
+      duration_ms: Date.now() - startedAt,
+    }]);
+    return { outputId: args.outputId, ok: true };
+  } catch (e) {
+    const providerError = classifyProviderError({ err: e });
+    const classification = providerError.classification;
+    args.modelsRepo.recordFailure(args.model.id, classification);
+    args.qcRepo.patchOutput(args.outputId, {
+      status: 'failed',
+      error_classification: classification,
+      error_message: providerError.message,
+      duration_ms: Date.now() - startedAt,
+    });
+    appendRunEvent(args.log, args.runEventsRepo, {
+      run_id: args.runId,
+      conversation_id: args.conversationId,
+      message_id: null,
+      kind: 'quick_compare.participant_failed',
+      status: 'failed',
+      label: `对比候选 ${args.index + 1} 失败`,
+      summary: classification,
+      payload: {
+        compare_id: args.compareId,
+        output_id: args.outputId,
+        participant_index: args.index,
+        model_id: args.model.id,
+        classification,
+        duration_ms: Date.now() - startedAt,
+      },
+    });
+    writeAnnotation(args.stream, [{
+      type: 'qc.participant_failed',
+      output_id: args.outputId,
+      index: args.index,
+      model_id: args.model.id,
+      classification,
+      message: providerError.message,
+    }]);
+    return { outputId: args.outputId, ok: false };
+  }
+}
+
+export function registerQuickCompareRoute(app: FastifyInstance, deps: BuildServerArgs): void {
+  const convRepo = new ConversationsRepo(deps.db);
+  const msgRepo = new MessagesRepo(deps.db);
+  const modelsRepo = new ModelsRepo(deps.db);
+  const providersRepo = new ProvidersRepo(deps.db);
+  const memoriesRepo = new MemoriesRepo(deps.db);
+  const personasRepo = new PersonasRepo(deps.db);
+  const costsRepo = new CostsRepo(deps.db);
+  const runEventsRepo = new RunEventsRepo(deps.db);
+  const qcRepo = new QuickCompareRepo(deps.db);
+
+  app.post('/v1/quick-compare', async (req, reply) => {
+    const parsed = QuickCompareRequestSchema.safeParse(req.body);
+    if (!parsed.success) {
+      throw validationError(parsed.error.issues.map((issue) => issue.message).join('; '));
+    }
+    const body = parsed.data;
+    const conversation = convRepo.ensure(body.conversation_id);
+    const userMessage = [...body.messages].reverse().find((message) => message.role === 'user');
+    if (!userMessage) throw validationError('Quick Compare 需要至少一条用户消息。');
+    const sourceUserMessage = msgRepo.insert({
+      conversation_id: conversation.id,
+      role: 'user',
+      content: userMessage.content,
+      status: 'complete',
+      attachments: body.attachments && body.attachments.length > 0
+        ? JSON.stringify(body.attachments)
+        : null,
+    });
+    const selected = pickQuickCompareModels({
+      models: modelsRepo.list(),
+      currentModelId: body.model_ids?.[0] ?? null,
+      requestedModelIds: body.model_ids,
+    });
+    const selectedModels = selected.map((item) => item.model);
+    const estimatedCostUsd = estimateCompareCostUsd(
+      selectedModels,
+      body.messages.map((message) => message.content).join('\n\n'),
+    );
+    throwIfBudgetBlockedOrNeedsConfirmation({
+      confirmed: body.confirmed_cost === true,
+      conversationId: conversation.id,
+      model: selectedModels[0]!,
+      inputText: body.messages.map((message) => message.content).join('\n\n'),
+      estimatedCostUsd,
+      costsRepo,
+      memoriesRepo,
+      defaultThresholdUsd: 0.20,
+    });
+
+    const personaPrompt = body.persona_id
+      ? personasRepo.get(body.persona_id)?.prompt ?? null
+      : null;
+    if (body.persona_id && !personaPrompt) {
+      throw new TaoriError({
+        code: 'not_found',
+        message: `Persona ${body.persona_id} not found`,
+      });
+    }
+
+    const runId = makeId('run');
+    const compare = qcRepo.createRun({
+      conversation_id: conversation.id,
+      source_user_message_id: sourceUserMessage.id,
+      run_id: runId,
+      model_ids: selectedModels.map((model) => model.id),
+    });
+    const outputs = selectedModels.map((model, index) =>
+      qcRepo.createOutput({
+        compare_id: compare.id,
+        participant_index: index,
+        model_id: model.id,
+        provider_id: model.provider_id,
+      }),
+    );
+    appendRunEvent(req.log, runEventsRepo, {
+      run_id: runId,
+      conversation_id: conversation.id,
+      message_id: sourceUserMessage.id,
+      kind: 'turn.started',
+      status: 'started',
+      label: 'Quick Compare 开始',
+      summary: userMessage.content.slice(0, 120),
+      payload: {
+        run_kind: 'quick_compare',
+        compare_id: compare.id,
+        source_user_message_id: sourceUserMessage.id,
+        model_ids: selectedModels.map((model) => model.id),
+        candidate_roles: selected.map((item) => item.role),
+      },
+    });
+    appendRunEvent(req.log, runEventsRepo, {
+      run_id: runId,
+      conversation_id: conversation.id,
+      message_id: sourceUserMessage.id,
+      kind: 'quick_compare.started',
+      status: 'started',
+      label: '三模型快速对比',
+      summary: selected.map((item) => item.model.display_name).join(' / '),
+      payload: {
+        compare_id: compare.id,
+        output_ids: outputs.map((output) => output.id),
+        model_ids: selectedModels.map((model) => model.id),
+        reasons: selected.map((item) => item.reason),
+        estimated_cost_usd: estimatedCostUsd,
+      },
+    });
+
+    const dataStream = openDataStream(req.headers.origin, reply);
+    writeAnnotation(dataStream.stream, [{
+      type: 'qc.meta',
+      compare_id: compare.id,
+      conversation_id: conversation.id,
+      run_id: runId,
+      model_ids: selectedModels.map((model) => model.id),
+    }]);
+
+    const messages = buildCompareMessages({
+      requestMessages: body.messages,
+      personaPrompt,
+      attachments: body.attachments,
+    });
+
+    void (async () => {
+      const providers = selectedModels.map((model) =>
+        model.provider_id ? providersRepo.get(model.provider_id) : null,
+      );
+      const apiKeys = await Promise.all(providers.map(async (provider) => {
+        if (!provider) return null;
+        if (provider.type === 'ollama') return 'ollama-local';
+        if (!provider.api_key_ref) return null;
+        try {
+          return await deps.keystore.read(provider.api_key_ref);
+        } catch (e) {
+          req.log.warn({ err: e, provider_id: provider.id }, 'quick_compare.keystore_read_failed');
+          return null;
+        }
+      }));
+      const results = await Promise.all(outputs.map((output, index) =>
+        runCompareParticipant({
+          stream: dataStream.stream,
+          signal: dataStream.abortController.signal,
+          compareId: compare.id,
+          conversationId: conversation.id,
+          runId,
+          outputId: output.id,
+          index,
+          model: selectedModels[index]!,
+          provider: providers[index] ?? null,
+          apiKey: apiKeys[index] ?? null,
+          messages,
+          qcRepo,
+          costsRepo,
+          modelsRepo,
+          runEventsRepo,
+          log: req.log,
+        }),
+      ));
+      const completed = results.filter((result) => result.ok).map((result) => result.outputId);
+      const failed = results.filter((result) => !result.ok).map((result) => result.outputId);
+      const status = completed.length === outputs.length
+        ? 'completed'
+        : completed.length > 0
+          ? 'partial_failed'
+          : 'failed';
+      qcRepo.updateRunStatus(compare.id, status);
+      appendRunEvent(req.log, runEventsRepo, {
+        run_id: runId,
+        conversation_id: conversation.id,
+        message_id: sourceUserMessage.id,
+        kind: 'quick_compare.completed',
+        status: status === 'failed' ? 'failed' : 'completed',
+        label: 'Quick Compare 完成',
+        summary: `${completed.length} 个完成，${failed.length} 个失败`,
+        payload: {
+          compare_id: compare.id,
+          completed_output_ids: completed,
+          failed_output_ids: failed,
+        },
+      });
+      appendRunEvent(req.log, runEventsRepo, {
+        run_id: runId,
+        conversation_id: conversation.id,
+        message_id: sourceUserMessage.id,
+        kind: status === 'failed' ? 'turn.failed' : 'turn.completed',
+        status: status === 'failed' ? 'failed' : 'completed',
+        label: status === 'failed' ? 'Quick Compare 失败' : 'Quick Compare 完成',
+        summary: `${completed.length} 个候选完成`,
+        payload: { compare_id: compare.id },
+      });
+      writeAnnotation(dataStream.stream, [{
+        type: 'qc.done',
+        compare_id: compare.id,
+        completed_output_ids: completed,
+        failed_output_ids: failed,
+      }]);
+      dataStream.stream.end();
+    })().catch((e) => {
+      req.log.error({ err: e }, 'quick_compare.unhandled');
+      qcRepo.updateRunStatus(compare.id, 'failed');
+      if (!dataStream.stream.writableEnded) dataStream.stream.end();
+    });
+  });
+
+  app.get('/v1/quick-compare/:id', async (req) => {
+    const params = req.params as { id: string };
+    const compare = qcRepo.getRun(params.id);
+    if (!compare) {
+      throw new TaoriError({ code: 'not_found', message: 'Quick Compare not found' });
+    }
+    return {
+      ok: true,
+      data: {
+        compare,
+        outputs: qcRepo.listOutputs(compare.id),
+      },
+    };
+  });
+
+  app.post('/v1/quick-compare/:id/outputs/:outputId/adopt', async (req) => {
+    const params = req.params as { id: string; outputId: string };
+    const parsed = QuickCompareAdoptRequestSchema.safeParse(req.body ?? {});
+    if (!parsed.success) {
+      throw validationError(parsed.error.issues.map((issue) => issue.message).join('; '));
+    }
+    const compare = qcRepo.getRun(params.id);
+    const output = qcRepo.getOutput(params.outputId);
+    if (!compare || !output || output.compare_id !== compare.id) {
+      throw new TaoriError({ code: 'not_found', message: 'Quick Compare output not found' });
+    }
+    if (output.status !== 'complete' || !output.content.trim()) {
+      throw validationError('只能采纳已完成且有内容的候选回答。');
+    }
+    const assistant = parsed.data.replace_message_id
+      ? (() => {
+          const existing = msgRepo.get(parsed.data.replace_message_id!);
+          if (!existing || existing.conversation_id !== compare.conversation_id || existing.role !== 'assistant') {
+            throw validationError('replace_message_id 不是当前会话中的 assistant 消息。');
+          }
+          msgRepo.finalize(existing.id, { content: output.content, status: 'complete' });
+          return msgRepo.get(existing.id)!;
+        })()
+      : msgRepo.insert({
+          conversation_id: compare.conversation_id,
+          role: 'assistant',
+          content: output.content,
+          model_id: output.model_id,
+          parent_message_id: compare.source_user_message_id,
+          status: 'complete',
+        });
+    qcRepo.markAdopted(compare.id, output.id);
+    appendRunEvent(req.log, runEventsRepo, {
+      run_id: compare.run_id,
+      conversation_id: compare.conversation_id,
+      message_id: assistant.id,
+      kind: 'quick_compare.adopted',
+      status: 'completed',
+      label: '采纳 Quick Compare 候选',
+      summary: output.content.slice(0, 120),
+      payload: {
+        compare_id: compare.id,
+        output_id: output.id,
+        assistant_message_id: assistant.id,
+        model_id: output.model_id,
+      },
+    });
+    convRepo.touch(compare.conversation_id);
+    return {
+      ok: true,
+      data: {
+        compare_id: compare.id,
+        output_id: output.id,
+        conversation_id: compare.conversation_id,
+        assistant_message_id: assistant.id,
+      },
+    };
+  });
+
+  app.post('/v1/quick-compare/:id/retry', async (req, reply) => {
+    const params = req.params as { id: string };
+    const parsed = QuickCompareRetryRequestSchema.safeParse(req.body ?? {});
+    if (!parsed.success) {
+      throw validationError(parsed.error.issues.map((issue) => issue.message).join('; '));
+    }
+    const compare = qcRepo.getRun(params.id);
+    if (!compare) {
+      throw new TaoriError({ code: 'not_found', message: 'Quick Compare not found' });
+    }
+    const outputs = qcRepo.listOutputs(compare.id);
+    const target = parsed.data.output_id
+      ? outputs.find((output) => output.id === parsed.data.output_id)
+      : outputs.find((output) => output.status === 'failed') ?? outputs[0];
+    if (!target) throw validationError('没有可重试的候选输出。');
+    if (parsed.data.model_id && parsed.data.model_id !== target.model_id) {
+      throw validationError('当前版本仅支持使用原模型重试该候选。');
+    }
+    const model = modelsRepo.get(target.model_id);
+    if (!model) throw new TaoriError({ code: 'not_found', message: '模型不存在，无法重试。' });
+    const source = compare.source_user_message_id ? msgRepo.get(compare.source_user_message_id) : null;
+    const prompt = source?.content ?? '请重新生成这个候选回答。';
+    const estimatedCostUsd = estimateCompareCostUsd([model], prompt);
+    throwIfBudgetBlockedOrNeedsConfirmation({
+      confirmed: parsed.data.confirmed_cost === true,
+      conversationId: compare.conversation_id,
+      model,
+      inputText: prompt,
+      estimatedCostUsd,
+      costsRepo,
+      memoriesRepo,
+      defaultThresholdUsd: 0.20,
+    });
+    qcRepo.patchOutput(target.id, {
+      content: '',
+      status: 'pending',
+      error_classification: null,
+      error_message: null,
+      cost_record_id: null,
+      first_token_ms: null,
+      duration_ms: null,
+    });
+    qcRepo.updateRunStatus(compare.id, 'running');
+    const dataStream = openDataStream(req.headers.origin, reply);
+    writeAnnotation(dataStream.stream, [{
+      type: 'qc.meta',
+      compare_id: compare.id,
+      conversation_id: compare.conversation_id,
+      run_id: compare.run_id,
+      model_ids: compare.model_ids,
+    }]);
+    const provider = model.provider_id ? providersRepo.get(model.provider_id) : null;
+    let apiKey: string | null = null;
+    if (provider?.type === 'ollama') {
+      apiKey = 'ollama-local';
+    } else if (provider?.api_key_ref) {
+      try {
+        apiKey = await deps.keystore.read(provider.api_key_ref);
+      } catch (e) {
+        req.log.warn({ err: e, provider_id: provider.id }, 'quick_compare.retry_keystore_read_failed');
+      }
+    }
+    void (async () => {
+      const result = await runCompareParticipant({
+        stream: dataStream.stream,
+        signal: dataStream.abortController.signal,
+        compareId: compare.id,
+        conversationId: compare.conversation_id,
+        runId: compare.run_id,
+        outputId: target.id,
+        index: target.participant_index,
+        model,
+        provider,
+        apiKey,
+        messages: [{ role: 'user', content: prompt }],
+        qcRepo,
+        costsRepo,
+        modelsRepo,
+        runEventsRepo,
+        log: req.log,
+      });
+      const nextOutputs = qcRepo.listOutputs(compare.id);
+      const completed = nextOutputs.filter((output) => output.status === 'complete').map((output) => output.id);
+      const failed = nextOutputs.filter((output) => output.status === 'failed').map((output) => output.id);
+      qcRepo.updateRunStatus(
+        compare.id,
+        completed.length === nextOutputs.length
+          ? 'completed'
+          : completed.length > 0
+            ? 'partial_failed'
+            : result.ok
+              ? 'completed'
+              : 'failed',
+      );
+      writeAnnotation(dataStream.stream, [{
+        type: 'qc.done',
+        compare_id: compare.id,
+        completed_output_ids: completed,
+        failed_output_ids: failed,
+      }]);
+      dataStream.stream.end();
+    })().catch((e) => {
+      req.log.error({ err: e }, 'quick_compare.retry_unhandled');
+      if (!dataStream.stream.writableEnded) dataStream.stream.end();
+    });
+  });
+}

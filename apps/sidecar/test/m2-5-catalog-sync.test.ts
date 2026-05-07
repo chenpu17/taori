@@ -66,11 +66,18 @@ describe('catalog sync (M2.5 F-PR)', () => {
   });
 
   function mockOpenRouterListing(
-    models: Array<{ id: string; name?: string; pricing?: { prompt?: string; completion?: string } }>,
+    models: Array<{ id: string; name?: string; pricing?: { prompt?: string; completion?: string; image?: string } }>,
   ): void {
     fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
       const url = typeof input === 'string' ? input : (input as Request).url;
+      if (url.includes('/key')) {
+        return new Response(JSON.stringify({ data: { label: 'test key' } }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        });
+      }
       if (url.includes('/models')) {
+        expect(url).toContain('output_modalities=all');
         return new Response(JSON.stringify({ data: models }), {
           status: 200,
           headers: { 'content-type': 'application/json' },
@@ -335,7 +342,14 @@ describe('catalog sync (M2.5 F-PR)', () => {
       if (auth.includes('bad-key')) {
         return new Response(JSON.stringify({ error: 'unauthorized' }), { status: 401 });
       }
+      if (url.includes('/key')) {
+        return new Response(JSON.stringify({ data: { label: 'test key' } }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        });
+      }
       if (url.includes('/models')) {
+        expect(url).toContain('output_modalities=all');
         return new Response(
           JSON.stringify({ data: [{ id: 'good/model', name: 'Good', pricing: { prompt: '0', completion: '0' } }] }),
           { status: 200, headers: { 'content-type': 'application/json' } },

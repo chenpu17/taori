@@ -219,6 +219,52 @@ test('M2.4 model selectors distinguish same model names by provider', async ({ p
   await expect(imageOptions.filter({ hasText: 'DALL-E 3 · Huawei MaaS' })).toHaveCount(1);
 });
 
+test('M2.4 preflight image model selector controls the picker default', async ({ page }) => {
+  const pr = await authedFetch(env, '/v1/providers', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      name: 'PackyAPI',
+      type: 'packyapi',
+      base_url: 'https://www.packyapi.com/v1',
+      api_key: 'sk-packy-test',
+    }),
+  });
+  const provider = (await pr.json()) as { id: string };
+  const im = await authedFetch(env, '/v1/models', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      provider_id: provider.id,
+      model_name: 'gpt-image-2',
+      capability: 'image',
+      display_name: 'GPT Image 2',
+      price_per_call: 0.01,
+    }),
+  });
+  const cheaperImageModelId = ((await im.json()) as { id: string }).id;
+
+  await page.goto('/');
+  await expect(page.getByTestId('chat-panel')).toBeVisible({ timeout: 10_000 });
+
+  const imageSelect = page.getByTestId('preflight-image-model-select');
+  await expect(imageSelect).toBeVisible({ timeout: 10_000 });
+  await expect(imageSelect).toHaveValue(cheaperImageModelId);
+
+  await imageSelect.selectOption(imageModelId);
+  await expect(page.getByTestId('preflight-image-model-scope')).toContainText('全局');
+
+  const memory = await authedFetch(env, '/v1/memories?scope=global&key=image_model_default');
+  expect(((await memory.json()) as { data: { value: string | null } }).data.value).toBe(imageModelId);
+
+  await page.getByTestId('composer-input').fill('/image a robot');
+  await page.getByTestId('composer-send').click();
+
+  const dialog = page.getByTestId('image-picker-dialog');
+  await expect(dialog).toBeVisible({ timeout: 10_000 });
+  await expect(dialog.getByTestId(`image-model-radio-${imageModelId}`)).toBeChecked();
+});
+
 test('M2.4 natural-language image request opens picker for non-tool chat model', async ({ page }) => {
   await page.goto('/');
   await expect(page.getByTestId('chat-panel')).toBeVisible({ timeout: 10_000 });

@@ -61,6 +61,6 @@ export function loadConfig(): SidecarConfig {
     controlUrl,
     controlBearer,
     isDev,
-    version: process.env.npm_package_version ?? '0.0.0',
+    version: process.env.npm_package_version ?? '0.0.1',
   };
 }

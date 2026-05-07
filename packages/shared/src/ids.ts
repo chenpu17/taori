@@ -12,8 +12,11 @@ export const ID_PREFIXES = {
   conversation: 'conv_',
   message: 'msg_',
   file: 'file_',
+  file_chunk: 'fchk_',
   roundtable: 'rt_',
   roundtable_message: 'rtmsg_',
+  quick_compare: 'qc_',
+  quick_compare_output: 'qcout_',
   cost: 'cost_',
   run: 'run_',
   run_event: 'runev_',
@@ -21,6 +24,7 @@ export const ID_PREFIXES = {
   mcp_server: 'mcp_',
   prompt_template: 'ptpl_',
   persona: 'per_',
+  workflow_recipe: 'wfr_',
 } as const;
 
 export type IdPrefixKey = keyof typeof ID_PREFIXES;

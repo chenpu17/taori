@@ -39,7 +39,7 @@ test('key-status API: returns key_available=false for new providers without seed
   expect(entry!.key_available).toBe(false);
 });
 
-test('model-center: shows 🔑 badge on provider missing key', async ({ page }) => {
+test('model-center: checks key status explicitly and opens re-entry flow', async ({ page }) => {
   const env = readSidecarEnv();
   await resetSidecar(env);
 
@@ -96,10 +96,24 @@ test('model-center: shows 🔑 badge on provider missing key', async ({ page }) 
   await page.getByTestId('open-model-center').click();
   await expect(page.getByTestId('model-center')).toBeVisible();
 
-  // The provider chip should have the 🔑 warning badge
-  const warnBadge = page.getByTestId(`provider-chip-key-warn-${providerId}`);
-  await expect(warnBadge).toBeVisible();
-  await expect(warnBadge).toContainText('🔑');
+  // Opening Model Center should not read Keychain automatically. The neutral
+  // saved-reference badge is visible until the user explicitly checks status.
+  await expect(page.getByTestId(`provider-chip-key-warn-${providerId}`)).toBeVisible();
+  await expect(page.getByTestId(`provider-chip-key-missing-${providerId}`)).toHaveCount(0);
+
+  await page.getByTestId('provider-key-status-check').click();
+  await expect(page.getByTestId('provider-key-status-summary')).toContainText('缺失 1 项');
+
+  const missingBadge = page.getByTestId(`provider-chip-key-missing-${providerId}`);
+  await expect(missingBadge).toBeVisible();
+  await expect(missingBadge).toContainText('Key 缺失');
+  await missingBadge.click();
+  await expect(page.getByTestId('provider-editor')).toBeVisible();
+  await expect(page.getByTestId('provider-editor')).toContainText('重新填写 Provider Key');
+  await expect(page.getByTestId('provider-editor-api-key')).toHaveAttribute(
+    'placeholder',
+    'Key 缺失，请输入新 Key',
+  );
 });
 
 test('key-status API: key_available=true after key is set, false after revoke', async () => {

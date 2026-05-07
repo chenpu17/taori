@@ -108,6 +108,7 @@ async function seedModel(
     price_input_per_1m?: number;
     price_output_per_1m?: number;
     price_per_call?: number;
+    context_length?: number;
   },
 ): Promise<string> {
   const res = await authedFetch(env, '/v1/models', {
@@ -135,6 +136,7 @@ async function seedStack(): Promise<{
     display_name: 'RT Fast Chat',
     capability: 'chat',
     is_default_for: 'chat',
+    context_length: 900,
     price_input_per_1m: 0.1,
     price_output_per_1m: 0.2,
   });
@@ -269,6 +271,7 @@ test('research work thread shows search, fetch, image and model-switch events in
   await expectRunEvent(page, 'tool.completed', '抓取网页');
   await expectRunEvent(page, 'tool.completed', '生成图片');
   await expectRunEvent(page, 'cost.recorded', '成本记录');
+  await expect(page.locator('[data-testid="run-event"][data-kind="cost.recorded"]').first()).toContainText('Cost');
   await expectRunEvent(page, 'turn.completed', '用户回合完成');
   await expectRunTimelineLayout(page);
   await attachTimelineScreenshot(page, testInfo, 'run-timeline-research-thread.png');
@@ -303,7 +306,7 @@ test('session tool policy is isolated between conversations and visible in Run T
   await openTimeline(page);
   const topA = page.getByTestId('run-group').first();
   await expect(topA.locator('[data-testid="run-event"][data-kind="context.snapshot"]')).toContainText('上下文快照');
-  await expect(topA.locator('[data-testid="run-event"][data-kind="context.snapshot"]')).toContainText('2 个工具可见');
+  await expect(topA.locator('[data-testid="run-event"][data-kind="context.snapshot"]')).toContainText('3 个工具可见');
   await expect(topA.locator('[data-testid="run-event"][data-kind="tool.started"]')).toHaveCount(0);
   await expect(topA.locator('[data-testid="run-event"][data-kind="tool.completed"]')).toHaveCount(0);
   await page.getByTestId('run-timeline-close').click();
@@ -327,6 +330,52 @@ test('session tool policy is isolated between conversations and visible in Run T
   await expect(page.getByTestId('session-tool-policy-builtin.web_fetch')).toContainText('抓网页 关', {
     timeout: 10_000,
   });
+});
+
+test('roundtable discussion writes analyzer and participant events into Run Timeline', async ({
+  page,
+}, testInfo) => {
+  test.setTimeout(180_000);
+  await seedStack();
+  await suppressTips(page);
+
+  await page.goto('/');
+  await expect(page.getByTestId('chat-panel')).toBeVisible({ timeout: 10_000 });
+
+  await page.getByTestId('composer-roundtable').click();
+  const dialog = page.getByTestId('roundtable-launch-dialog');
+  await dialog.getByTestId('roundtable-mode-select').selectOption('deep');
+  await dialog.getByTestId('roundtable-topic-input').fill('是否应该把圆桌运行过程纳入 Timeline');
+  await dialog.getByTestId('roundtable-launch-start').click();
+  await expect(dialog.getByTestId('roundtable-preview')).toBeVisible({ timeout: 30_000 });
+  await dialog.getByTestId('roundtable-launch-continue').click();
+
+  const panel = page.getByTestId('roundtable-panel');
+  await expect(panel).toBeVisible({ timeout: 10_000 });
+  await panel.getByTestId('roundtable-action-start-round').click();
+  await expect(panel.getByTestId('roundtable-cell-0-1')).toHaveClass(
+    /roundtable-cell-complete/,
+    { timeout: 45_000 },
+  );
+
+  await openTimeline(page);
+  await expect(page.getByTestId('run-group')).toHaveCount(2);
+  await expectRunEvent(page, 'turn.started', '圆桌分析');
+  await expectRunEvent(page, 'turn.completed', '圆桌分析完成');
+  await expectTopRunEvent(page, 'turn.started', '圆桌第 1 轮');
+  await expectTopRunEvent(page, 'model.started');
+  await expectTopRunEvent(page, 'model.completed');
+  await expectTopRunEvent(page, 'cost.recorded', '参与者成本');
+  await expect(
+    page.getByTestId('run-timeline-panel')
+      .getByTestId('run-group')
+      .first()
+      .locator('[data-testid="run-event"][data-kind="cost.recorded"]')
+      .first(),
+  ).toContainText('Cost');
+  await expectTopRunEvent(page, 'turn.completed', '圆桌第 1 轮完成');
+  await expectRunTimelineLayout(page);
+  await attachTimelineScreenshot(page, testInfo, 'run-timeline-roundtable.png');
 });
 
 test('failure and user-stop journeys are observable from the Run Timeline panel', async ({
@@ -406,7 +455,7 @@ test('long multi-turn conversation keeps Run Timeline readable and persisted aft
   await page.getByTestId('active-model').selectOption(fastId);
 
   for (let i = 1; i <= 8; i++) {
-    await sendAndWait(page, `第 ${i} 轮：继续完善同一个发布复盘任务，保留上下文`);
+    await sendAndWait(page, `第 ${i} 轮：继续完善同一个发布复盘任务，保留上下文。${'长上下文材料'.repeat(80)}`);
   }
   const convId = await page.getByTestId('chat-panel').getAttribute('data-active-conv');
   expect(convId).toBeTruthy();
@@ -417,6 +466,9 @@ test('long multi-turn conversation keeps Run Timeline readable and persisted aft
     .poll(async () => await page.getByTestId('run-event').count(), { timeout: 15_000 })
     .toBeGreaterThanOrEqual(40);
   await expectRunEvent(page, 'context.snapshot', '上下文快照');
+  await expectRunEvent(page, 'context.snapshot', '滑动窗口');
+  await expect(page.getByTestId('context-window-detail').filter({ hasText: '裁剪' }).first()).toBeVisible();
+  await expect(page.getByTestId('context-window-detail').filter({ hasText: /[1-9]\d* 条/ }).first()).toBeVisible();
   await expectRunEvent(page, 'cost.recorded', '成本记录');
   await expectRunTimelineLayout(page);
   await attachTimelineScreenshot(page, testInfo, 'run-timeline-long-thread-before-reload.png');

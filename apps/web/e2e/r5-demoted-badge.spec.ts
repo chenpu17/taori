@@ -78,5 +78,5 @@ test('R5 demoted model carries ⚠️ in selector and settings list', async ({ p
 
   // Model Center also shows the demoted badge.
   await page.getByTestId('open-model-center').click();
-  await expect(page.locator('[data-testid^="model-row-demoted-"]').first()).toBeVisible({ timeout: 5_000 });
+  await expect(page.locator('[data-testid^="model-demoted-"]').first()).toBeVisible({ timeout: 5_000 });
 });

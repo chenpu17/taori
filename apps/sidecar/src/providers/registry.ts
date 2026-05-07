@@ -15,6 +15,7 @@ import {
   type ProviderType,
   type DiscoveredModel,
   type ErrorClassification,
+  isChatCapable,
 } from '@taori/shared';
 import {
   testVolcengineArk,
@@ -24,6 +25,22 @@ import {
   testHuaweiMaas,
   listHuaweiMaasModels,
 } from './huawei_maas.js';
+import {
+  testPackyApi,
+  listPackyApiModels,
+} from './packyapi.js';
+import {
+  testSiliconFlow,
+  listSiliconFlowModels,
+} from './siliconflow.js';
+import {
+  testDeepSeek,
+  listDeepSeekModels,
+} from './deepseek.js';
+import {
+  testOllama,
+  listOllamaModels,
+} from './ollama.js';
 
 export interface ProviderTestResult {
   ok: boolean;
@@ -228,8 +245,16 @@ interface OpenRouterListItem {
   id: string;
   name?: string;
   context_length?: number;
-  pricing?: { prompt?: string; completion?: string };
+  pricing?: { prompt?: string; completion?: string; image?: string };
   architecture?: { modality?: string; input_modalities?: string[]; output_modalities?: string[] };
+}
+
+function openRouterUrl(baseUrl: string, path: string, query?: Record<string, string>): string {
+  const url = new URL(`${baseUrl.replace(/\/+$/, '')}${path}`);
+  for (const [key, value] of Object.entries(query ?? {})) {
+    url.searchParams.set(key, value);
+  }
+  return url.toString();
 }
 
 function openRouterPriceToPer1m(raw: string | undefined): number | null {
@@ -237,6 +262,12 @@ function openRouterPriceToPer1m(raw: string | undefined): number | null {
   const n = Number(raw);
   if (!Number.isFinite(n) || n < 0) return null;
   return n * 1_000_000;
+}
+
+function openRouterPriceToUnit(raw: string | undefined): number | null {
+  if (raw == null) return null;
+  const n = Number(raw);
+  return Number.isFinite(n) && n >= 0 ? n : null;
 }
 
 function openRouterToDiscovered(item: OpenRouterListItem): DiscoveredModel {
@@ -271,13 +302,25 @@ function openRouterToDiscovered(item: OpenRouterListItem): DiscoveredModel {
     capability,
     price_input_per_1m: openRouterPriceToPer1m(item.pricing?.prompt),
     price_output_per_1m: openRouterPriceToPer1m(item.pricing?.completion),
-    price_per_image: null,
+    price_per_image: openRouterPriceToUnit(item.pricing?.image),
     price_per_video_second: null,
     modalities,
     context_length: item.context_length ?? null,
     supports_vision: supportsVision,
-    supports_tools: false,
+    supports_tools: isChatCapable(capability),
   };
+}
+
+async function assertOpenRouterKey(
+  baseUrl: string,
+  apiKey: string,
+): Promise<ProviderTestResult | null> {
+  const res = await timedFetch(openRouterUrl(baseUrl, '/key'), {
+    method: 'GET',
+    headers: { Authorization: `Bearer ${apiKey}` },
+  });
+  if (res.ok) return null;
+  return { ok: false, ...classifyProviderError({ status: res.status }) };
 }
 
 async function testOpenRouter(
@@ -285,7 +328,9 @@ async function testOpenRouter(
   apiKey: string,
 ): Promise<ProviderTestResult> {
   try {
-    const res = await timedFetch(`${baseUrl.replace(/\/$/, '')}/models`, {
+    const keyError = await assertOpenRouterKey(baseUrl, apiKey);
+    if (keyError) return keyError;
+    const res = await timedFetch(openRouterUrl(baseUrl, '/models', { output_modalities: 'all' }), {
       method: 'GET',
       headers: { Authorization: `Bearer ${apiKey}` },
     });
@@ -303,7 +348,11 @@ async function listOpenRouterModels(
   baseUrl: string,
   apiKey: string,
 ): Promise<DiscoveredModel[]> {
-  const res = await timedFetch(`${baseUrl.replace(/\/$/, '')}/models`, {
+  const keyError = await assertOpenRouterKey(baseUrl, apiKey);
+  if (keyError) {
+    throw new Error(keyError.message ?? 'OpenRouter API key validation failed');
+  }
+  const res = await timedFetch(openRouterUrl(baseUrl, '/models', { output_modalities: 'all' }), {
     method: 'GET',
     headers: { Authorization: `Bearer ${apiKey}` },
   });
@@ -439,7 +488,7 @@ function inferOpenAICompatibleModel(item: OpenAIListItem): DiscoveredModel {
     modalities,
     context_length: item.context_length ?? null,
     supports_vision: supportsVision,
-    supports_tools: capability === 'chat' || capability === 'multimodal',
+    supports_tools: isChatCapable(capability),
   };
 }
 
@@ -476,6 +525,8 @@ export function pickRecommendations(models: DiscoveredModel[]): {
   const preferChat = [
     'openai/gpt-4o-mini',
     'gpt-4o-mini',
+    'deepseek-v4-flash',
+    'deepseek-v4-pro',
     'deepseek-v3.2',
     'DeepSeek-V3',
     'Kimi-K2',
@@ -507,8 +558,18 @@ export function pickRecommendations(models: DiscoveredModel[]): {
 export async function testProvider(args: {
   type: ProviderType;
   base_url: string;
-  api_key: string;
+  api_key?: string;
 }): Promise<ProviderTestResult> {
+  if (args.type === 'ollama') {
+    return testOllama(args.base_url);
+  }
+  if (!args.api_key) {
+    return {
+      ok: false,
+      classification: 'key_missing',
+      message: 'API key is not configured',
+    };
+  }
   switch (args.type) {
     case 'openrouter':
       return testOpenRouter(args.base_url, args.api_key);
@@ -518,6 +579,12 @@ export async function testProvider(args: {
       return testVolcengineArk(args.base_url, args.api_key);
     case 'huawei_maas':
       return testHuaweiMaas(args.base_url, args.api_key);
+    case 'deepseek':
+      return testDeepSeek(args.base_url, args.api_key);
+    case 'packyapi':
+      return testPackyApi(args.base_url, args.api_key);
+    case 'siliconflow':
+      return testSiliconFlow(args.base_url, args.api_key);
     default:
       return testOpenAI(args.base_url, args.api_key);
   }
@@ -526,8 +593,14 @@ export async function testProvider(args: {
 export async function listProviderModels(args: {
   type: ProviderType;
   base_url: string;
-  api_key: string;
+  api_key?: string;
 }): Promise<DiscoveredModel[]> {
+  if (args.type === 'ollama') {
+    return listOllamaModels(args.base_url);
+  }
+  if (!args.api_key) {
+    throw new Error('API key is not configured');
+  }
   switch (args.type) {
     case 'openrouter':
       return listOpenRouterModels(args.base_url, args.api_key);
@@ -537,6 +610,12 @@ export async function listProviderModels(args: {
       return listVolcengineArkModels(args.base_url, args.api_key);
     case 'huawei_maas':
       return listHuaweiMaasModels(args.base_url, args.api_key);
+    case 'deepseek':
+      return listDeepSeekModels(args.base_url, args.api_key);
+    case 'packyapi':
+      return listPackyApiModels(args.base_url, args.api_key);
+    case 'siliconflow':
+      return listSiliconFlowModels(args.base_url, args.api_key);
     case 'custom':
       return listOpenAICompatibleModels(args.base_url, args.api_key);
     default:

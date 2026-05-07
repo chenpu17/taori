@@ -68,6 +68,42 @@ export function estimateRoundtableCostRange(args: RoundtableEstimateArgs): {
   return { low, high: low * 1.6 };
 }
 
+export function estimateRoundtableAnalyzerCostUsd(model: Model | null): number {
+  if (!model) return 0;
+  return safeCost({
+    inputTokens: ANALYZER_INPUT_TOKENS,
+    outputTokens: ANALYZER_OUTPUT_TOKENS,
+    priceInputPer1m: model.price_input_per_1m,
+    priceOutputPer1m: model.price_output_per_1m,
+    pricePerCall: model.price_per_call,
+  });
+}
+
+export function estimateRoundtableParticipantRoundCostUsd(models: Model[]): number {
+  return models.reduce(
+    (sum, model) =>
+      sum +
+      safeCost({
+        inputTokens: PARTICIPANT_INPUT_TOKENS,
+        outputTokens: PARTICIPANT_OUTPUT_TOKENS,
+        priceInputPer1m: model.price_input_per_1m,
+        priceOutputPer1m: model.price_output_per_1m,
+        pricePerCall: model.price_per_call,
+      }),
+    0,
+  );
+}
+
+export function estimateRoundtableSummaryCostUsd(model: Model): number {
+  return safeCost({
+    inputTokens: SUMMARIZER_INPUT_TOKENS,
+    outputTokens: SUMMARIZER_OUTPUT_TOKENS,
+    priceInputPer1m: model.price_input_per_1m,
+    priceOutputPer1m: model.price_output_per_1m,
+    pricePerCall: model.price_per_call,
+  });
+}
+
 /**
  * A5 — derive call count + wall-clock duration range for a mode.
  *

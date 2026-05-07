@@ -1,17 +1,16 @@
 /**
  * B3 — GET /v1/selfcheck
  *
- * Used by the in-app help-center "Run self-check" button. Reports four
+ * Used by the in-app help-center "Run self-check" button. Reports local
  * coarse diagnostics so a user (or support) can see at a glance whether
  * Taori's local plumbing is healthy:
  *
  *   - sidecar       : the process is running and version exposed
- *   - keystore      : we can write + read + delete a probe secret
  *   - database      : we can write + read + delete a probe memory key
  *   - default_model : at least one chat model is enabled (no upstream call)
  *
- * No real LLM calls are made (would cost money + leak Keys); for a "real
- * upstream probe" the user clicks 测试 on the model row in ModelCenter.
+ * Keychain probing is opt-in via ?include_keychain=1 because macOS may show a
+ * system authorization prompt whenever a dev binary reads or writes Keychain.
  */
 import type { FastifyInstance } from 'fastify';
 import type { BuildServerArgs } from '../server.js';
@@ -28,8 +27,11 @@ export function registerSelfCheckRoute(
   app: FastifyInstance,
   args: BuildServerArgs,
 ): void {
-  app.get('/v1/selfcheck', async () => {
+  app.get<{
+    Querystring: { include_keychain?: string };
+  }>('/v1/selfcheck', async (req) => {
     const checks: SelfCheckItem[] = [];
+    const includeKeychain = req.query.include_keychain === '1';
 
     // 1. Sidecar liveness — trivially true if we're handling this request.
     checks.push({
@@ -41,33 +43,43 @@ export function registerSelfCheckRoute(
       )}s`,
     });
 
-    // 2. Keystore round-trip (probe key, removed at end).
-    const probeKey = `__selfcheck_${Date.now()}_${Math.random()}`;
-    try {
-      await args.keystore.write(probeKey, 'taori-probe');
-      const v = await args.keystore.read(probeKey);
-      await args.keystore.delete(probeKey);
-      if (v === 'taori-probe') {
-        checks.push({
-          id: 'keystore',
-          ok: true,
-          level: 'ok',
-          detail: '密钥读写正常',
-        });
-      } else {
+    // 2. Keystore round-trip (probe key, removed at end). This is intentionally
+    // opt-in so the default self-check does not trigger macOS Keychain prompts.
+    if (includeKeychain) {
+      const probeKey = `__selfcheck_${Date.now()}_${Math.random()}`;
+      try {
+        await args.keystore.write(probeKey, 'taori-probe');
+        const v = await args.keystore.read(probeKey);
+        await args.keystore.delete(probeKey);
+        if (v === 'taori-probe') {
+          checks.push({
+            id: 'keystore',
+            ok: true,
+            level: 'ok',
+            detail: '密钥读写正常',
+          });
+        } else {
+          checks.push({
+            id: 'keystore',
+            ok: false,
+            level: 'error',
+            detail: `读取值不一致: ${String(v)}`,
+          });
+        }
+      } catch (e) {
         checks.push({
           id: 'keystore',
           ok: false,
           level: 'error',
-          detail: `读取值不一致: ${String(v)}`,
+          detail: e instanceof Error ? e.message : String(e),
         });
       }
-    } catch (e) {
+    } else {
       checks.push({
         id: 'keystore',
-        ok: false,
-        level: 'error',
-        detail: e instanceof Error ? e.message : String(e),
+        ok: true,
+        level: 'warn',
+        detail: '已跳过系统钥匙串深度检查，避免弹出系统授权提示',
       });
     }
 

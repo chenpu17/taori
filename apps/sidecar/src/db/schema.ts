@@ -149,6 +149,34 @@ export const files = sqliteTable(
   }),
 );
 
+export const file_chunks = sqliteTable(
+  'file_chunks',
+  {
+    id: text('id').primaryKey(),
+    file_id: text('file_id')
+      .notNull()
+      .references(() => files.id, { onDelete: 'cascade' }),
+    conversation_id: text('conversation_id').references(() => conversations.id, {
+      onDelete: 'cascade',
+    }),
+    message_id: text('message_id').references(() => messages.id, {
+      onDelete: 'set null',
+    }),
+    chunk_index: integer('chunk_index').notNull(),
+    content: text('content').notNull(),
+    token_count: integer('token_count'),
+    char_start: integer('char_start').notNull(),
+    char_end: integer('char_end').notNull(),
+    content_hash: text('content_hash').notNull(),
+    created_at: integer('created_at').notNull(),
+  },
+  (t) => ({
+    fileIndexUniq: uniqueIndex('file_chunks_file_index_uniq').on(t.file_id, t.chunk_index),
+    convFileIdx: index('file_chunks_conv_file_idx').on(t.conversation_id, t.file_id),
+    hashIdx: index('file_chunks_hash_idx').on(t.content_hash),
+  }),
+);
+
 /**
  * Three-tier preference KV store. M2 §5.2 codified the namespace:
  *   - scope='global'  scope_id=null     → app-wide preferences
@@ -176,6 +204,40 @@ export const memories = sqliteTable(
   }),
 );
 
+export const structured_memories = sqliteTable(
+  'structured_memories',
+  {
+    id: text('id').primaryKey(),
+    scope: text('scope').notNull(),
+    scope_id: text('scope_id'),
+    type: text('type').notNull(),
+    content: text('content').notNull(),
+    source_conversation_id: text('source_conversation_id').references(() => conversations.id, {
+      onDelete: 'set null',
+    }),
+    source_message_id: text('source_message_id').references(() => messages.id, {
+      onDelete: 'set null',
+    }),
+    enabled: integer('enabled', { mode: 'boolean' }).notNull().default(true),
+    deleted_at: integer('deleted_at'),
+    last_used_at: integer('last_used_at'),
+    created_at: integer('created_at').notNull(),
+    updated_at: integer('updated_at').notNull(),
+  },
+  (t) => ({
+    scopeIdx: index('structured_memories_scope_idx').on(
+      t.scope,
+      t.scope_id,
+      t.enabled,
+      t.updated_at,
+    ),
+    sourceIdx: index('structured_memories_source_idx').on(
+      t.source_conversation_id,
+      t.source_message_id,
+    ),
+  }),
+);
+
 export const prompt_templates = sqliteTable('prompt_templates', {
   id: text('id').primaryKey(),
   name: text('name').notNull(),
@@ -193,6 +255,23 @@ export const personas = sqliteTable('personas', {
   created_at: integer('created_at').notNull(),
   updated_at: integer('updated_at').notNull(),
 });
+
+export const workflow_recipes = sqliteTable(
+  'workflow_recipes',
+  {
+    id: text('id').primaryKey(),
+    name: text('name').notNull(),
+    description: text('description'),
+    schema_version: integer('schema_version').notNull().default(1),
+    spec_json: text('spec_json').notNull(),
+    enabled: integer('enabled', { mode: 'boolean' }).notNull().default(true),
+    created_at: integer('created_at').notNull(),
+    updated_at: integer('updated_at').notNull(),
+  },
+  (t) => ({
+    enabledIdx: index('workflow_recipes_enabled_idx').on(t.enabled, t.updated_at),
+  }),
+);
 
 export const cost_records = sqliteTable(
   'cost_records',
@@ -269,6 +348,31 @@ export const run_events = sqliteTable(
   }),
 );
 
+export const agent_runs = sqliteTable(
+  'agent_runs',
+  {
+    id: text('id').primaryKey(),
+    conversation_id: text('conversation_id').references(() => conversations.id, {
+      onDelete: 'cascade',
+    }),
+    parent_run_id: text('parent_run_id'),
+    kind: text('kind').notNull(),
+    status: text('status').notNull(),
+    model_id: text('model_id'),
+    user_message_id: text('user_message_id'),
+    assistant_message_id: text('assistant_message_id'),
+    recovery_policy: text('recovery_policy'),
+    event_count: integer('event_count').notNull().default(0),
+    created_at: integer('created_at').notNull(),
+    updated_at: integer('updated_at').notNull(),
+  },
+  (t) => ({
+    convIdx: index('agent_runs_conv_idx').on(t.conversation_id, t.updated_at),
+    parentIdx: index('agent_runs_parent_idx').on(t.parent_run_id),
+    statusIdx: index('agent_runs_status_idx').on(t.status, t.updated_at),
+  }),
+);
+
 /**
  * M3.A roundtable instance. participants/summary stored as JSON text columns
  * (Drizzle serialization left to repo). status/mode are constrained to a
@@ -339,5 +443,61 @@ export const roundtable_messages = sqliteTable(
     rtIdx: index('roundtable_messages_rt_idx').on(t.roundtable_id, t.round, t.participant_index),
     uniqIdx: uniqueIndex('roundtable_messages_uniq')
       .on(t.roundtable_id, t.round, t.participant_index),
+  }),
+);
+
+export const quick_compare_runs = sqliteTable(
+  'quick_compare_runs',
+  {
+    id: text('id').primaryKey(),
+    conversation_id: text('conversation_id')
+      .notNull()
+      .references(() => conversations.id, { onDelete: 'cascade' }),
+    source_user_message_id: text('source_user_message_id').references(
+      () => messages.id,
+      { onDelete: 'set null' },
+    ),
+    run_id: text('run_id').notNull(),
+    status: text('status').notNull(),
+    model_ids: text('model_ids').notNull(),
+    adopted_output_id: text('adopted_output_id'),
+    created_at: integer('created_at').notNull(),
+    updated_at: integer('updated_at').notNull(),
+  },
+  (t) => ({
+    convIdx: index('quick_compare_runs_conv_idx').on(t.conversation_id, t.updated_at),
+    runIdx: index('quick_compare_runs_run_idx').on(t.run_id),
+  }),
+);
+
+export const quick_compare_outputs = sqliteTable(
+  'quick_compare_outputs',
+  {
+    id: text('id').primaryKey(),
+    compare_id: text('compare_id')
+      .notNull()
+      .references(() => quick_compare_runs.id, { onDelete: 'cascade' }),
+    participant_index: integer('participant_index').notNull(),
+    model_id: text('model_id')
+      .notNull()
+      .references(() => models.id, { onDelete: 'cascade' }),
+    provider_id: text('provider_id').references(() => providers.id, {
+      onDelete: 'set null',
+    }),
+    content: text('content').notNull().default(''),
+    status: text('status').notNull().default('pending'),
+    error_classification: text('error_classification'),
+    error_message: text('error_message'),
+    cost_record_id: text('cost_record_id').references(() => cost_records.id, {
+      onDelete: 'set null',
+    }),
+    first_token_ms: integer('first_token_ms'),
+    duration_ms: integer('duration_ms'),
+    created_at: integer('created_at').notNull(),
+    updated_at: integer('updated_at').notNull(),
+  },
+  (t) => ({
+    compareIdx: index('quick_compare_outputs_compare_idx').on(t.compare_id, t.participant_index),
+    uniqIdx: uniqueIndex('quick_compare_outputs_uniq').on(t.compare_id, t.participant_index),
   }),
 );

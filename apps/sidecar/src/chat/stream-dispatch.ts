@@ -1,0 +1,156 @@
+import type { FastifyReply } from 'fastify';
+import { PassThrough } from 'node:stream';
+import type { Provider } from '@taori/shared';
+import type { BuildServerArgs } from '../server.js';
+import type {
+  CostsRepo,
+  MemoriesRepo,
+  MessagesRepo,
+  ModelsRepo,
+  ProvidersRepo,
+  StructuredMemoriesRepo,
+} from '../db/repos/index.js';
+import { finalizeOnEnd, type ProduceCtx } from './run-stream.js';
+import {
+  produceKeyMissingStream,
+  produceMockStream,
+  produceUpstreamStream,
+} from './stream-producers.js';
+import { normalizeOllamaOpenAiBaseUrl } from '../providers/ollama.js';
+
+export function prepareDataStreamReply(origin: unknown, reply: FastifyReply): void {
+  if (
+    typeof origin === 'string' &&
+    (/^https?:\/\/(127\.0\.0\.1|localhost)(:\d+)?$/.test(origin) ||
+      origin === 'tauri://localhost' ||
+      origin.startsWith('http://tauri.localhost'))
+  ) {
+    reply.header('Access-Control-Allow-Origin', origin);
+    reply.header('Vary', 'Origin');
+    reply.header('Access-Control-Expose-Headers', 'x-vercel-ai-data-stream');
+  }
+  reply
+    .type('text/plain; charset=utf-8')
+    .header('Cache-Control', 'no-cache, no-transform')
+    .header('Connection', 'keep-alive')
+    .header('x-vercel-ai-data-stream', 'v1');
+  if (typeof reply.raw.socket?.setNoDelay === 'function') {
+    reply.raw.socket.setNoDelay(true);
+  }
+}
+
+export function openDataStream(
+  origin: unknown,
+  reply: FastifyReply,
+): {
+  stream: PassThrough;
+  abortController: AbortController;
+  isAborted: () => boolean;
+  setForceFinalize: (fn: (() => void) | null) => void;
+} {
+  const stream = new PassThrough();
+  prepareDataStreamReply(origin, reply);
+  const abortController = new AbortController();
+  let aborted = false;
+  let forceFinalize: (() => void) | null = null;
+  reply.raw.on('close', () => {
+    if (!stream.writableEnded) {
+      aborted = true;
+      abortController.abort();
+      if (!stream.writableEnded) stream.end();
+      forceFinalize?.();
+    }
+  });
+  reply.send(stream);
+  return {
+    stream,
+    abortController,
+    isAborted: () => aborted,
+    setForceFinalize: (fn) => { forceFinalize = fn; },
+  };
+}
+
+export async function dispatchChatProducer(args: {
+  stream: PassThrough;
+  abortSignal: AbortSignal;
+  isAborted: () => boolean;
+  ctx: ProduceCtx;
+  provider: Provider | null;
+  modelName: string;
+  keystore: BuildServerArgs['keystore'];
+  msgRepo: MessagesRepo;
+  costsRepo: CostsRepo;
+  modelsRepo: ModelsRepo;
+  providersRepo?: ProvidersRepo;
+  memoriesRepo: MemoriesRepo;
+  structuredMemoriesRepo?: StructuredMemoriesRepo;
+  setForceFinalize: (fn: (() => void) | null) => void;
+  onFinish?: () => void;
+  keyReadFailedLogName: string;
+  unhandledLogName: string;
+}): Promise<void> {
+  const forceFinalize = finalizeOnEnd(
+    args.stream,
+    args.isAborted,
+    args.ctx,
+    args.msgRepo,
+    args.costsRepo,
+    args.modelsRepo,
+    args.providersRepo,
+    args.memoriesRepo,
+    args.structuredMemoriesRepo,
+    args.keystore,
+  );
+  args.setForceFinalize(forceFinalize);
+  if (args.onFinish) args.stream.on('finish', args.onFinish);
+
+  if (args.provider?.type === 'ollama') {
+    void produceUpstreamStream(
+      args.stream,
+      args.abortSignal,
+      args.ctx,
+      {
+        baseURL: normalizeOllamaOpenAiBaseUrl(args.provider.base_url),
+        apiKey: 'ollama-local',
+        modelName: args.modelName,
+      },
+      args.modelsRepo,
+      args.memoriesRepo,
+    ).catch((e) => args.ctx.log.error({ err: e }, args.unhandledLogName));
+    return;
+  }
+
+  if (args.provider?.api_key_ref) {
+    let apiKey: string | null = null;
+    try {
+      apiKey = await args.keystore.read(args.provider.api_key_ref);
+    } catch (e) {
+      args.ctx.log.warn({ err: e }, args.keyReadFailedLogName);
+    }
+    if (apiKey) {
+      void produceUpstreamStream(
+        args.stream,
+        args.abortSignal,
+        args.ctx,
+        {
+          baseURL: args.provider.base_url,
+          apiKey,
+          modelName: args.modelName,
+        },
+        args.modelsRepo,
+        args.memoriesRepo,
+      ).catch((e) => args.ctx.log.error({ err: e }, args.unhandledLogName));
+      return;
+    }
+    void produceKeyMissingStream(args.stream, args.ctx, args.modelsRepo, args.memoriesRepo);
+    return;
+  }
+
+  void produceMockStream(
+    args.stream,
+    args.isAborted,
+    args.ctx,
+    args.modelsRepo,
+    args.memoriesRepo,
+  );
+}

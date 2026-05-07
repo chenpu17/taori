@@ -7,8 +7,9 @@
  * concerns are layered on by the route handlers.
  */
 
-import { eq, and, isNotNull, asc, desc, sql } from 'drizzle-orm';
+import { eq, and, isNotNull, asc, desc, inArray, sql } from 'drizzle-orm';
 import { type Db } from '../index.js';
+import { isChatCapable } from '@taori/shared';
 import {
   providers,
   models,
@@ -17,16 +18,24 @@ import {
   cost_records,
   mcp_servers,
   run_events,
+  agent_runs,
   memories,
+  structured_memories,
   prompt_templates,
   personas,
+  workflow_recipes,
   files,
+  file_chunks,
   roundtables,
   roundtable_messages,
+  quick_compare_runs,
+  quick_compare_outputs,
 } from '../schema.js';
 import type {
   ErrorClassification,
   ModelHealthRow,
+  ToolErrorClassification,
+  ToolHealthRow,
   Participant,
   RoundtableStoredMode,
   RoundtableStatus,
@@ -39,9 +48,19 @@ import type {
   Persona,
   PersonaCreate,
   PersonaUpdate,
+  WorkflowRecipe,
+  WorkflowRecipeCreate,
+  WorkflowRecipeUpdate,
+  AgentRun,
   RunEvent,
   RunEventKind,
   RunEventStatus,
+  QuickCompareRun,
+  QuickCompareOutput,
+  QuickCompareStatus,
+  QuickCompareOutputStatus,
+  FileChunk,
+  FileSearchResult,
 } from '@taori/shared';
 import {
   makeId,
@@ -56,14 +75,20 @@ import {
   type McpServerCreate,
   type McpServerUpdate,
   PricingMetaSchema,
+  WorkflowRecipeSpecSchema,
 } from '@taori/shared';
 
 type ProviderRow = typeof providers.$inferSelect;
 type ModelRow = typeof models.$inferSelect;
 type PromptTemplateRow = typeof prompt_templates.$inferSelect;
 type PersonaRow = typeof personas.$inferSelect;
+type WorkflowRecipeRow = typeof workflow_recipes.$inferSelect;
 type RunEventRow = typeof run_events.$inferSelect;
+type AgentRunRow = typeof agent_runs.$inferSelect;
 type McpServerRow = typeof mcp_servers.$inferSelect;
+type QuickCompareRunRow = typeof quick_compare_runs.$inferSelect;
+type QuickCompareOutputRow = typeof quick_compare_outputs.$inferSelect;
+type FileChunkRow = typeof file_chunks.$inferSelect;
 
 function toProvider(row: ProviderRow): Provider {
   return {
@@ -171,6 +196,39 @@ function parseStringRecord(raw: string | null): Record<string, string> {
   }
 }
 
+function toQuickCompareRun(row: QuickCompareRunRow): QuickCompareRun {
+  return {
+    id: row.id,
+    conversation_id: row.conversation_id,
+    source_user_message_id: row.source_user_message_id,
+    run_id: row.run_id,
+    status: row.status as QuickCompareStatus,
+    model_ids: parseStringArray(row.model_ids),
+    adopted_output_id: row.adopted_output_id,
+    created_at: row.created_at,
+    updated_at: row.updated_at,
+  };
+}
+
+function toQuickCompareOutput(row: QuickCompareOutputRow): QuickCompareOutput {
+  return {
+    id: row.id,
+    compare_id: row.compare_id,
+    participant_index: row.participant_index,
+    model_id: row.model_id,
+    provider_id: row.provider_id,
+    content: row.content,
+    status: row.status as QuickCompareOutputStatus,
+    error_classification: row.error_classification as QuickCompareOutput['error_classification'],
+    error_message: row.error_message,
+    cost_record_id: row.cost_record_id,
+    first_token_ms: row.first_token_ms,
+    duration_ms: row.duration_ms,
+    created_at: row.created_at,
+    updated_at: row.updated_at,
+  };
+}
+
 function toMcpServer(row: McpServerRow): McpServer {
   return {
     id: row.id,
@@ -210,6 +268,26 @@ function toPersona(row: PersonaRow): Persona {
   };
 }
 
+function toWorkflowRecipe(row: WorkflowRecipeRow): WorkflowRecipe {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(row.spec_json);
+  } catch {
+    throw new Error(`Invalid workflow recipe spec stored for ${row.id}`);
+  }
+  const spec = WorkflowRecipeSpecSchema.parse(parsed);
+  return {
+    id: row.id,
+    name: row.name,
+    description: row.description ?? null,
+    schema_version: 1,
+    spec,
+    enabled: row.enabled,
+    created_at: row.created_at,
+    updated_at: row.updated_at,
+  };
+}
+
 function toRunEvent(row: RunEventRow): RunEvent {
   let payload: Record<string, unknown> | null = null;
   if (row.payload) {
@@ -233,6 +311,83 @@ function toRunEvent(row: RunEventRow): RunEvent {
     summary: row.summary,
     payload,
     created_at: row.created_at,
+  };
+}
+
+function payloadString(event: RunEvent, key: string): string | null {
+  const value = event.payload?.[key];
+  return typeof value === 'string' && value.length > 0 ? value : null;
+}
+
+function deriveRun(events: RunEvent[]): AgentRun {
+  const sorted = [...events].sort((a, b) => a.created_at - b.created_at);
+  const first = sorted[0]!;
+  const last = sorted[sorted.length - 1]!;
+  const started = sorted.find((event) => event.kind === 'turn.started') ?? first;
+  const modelEvent = [...sorted]
+    .reverse()
+    .find((event) => event.kind.startsWith('model.') && payloadString(event, 'model_id'));
+  const terminal = [...sorted]
+    .reverse()
+    .find((event) => event.kind.startsWith('turn.') || event.kind.startsWith('recovery.'));
+
+  let status: AgentRun['status'] = 'created';
+  if (terminal?.kind === 'turn.completed' || terminal?.kind === 'recovery.completed') {
+    status = 'completed';
+  } else if (terminal?.kind === 'turn.failed' || terminal?.kind === 'recovery.failed') {
+    status = 'failed';
+  } else if (terminal?.kind === 'turn.incomplete') {
+    status = 'incomplete';
+  } else if (terminal?.kind === 'turn.stopped' || terminal?.kind === 'turn.cancelled') {
+    status = payloadString(terminal, 'message_status') === 'incomplete'
+      ? 'incomplete'
+      : 'stopped';
+  } else if (terminal?.kind === 'recovery.started') {
+    status = 'retrying';
+  } else if (sorted.some((event) => event.kind === 'tool.started' && event.status !== 'completed')) {
+    status = 'tool_calling';
+  } else if (sorted.some((event) => event.kind === 'model.started')) {
+    status = 'streaming';
+  } else if (sorted.some((event) => event.kind === 'context.snapshot')) {
+    status = 'context_ready';
+  }
+
+  const kind = payloadString(started, 'run_kind') as AgentRun['kind'] | null;
+  return {
+    id: first.run_id,
+    conversation_id: first.conversation_id,
+    parent_run_id: payloadString(started, 'parent_run_id'),
+    user_message_id: payloadString(started, 'source_user_message_id'),
+    assistant_message_id:
+      first.message_id
+      ?? payloadString(last, 'assistant_message_id')
+      ?? payloadString(started, 'assistant_message_id'),
+    kind: kind ?? 'chat',
+    status,
+    model_id:
+      payloadString(modelEvent ?? started, 'model_id')
+      ?? payloadString(started, 'model_id'),
+    recovery_policy: payloadString(started, 'recovery_policy'),
+    created_at: first.created_at,
+    updated_at: last.created_at,
+    event_count: sorted.length,
+  };
+}
+
+function toAgentRun(row: AgentRunRow): AgentRun {
+  return {
+    id: row.id,
+    conversation_id: row.conversation_id,
+    parent_run_id: row.parent_run_id,
+    user_message_id: row.user_message_id,
+    assistant_message_id: row.assistant_message_id,
+    kind: row.kind as AgentRun['kind'],
+    status: row.status as AgentRun['status'],
+    model_id: row.model_id,
+    recovery_policy: row.recovery_policy,
+    created_at: row.created_at,
+    updated_at: row.updated_at,
+    event_count: row.event_count,
   };
 }
 
@@ -447,7 +602,7 @@ export class ModelsRepo {
           : null,
         context_length: input.context_length ?? null,
         supports_vision: input.supports_vision ?? false,
-        supports_tools: input.supports_tools ?? false,
+        supports_tools: input.supports_tools ?? isChatCapable(input.capability),
         supports_json: input.supports_json ?? false,
         is_default_for: input.enabled === false ? null : (input.is_default_for ?? null),
         fallback_order: 0,
@@ -965,6 +1120,84 @@ export class PersonasRepo {
   }
 }
 
+export class WorkflowRecipesRepo {
+  constructor(private db: Db) {}
+
+  list(opts: { enabledOnly?: boolean } = {}): WorkflowRecipe[] {
+    const rows = this.db
+      .select()
+      .from(workflow_recipes)
+      .where(opts.enabledOnly ? eq(workflow_recipes.enabled, true) : undefined)
+      .orderBy(asc(workflow_recipes.updated_at), asc(workflow_recipes.created_at))
+      .all()
+      .reverse() as WorkflowRecipeRow[];
+    return rows.map(toWorkflowRecipe);
+  }
+
+  get(id: string): WorkflowRecipe | null {
+    const row = this.db
+      .select()
+      .from(workflow_recipes)
+      .where(eq(workflow_recipes.id, id))
+      .get() as WorkflowRecipeRow | undefined;
+    return row ? toWorkflowRecipe(row) : null;
+  }
+
+  create(input: WorkflowRecipeCreate): WorkflowRecipe {
+    const now = Date.now();
+    const spec = WorkflowRecipeSpecSchema.parse({
+      ...input.spec,
+      name: input.spec.name || input.name,
+      description: input.spec.description ?? input.description ?? null,
+    });
+    const row = this.db
+      .insert(workflow_recipes)
+      .values({
+        id: makeId('workflow_recipe'),
+        name: input.name,
+        description: input.description ?? null,
+        schema_version: 1,
+        spec_json: JSON.stringify(spec),
+        enabled: input.enabled ?? true,
+        created_at: now,
+        updated_at: now,
+      })
+      .returning()
+      .get() as WorkflowRecipeRow;
+    return toWorkflowRecipe(row);
+  }
+
+  update(id: string, patch: WorkflowRecipeUpdate): WorkflowRecipe | null {
+    const current = this.get(id);
+    if (!current) return null;
+    const spec = patch.spec
+      ? WorkflowRecipeSpecSchema.parse({
+          ...patch.spec,
+          name: patch.spec.name || patch.name || current.name,
+          description: patch.spec.description ?? patch.description ?? current.description,
+        })
+      : undefined;
+    const row = this.db
+      .update(workflow_recipes)
+      .set({
+        ...(patch.name !== undefined && { name: patch.name }),
+        ...(patch.description !== undefined && { description: patch.description ?? null }),
+        ...(spec !== undefined && { spec_json: JSON.stringify(spec) }),
+        ...(patch.enabled !== undefined && { enabled: patch.enabled }),
+        updated_at: Date.now(),
+      })
+      .where(eq(workflow_recipes.id, id))
+      .returning()
+      .get() as WorkflowRecipeRow | undefined;
+    return row ? toWorkflowRecipe(row) : null;
+  }
+
+  delete(id: string): boolean {
+    const res = this.db.delete(workflow_recipes).where(eq(workflow_recipes.id, id)).run();
+    return res.changes > 0;
+  }
+}
+
 export interface ConversationRow {
   id: string;
   type: string;
@@ -1285,27 +1518,232 @@ export interface RunEventInsert {
   payload?: Record<string, unknown> | null;
 }
 
+export interface QuickCompareRunCreate {
+  conversation_id: string;
+  source_user_message_id?: string | null;
+  run_id: string;
+  model_ids: string[];
+  status?: QuickCompareStatus;
+}
+
+export interface QuickCompareOutputCreate {
+  compare_id: string;
+  participant_index: number;
+  model_id: string;
+  provider_id?: string | null;
+  status?: QuickCompareOutputStatus;
+}
+
+export interface QuickCompareOutputPatch {
+  content?: string;
+  status?: QuickCompareOutputStatus;
+  error_classification?: QuickCompareOutput['error_classification'];
+  error_message?: string | null;
+  cost_record_id?: string | null;
+  first_token_ms?: number | null;
+  duration_ms?: number | null;
+}
+
+export class QuickCompareRepo {
+  constructor(private db: Db) {}
+
+  createRun(input: QuickCompareRunCreate): QuickCompareRun {
+    const now = Date.now();
+    const row = this.db
+      .insert(quick_compare_runs)
+      .values({
+        id: makeId('quick_compare'),
+        conversation_id: input.conversation_id,
+        source_user_message_id: input.source_user_message_id ?? null,
+        run_id: input.run_id,
+        status: input.status ?? 'running',
+        model_ids: JSON.stringify(input.model_ids),
+        adopted_output_id: null,
+        created_at: now,
+        updated_at: now,
+      })
+      .returning()
+      .get();
+    return toQuickCompareRun(row);
+  }
+
+  getRun(id: string): QuickCompareRun | null {
+    const row = this.db
+      .select()
+      .from(quick_compare_runs)
+      .where(eq(quick_compare_runs.id, id))
+      .get();
+    return row ? toQuickCompareRun(row) : null;
+  }
+
+  listRunsByConversation(conversationId: string, limit = 20): QuickCompareRun[] {
+    const safeLimit = Math.max(1, Math.min(100, Math.floor(limit)));
+    return this.db
+      .select()
+      .from(quick_compare_runs)
+      .where(eq(quick_compare_runs.conversation_id, conversationId))
+      .orderBy(desc(quick_compare_runs.updated_at))
+      .limit(safeLimit)
+      .all()
+      .map(toQuickCompareRun);
+  }
+
+  updateRunStatus(id: string, status: QuickCompareStatus): QuickCompareRun | null {
+    const row = this.db
+      .update(quick_compare_runs)
+      .set({ status, updated_at: Date.now() })
+      .where(eq(quick_compare_runs.id, id))
+      .returning()
+      .get();
+    return row ? toQuickCompareRun(row) : null;
+  }
+
+  markAdopted(compareId: string, outputId: string): QuickCompareRun | null {
+    const row = this.db
+      .update(quick_compare_runs)
+      .set({ adopted_output_id: outputId, updated_at: Date.now() })
+      .where(eq(quick_compare_runs.id, compareId))
+      .returning()
+      .get();
+    return row ? toQuickCompareRun(row) : null;
+  }
+
+  createOutput(input: QuickCompareOutputCreate): QuickCompareOutput {
+    const now = Date.now();
+    const row = this.db
+      .insert(quick_compare_outputs)
+      .values({
+        id: makeId('quick_compare_output'),
+        compare_id: input.compare_id,
+        participant_index: input.participant_index,
+        model_id: input.model_id,
+        provider_id: input.provider_id ?? null,
+        content: '',
+        status: input.status ?? 'pending',
+        error_classification: null,
+        error_message: null,
+        cost_record_id: null,
+        first_token_ms: null,
+        duration_ms: null,
+        created_at: now,
+        updated_at: now,
+      })
+      .returning()
+      .get();
+    return toQuickCompareOutput(row);
+  }
+
+  getOutput(id: string): QuickCompareOutput | null {
+    const row = this.db
+      .select()
+      .from(quick_compare_outputs)
+      .where(eq(quick_compare_outputs.id, id))
+      .get();
+    return row ? toQuickCompareOutput(row) : null;
+  }
+
+  listOutputs(compareId: string): QuickCompareOutput[] {
+    return this.db
+      .select()
+      .from(quick_compare_outputs)
+      .where(eq(quick_compare_outputs.compare_id, compareId))
+      .orderBy(asc(quick_compare_outputs.participant_index))
+      .all()
+      .map(toQuickCompareOutput);
+  }
+
+  patchOutput(id: string, patch: QuickCompareOutputPatch): QuickCompareOutput | null {
+    const row = this.db
+      .update(quick_compare_outputs)
+      .set({
+        ...(patch.content !== undefined && { content: patch.content }),
+        ...(patch.status !== undefined && { status: patch.status }),
+        ...(patch.error_classification !== undefined && {
+          error_classification: patch.error_classification,
+        }),
+        ...(patch.error_message !== undefined && { error_message: patch.error_message }),
+        ...(patch.cost_record_id !== undefined && { cost_record_id: patch.cost_record_id }),
+        ...(patch.first_token_ms !== undefined && { first_token_ms: patch.first_token_ms }),
+        ...(patch.duration_ms !== undefined && { duration_ms: patch.duration_ms }),
+        updated_at: Date.now(),
+      })
+      .where(eq(quick_compare_outputs.id, id))
+      .returning()
+      .get();
+    return row ? toQuickCompareOutput(row) : null;
+  }
+}
+
 export class RunEventsRepo {
   constructor(private db: Db) {}
 
   append(input: RunEventInsert): RunEvent {
-    const row = this.db
-      .insert(run_events)
+    return this.db.transaction((tx) => {
+      const row = tx
+        .insert(run_events)
+        .values({
+          id: makeId('run_event'),
+          run_id: input.run_id,
+          conversation_id: input.conversation_id ?? null,
+          message_id: input.message_id ?? null,
+          kind: input.kind,
+          status: input.status,
+          label: input.label,
+          summary: input.summary ?? null,
+          payload: input.payload ? JSON.stringify(input.payload) : null,
+          created_at: Date.now(),
+        })
+        .returning()
+        .get();
+      const event = toRunEvent(row);
+      this.refreshRunHeader(input.run_id, tx);
+      return event;
+    });
+  }
+
+  private refreshRunHeader(runId: string, db: Db = this.db): AgentRun | null {
+    const events = db
+      .select()
+      .from(run_events)
+      .where(eq(run_events.run_id, runId))
+      .orderBy(asc(run_events.created_at))
+      .all()
+      .map(toRunEvent);
+    if (events.length === 0) return null;
+    const run = deriveRun(events);
+    db.insert(agent_runs)
       .values({
-        id: makeId('run_event'),
-        run_id: input.run_id,
-        conversation_id: input.conversation_id ?? null,
-        message_id: input.message_id ?? null,
-        kind: input.kind,
-        status: input.status,
-        label: input.label,
-        summary: input.summary ?? null,
-        payload: input.payload ? JSON.stringify(input.payload) : null,
-        created_at: Date.now(),
+        id: run.id,
+        conversation_id: run.conversation_id,
+        parent_run_id: run.parent_run_id,
+        kind: run.kind,
+        status: run.status,
+        model_id: run.model_id,
+        user_message_id: run.user_message_id,
+        assistant_message_id: run.assistant_message_id,
+        recovery_policy: run.recovery_policy,
+        event_count: run.event_count,
+        created_at: run.created_at,
+        updated_at: run.updated_at,
       })
-      .returning()
-      .get();
-    return toRunEvent(row);
+      .onConflictDoUpdate({
+        target: agent_runs.id,
+        set: {
+          conversation_id: run.conversation_id,
+          parent_run_id: run.parent_run_id,
+          kind: run.kind,
+          status: run.status,
+          model_id: run.model_id,
+          user_message_id: run.user_message_id,
+          assistant_message_id: run.assistant_message_id,
+          recovery_policy: run.recovery_policy,
+          event_count: run.event_count,
+          created_at: run.created_at,
+          updated_at: run.updated_at,
+        },
+      })
+      .run();
+    return run;
   }
 
   listByConversation(conversationId: string, limit = 100): RunEvent[] {
@@ -1321,6 +1759,40 @@ export class RunEventsRepo {
       .map(toRunEvent);
   }
 
+  listRunsByConversation(conversationId: string, limit = 20): AgentRun[] {
+    const safeLimit = Math.max(1, Math.min(100, Math.floor(limit)));
+    const materialized = this.db
+      .select()
+      .from(agent_runs)
+      .where(eq(agent_runs.conversation_id, conversationId))
+      .orderBy(desc(agent_runs.updated_at))
+      .limit(safeLimit)
+      .all()
+      .map(toAgentRun);
+    if (materialized.length > 0) {
+      return materialized;
+    }
+    const rows = this.db
+      .select()
+      .from(run_events)
+      .where(eq(run_events.conversation_id, conversationId))
+      .orderBy(desc(run_events.created_at))
+      .limit(1000)
+      .all()
+      .reverse()
+      .map(toRunEvent);
+    const grouped = new Map<string, RunEvent[]>();
+    for (const event of rows) {
+      const list = grouped.get(event.run_id) ?? [];
+      list.push(event);
+      grouped.set(event.run_id, list);
+    }
+    return [...grouped.values()]
+      .map(deriveRun)
+      .sort((a, b) => b.updated_at - a.updated_at)
+      .slice(0, safeLimit);
+  }
+
   listByRun(runId: string): RunEvent[] {
     return this.db
       .select()
@@ -1334,9 +1806,9 @@ export class RunEventsRepo {
 
 export interface CostInsert {
   conversation_id: string | null;
-  source_type: 'message' | 'roundtable_message' | 'topic_analyzer' | 'summarizer' | 'tool_call';
+  source_type: 'message' | 'roundtable_message' | 'topic_analyzer' | 'summarizer' | 'tool_call' | 'quick_compare_output';
   source_id: string | null;
-  feature: 'chat' | 'roundtable' | 'image' | 'tool_call';
+  feature: 'chat' | 'roundtable' | 'image' | 'tool_call' | 'quick_compare';
   model_id: string | null;
   model_name_snapshot: string;
   input_tokens: number | null;
@@ -1348,7 +1820,7 @@ export interface CostInsert {
   estimated_cost_usd: number | null;
   actual_cost_usd: number | null;
   success: boolean;
-  classification?: ErrorClassification | null;
+  classification?: ErrorClassification | ToolErrorClassification | null;
   first_token_ms?: number | null;
   duration_ms: number | null;
 }
@@ -1376,9 +1848,13 @@ export interface CostCallLogRow {
   output_tokens: number | null;
   actual_cost_usd: number | null;
   success: boolean;
-  classification: ErrorClassification | null;
+  classification: ErrorClassification | ToolErrorClassification | null;
   first_token_ms: number | null;
   duration_ms: number | null;
+  run_id: string | null;
+  run_event_id: string | null;
+  run_event_kind: RunEventKind | null;
+  run_event_label: string | null;
 }
 
 export class CostsRepo {
@@ -1588,9 +2064,20 @@ export class CostsRepo {
     };
   }
 
-  callLogs(limit = 100): CostCallLogRow[] {
-    const safeLimit = Math.max(1, Math.min(200, Math.floor(limit)));
+  listByConversation(conversationId: string): CostRecord[] {
     return this.db
+      .select()
+      .from(cost_records)
+      .where(eq(cost_records.conversation_id, conversationId))
+      .orderBy(asc(cost_records.created_at))
+      .all() as CostRecord[];
+  }
+
+  callLogs(opts: { limit?: number; costRecordId?: string } | number = 100): CostCallLogRow[] {
+    const limit = typeof opts === 'number' ? opts : opts.limit ?? 100;
+    const costRecordId = typeof opts === 'number' ? undefined : opts.costRecordId;
+    const safeLimit = Math.max(1, Math.min(200, Math.floor(limit)));
+    const query = this.db
       .select({
         id: cost_records.id,
         created_at: cost_records.created_at,
@@ -1616,9 +2103,57 @@ export class CostsRepo {
       .leftJoin(models, eq(cost_records.model_id, models.id))
       .leftJoin(providers, eq(models.provider_id, providers.id))
       .leftJoin(conversations, eq(cost_records.conversation_id, conversations.id))
+      .where(costRecordId ? eq(cost_records.id, costRecordId) : undefined)
       .orderBy(desc(cost_records.created_at))
-      .limit(safeLimit)
-      .all() as CostCallLogRow[];
+      .limit(costRecordId ? 1 : safeLimit);
+    const rows = query.all() as Array<Omit<CostCallLogRow, 'run_id' | 'run_event_id' | 'run_event_kind' | 'run_event_label'>>;
+    if (rows.length === 0) return [];
+
+    const eventRows = this.db
+      .select()
+      .from(run_events)
+      .where(eq(run_events.kind, 'cost.recorded'))
+      .orderBy(desc(run_events.created_at))
+      .limit(1000)
+      .all()
+      .map(toRunEvent);
+    const byCostId = new Map<string, RunEvent>();
+    const bySource = new Map<string, RunEvent>();
+    for (const event of eventRows) {
+      const costRecordId = payloadString(event, 'cost_record_id');
+      if (costRecordId && !byCostId.has(costRecordId)) byCostId.set(costRecordId, event);
+      if (event.message_id && !bySource.has(`message:${event.message_id}`)) {
+        bySource.set(`message:${event.message_id}`, event);
+      }
+      if (event.message_id && !bySource.has(`tool_call:${event.message_id}`)) {
+        bySource.set(`tool_call:${event.message_id}`, event);
+      }
+      const roundtableMessageId = payloadString(event, 'roundtable_message_id');
+      if (roundtableMessageId && !bySource.has(`roundtable_message:${roundtableMessageId}`)) {
+        bySource.set(`roundtable_message:${roundtableMessageId}`, event);
+      }
+      for (const sourceId of [
+        payloadString(event, 'assistant_message_id'),
+        payloadString(event, 'message_id'),
+      ].filter((value): value is string => Boolean(value))) {
+        if (!bySource.has(`message:${sourceId}`)) bySource.set(`message:${sourceId}`, event);
+        if (!bySource.has(`tool_call:${sourceId}`)) bySource.set(`tool_call:${sourceId}`, event);
+      }
+    }
+
+    return rows.map((row) => {
+      const event =
+        byCostId.get(row.id)
+        ?? (row.source_id ? bySource.get(`${row.source_type}:${row.source_id}`) : undefined)
+        ?? undefined;
+      return {
+        ...row,
+        run_id: event?.run_id ?? null,
+        run_event_id: event?.id ?? null,
+        run_event_kind: event?.kind ?? null,
+        run_event_label: event?.label ?? null,
+      };
+    });
   }
 
   modelHealth24h(): Map<string, ModelHealthRow> {
@@ -1700,6 +2235,91 @@ export class CostsRepo {
         failures_24h: row.failures_24h,
         avg_first_token_ms:
           row.firstTokenCount > 0 ? row.firstTokenTotal / row.firstTokenCount : null,
+        avg_duration_ms:
+          row.durationCount > 0 ? row.durationTotal / row.durationCount : null,
+        last_failure_at: row.last_failure_at,
+        last_failure_classification: row.last_failure_classification,
+      });
+    }
+    return out;
+  }
+
+  toolHealth24h(toolNames: string[]): Map<string, ToolHealthRow> {
+    const since = Date.now() - 24 * 60 * 60 * 1000;
+    const imageToolName = toolNames.includes('builtin.image_generate')
+      ? 'builtin.image_generate'
+      : null;
+    const toolNameSet = new Set(toolNames);
+    const rows = this.db
+      .select({
+        feature: cost_records.feature,
+        model_name_snapshot: cost_records.model_name_snapshot,
+        success: cost_records.success,
+        classification: cost_records.classification,
+        duration_ms: cost_records.duration_ms,
+        created_at: cost_records.created_at,
+      })
+      .from(cost_records)
+      .where(
+        and(
+          sql`${cost_records.source_type} = 'tool_call'`,
+          sql`${cost_records.created_at} >= ${since}`,
+        ),
+      )
+      .all() as Array<{
+      feature: CostInsert['feature'];
+      model_name_snapshot: string;
+      success: boolean;
+      classification: ToolErrorClassification | null;
+      duration_ms: number | null;
+      created_at: number;
+    }>;
+
+    const grouped = new Map<
+      string,
+      ToolHealthRow & {
+        durationTotal: number;
+        durationCount: number;
+      }
+    >();
+
+    for (const row of rows) {
+      const toolName =
+        row.feature === 'image' && imageToolName
+          ? imageToolName
+          : row.model_name_snapshot;
+      if (!toolNameSet.has(toolName)) continue;
+      const current = grouped.get(toolName) ?? {
+        tool_name: toolName,
+        calls_24h: 0,
+        failures_24h: 0,
+        avg_duration_ms: null,
+        last_failure_at: null,
+        last_failure_classification: null,
+        durationTotal: 0,
+        durationCount: 0,
+      };
+      current.calls_24h += 1;
+      if (!row.success) {
+        current.failures_24h += 1;
+        if (current.last_failure_at == null || row.created_at >= current.last_failure_at) {
+          current.last_failure_at = row.created_at;
+          current.last_failure_classification = row.classification ?? null;
+        }
+      }
+      if (typeof row.duration_ms === 'number') {
+        current.durationTotal += row.duration_ms;
+        current.durationCount += 1;
+      }
+      grouped.set(toolName, current);
+    }
+
+    const out = new Map<string, ToolHealthRow>();
+    for (const [toolName, row] of grouped.entries()) {
+      out.set(toolName, {
+        tool_name: toolName,
+        calls_24h: row.calls_24h,
+        failures_24h: row.failures_24h,
         avg_duration_ms:
           row.durationCount > 0 ? row.durationTotal / row.durationCount : null,
         last_failure_at: row.last_failure_at,
@@ -2021,6 +2641,117 @@ export class MemoriesRepo {
   }
 }
 
+export type StructuredMemoryScope = 'global' | 'session' | 'user';
+export type StructuredMemoryType = 'preference' | 'project_fact' | 'profile' | 'other';
+
+export interface StructuredMemoryInsert {
+  scope: StructuredMemoryScope;
+  scope_id?: string | null;
+  type: StructuredMemoryType;
+  content: string;
+  source_conversation_id?: string | null;
+  source_message_id?: string | null;
+  enabled?: boolean;
+}
+
+export interface StructuredMemoryRow extends Required<Omit<StructuredMemoryInsert, 'scope_id' | 'source_conversation_id' | 'source_message_id' | 'enabled'>> {
+  id: string;
+  scope_id: string | null;
+  source_conversation_id: string | null;
+  source_message_id: string | null;
+  enabled: boolean;
+  deleted_at: number | null;
+  last_used_at: number | null;
+  created_at: number;
+  updated_at: number;
+}
+
+export class StructuredMemoriesRepo {
+  constructor(private db: Db) {}
+
+  insert(input: StructuredMemoryInsert): StructuredMemoryRow {
+    const now = Date.now();
+    const row = this.db
+      .insert(structured_memories)
+      .values({
+        id: makeId('memory'),
+        scope: input.scope,
+        scope_id: input.scope === 'global' ? null : input.scope_id ?? null,
+        type: input.type,
+        content: input.content,
+        source_conversation_id: input.source_conversation_id ?? null,
+        source_message_id: input.source_message_id ?? null,
+        enabled: input.enabled ?? true,
+        deleted_at: null,
+        last_used_at: null,
+        created_at: now,
+        updated_at: now,
+      })
+      .returning()
+      .get();
+    return row as StructuredMemoryRow;
+  }
+
+  list(opts: {
+    scope?: StructuredMemoryScope;
+    scopeId?: string | null;
+    includeDisabled?: boolean;
+    includeDeleted?: boolean;
+    limit?: number;
+  } = {}): StructuredMemoryRow[] {
+    const clauses = [];
+    if (opts.scope) clauses.push(eq(structured_memories.scope, opts.scope));
+    if (opts.scope && opts.scope !== 'global' && opts.scopeId !== undefined) {
+      clauses.push(
+        opts.scopeId == null
+          ? sql`${structured_memories.scope_id} IS NULL`
+          : eq(structured_memories.scope_id, opts.scopeId),
+      );
+    }
+    if (opts.scope === 'global') clauses.push(sql`${structured_memories.scope_id} IS NULL`);
+    if (!opts.includeDisabled) clauses.push(eq(structured_memories.enabled, true));
+    if (!opts.includeDeleted) clauses.push(sql`${structured_memories.deleted_at} IS NULL`);
+    const limit = Math.max(1, Math.min(200, Math.floor(opts.limit ?? 100)));
+    const query = this.db
+      .select()
+      .from(structured_memories)
+      .orderBy(desc(structured_memories.updated_at))
+      .limit(limit);
+    const rows = (clauses.length > 0 ? query.where(and(...clauses)) : query).all();
+    return rows as StructuredMemoryRow[];
+  }
+
+  setEnabled(id: string, enabled: boolean): StructuredMemoryRow | null {
+    const row = this.db
+      .update(structured_memories)
+      .set({ enabled, updated_at: Date.now() })
+      .where(eq(structured_memories.id, id))
+      .returning()
+      .get();
+    return row ? (row as StructuredMemoryRow) : null;
+  }
+
+  markUsed(ids: string[], now = Date.now()): void {
+    if (ids.length === 0) return;
+    this.db
+      .update(structured_memories)
+      .set({ last_used_at: now, updated_at: now })
+      .where(inArray(structured_memories.id, ids))
+      .run();
+  }
+
+  softDelete(id: string): StructuredMemoryRow | null {
+    const now = Date.now();
+    const row = this.db
+      .update(structured_memories)
+      .set({ enabled: false, deleted_at: now, updated_at: now })
+      .where(eq(structured_memories.id, id))
+      .returning()
+      .get();
+    return row ? (row as StructuredMemoryRow) : null;
+  }
+}
+
 export interface FileInsert {
   conversation_id: string | null;
   message_id: string | null;
@@ -2041,6 +2772,42 @@ export interface FileRow {
   extracted_text: string | null;
   preview_data: string | null;
   created_at: number;
+}
+
+export interface FileChunkInsert {
+  id?: string;
+  file_id: string;
+  conversation_id: string | null;
+  message_id: string | null;
+  chunk_index: number;
+  content: string;
+  token_count: number | null;
+  char_start: number;
+  char_end: number;
+  content_hash: string;
+}
+
+function toFileChunk(row: FileChunkRow): FileChunk {
+  return {
+    id: row.id,
+    file_id: row.file_id,
+    conversation_id: row.conversation_id,
+    message_id: row.message_id,
+    chunk_index: row.chunk_index,
+    content: row.content,
+    token_count: row.token_count,
+    char_start: row.char_start,
+    char_end: row.char_end,
+    content_hash: row.content_hash,
+    created_at: row.created_at,
+  };
+}
+
+function ftsQuery(input: string): string {
+  const tokens = input.match(/[\p{L}\p{N}_]+/gu) ?? [];
+  const cleaned = tokens.map((token) => token.replace(/"/g, '""')).filter(Boolean);
+  if (cleaned.length === 0) return input.replace(/"/g, '""');
+  return cleaned.map((token) => `"${token}"`).join(' OR ');
 }
 
 export class FilesRepo {
@@ -2071,12 +2838,138 @@ export class FilesRepo {
     return (row as FileRow | undefined) ?? null;
   }
 
+  listByConversation(conversationId: string): FileRow[] {
+    return this.db
+      .select()
+      .from(files)
+      .where(eq(files.conversation_id, conversationId))
+      .orderBy(asc(files.created_at))
+      .all() as FileRow[];
+  }
+
   setExtractedText(id: string, text: string): void {
     this.db
       .update(files)
       .set({ extracted_text: text })
       .where(eq(files.id, id))
       .run();
+  }
+
+  delete(id: string): boolean {
+    this.db.run(sql`DELETE FROM file_chunk_fts WHERE file_id = ${id}`);
+    const res = this.db.delete(files).where(eq(files.id, id)).run();
+    return res.changes > 0;
+  }
+}
+
+export class FileChunksRepo {
+  constructor(private db: Db) {}
+
+  listByFile(fileId: string): FileChunk[] {
+    return this.db
+      .select()
+      .from(file_chunks)
+      .where(eq(file_chunks.file_id, fileId))
+      .orderBy(asc(file_chunks.chunk_index))
+      .all()
+      .map((row) => toFileChunk(row as FileChunkRow));
+  }
+
+  replaceForFile(fileId: string, chunks: FileChunkInsert[]): FileChunk[] {
+    return this.db.transaction((tx) => {
+      tx.delete(file_chunks).where(eq(file_chunks.file_id, fileId)).run();
+      tx.run(sql`DELETE FROM file_chunk_fts WHERE file_id = ${fileId}`);
+      if (chunks.length === 0) return [];
+      const now = Date.now();
+      const rows = chunks.map((chunk) => ({
+        id: chunk.id ?? makeId('file_chunk'),
+        file_id: fileId,
+        conversation_id: chunk.conversation_id,
+        message_id: chunk.message_id,
+        chunk_index: chunk.chunk_index,
+        content: chunk.content,
+        token_count: chunk.token_count,
+        char_start: chunk.char_start,
+        char_end: chunk.char_end,
+        content_hash: chunk.content_hash,
+        created_at: now,
+      }));
+      const inserted = tx.insert(file_chunks).values(rows).returning().all() as FileChunkRow[];
+      for (const row of inserted) {
+        tx.run(sql`
+          INSERT INTO file_chunk_fts (content, chunk_id, file_id, conversation_id)
+          VALUES (${row.content}, ${row.id}, ${row.file_id}, ${row.conversation_id})
+        `);
+      }
+      return inserted.map(toFileChunk);
+    });
+  }
+
+  deleteForFile(fileId: string): void {
+    this.db.delete(file_chunks).where(eq(file_chunks.file_id, fileId)).run();
+    this.db.run(sql`DELETE FROM file_chunk_fts WHERE file_id = ${fileId}`);
+  }
+
+  search(input: {
+    query: string;
+    conversation_id?: string | null;
+    file_ids?: string[];
+    limit?: number;
+    include_content?: boolean;
+  }): FileSearchResult[] {
+    const limit = Math.max(1, Math.min(20, input.limit ?? 6));
+    const match = ftsQuery(input.query);
+    const rows = this.db.all(sql`
+      SELECT
+        fc.id AS chunk_id,
+        fc.file_id AS file_id,
+        fc.conversation_id AS conversation_id,
+        fc.message_id AS message_id,
+        fc.chunk_index AS chunk_index,
+        fc.content AS content,
+        bm25(file_chunk_fts) AS score,
+        fc.char_start AS char_start,
+        fc.char_end AS char_end
+      FROM file_chunk_fts
+      JOIN file_chunks fc ON fc.id = file_chunk_fts.chunk_id
+      WHERE file_chunk_fts MATCH ${match}
+      ORDER BY bm25(file_chunk_fts) ASC
+      LIMIT ${Math.max(limit * 4, limit)}
+    `) as Array<{
+      chunk_id: string;
+      file_id: string;
+      conversation_id: string | null;
+      message_id: string | null;
+      chunk_index: number;
+      content: string;
+      score: number;
+      char_start: number;
+      char_end: number;
+    }>;
+    const fileSet = input.file_ids?.length ? new Set(input.file_ids) : null;
+    const perFile = new Map<string, number>();
+    const out: FileSearchResult[] = [];
+    for (const row of rows) {
+      if (input.conversation_id && row.conversation_id !== input.conversation_id) continue;
+      if (fileSet && !fileSet.has(row.file_id)) continue;
+      const usedForFile = perFile.get(row.file_id) ?? 0;
+      if (usedForFile >= 2) continue;
+      perFile.set(row.file_id, usedForFile + 1);
+      out.push({
+        chunk_id: row.chunk_id,
+        file_id: row.file_id,
+        conversation_id: row.conversation_id,
+        message_id: row.message_id,
+        chunk_index: row.chunk_index,
+        content: input.include_content === false ? null : row.content,
+        snippet: row.content.length > 600 ? `${row.content.slice(0, 600)}…` : row.content,
+        score: row.conversation_id === input.conversation_id ? row.score - 0.1 : row.score,
+        char_start: row.char_start,
+        char_end: row.char_end,
+      });
+      if (out.length >= limit) break;
+    }
+    return out.sort((a, b) => a.score - b.score);
   }
 }
 

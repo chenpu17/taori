@@ -20,6 +20,12 @@ use tokio::{
 
 use crate::SidecarEndpoint;
 
+fn use_dev_file_keystore() -> bool {
+    std::env::var("TAORI_DESKTOP_DEV_KEYSTORE")
+        .map(|value| value == "dev_file")
+        .unwrap_or(false)
+}
+
 pub async fn spawn_sidecar(
     _app: &AppHandle,
     control_url: &str,
@@ -35,13 +41,20 @@ pub async fn spawn_sidecar(
 
     let mut cmd = Command::new(program);
     cmd.args(args)
-        .env("CONTROL_URL", control_url)
-        .env("CONTROL_BEARER", control_bearer)
         .env("NODE_ENV", "development")
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit())
         .stdin(Stdio::null())
         .kill_on_drop(true);
+    if use_dev_file_keystore() {
+        tracing::warn!(
+            "desktop dev using sidecar dev_file keystore; set TAORI_DESKTOP_DEV_KEYSTORE=keychain to use OS Keychain"
+        );
+        cmd.env_remove("CONTROL_URL").env_remove("CONTROL_BEARER");
+    } else {
+        cmd.env("CONTROL_URL", control_url)
+            .env("CONTROL_BEARER", control_bearer);
+    }
 
     let mut child = cmd.spawn().context("spawn sidecar")?;
     let stdout = child
@@ -121,4 +134,28 @@ fn shell_split(s: &str) -> anyhow::Result<Vec<String>> {
         out.push(cur);
     }
     Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::use_dev_file_keystore;
+
+    #[test]
+    fn dev_file_keystore_is_explicit_opt_in() {
+        let previous = std::env::var("TAORI_DESKTOP_DEV_KEYSTORE").ok();
+
+        std::env::remove_var("TAORI_DESKTOP_DEV_KEYSTORE");
+        assert!(!use_dev_file_keystore());
+
+        std::env::set_var("TAORI_DESKTOP_DEV_KEYSTORE", "dev_file");
+        assert!(use_dev_file_keystore());
+
+        std::env::set_var("TAORI_DESKTOP_DEV_KEYSTORE", "keychain");
+        assert!(!use_dev_file_keystore());
+
+        match previous {
+            Some(value) => std::env::set_var("TAORI_DESKTOP_DEV_KEYSTORE", value),
+            None => std::env::remove_var("TAORI_DESKTOP_DEV_KEYSTORE"),
+        }
+    }
 }

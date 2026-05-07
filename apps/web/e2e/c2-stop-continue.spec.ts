@@ -10,8 +10,8 @@
  *        and a new ✏️ 续写 button is visible on the truncated assistant
  *        message.
  *   3. click ✏️ 续写.
- *      → assert a new user bubble with the "请继续上文…" prompt appears,
- *        a fresh assistant streams in, and no console errors are raised.
+ *      → assert the Sidecar run continue API resumes without adding a
+ *        synthetic "请继续上文…" user bubble, and no console errors are raised.
  */
 import { test, expect } from '@playwright/test';
 import {
@@ -121,7 +121,7 @@ test('C2 user can stop a streaming reply then resume with the 续写 button', as
   // Capture how much assistant text we already have (sanity check that
   // we really did stop mid-stream, i.e. less than the full reply).
   const partial = (
-    (await page.locator('.msg.assistant').first().innerText()) || ''
+    (await page.locator('.msg.assistant .msg-content').first().innerText()) || ''
   ).trim();
   expect(partial.length).toBeGreaterThan(0);
   expect(partial.length).toBeLessThan(LONG_REPLY.length);
@@ -129,25 +129,16 @@ test('C2 user can stop a streaming reply then resume with the 续写 button', as
   // Click 续写.
   await continueBtn.click();
 
-  // A new user bubble appears with the continue prompt.
+  // The continue API must not add a synthetic user bubble.
   await expect(
     page.locator('.msg.user').filter({ hasText: '请继续上文' }),
-  ).toHaveCount(1, { timeout: 10_000 });
+  ).toHaveCount(0, { timeout: 10_000 });
 
-  // Streaming kicks off again; wait for it to complete.
-  await expect(page.getByTestId('composer-stop')).toBeVisible({
-    timeout: 10_000,
+  // The resumed answer is persisted as a second assistant message.
+  await expect(page.locator('.msg.assistant')).toHaveCount(2, {
+    timeout: 20_000,
   });
-  // Stop the second stream too so the test stays bounded.
-  await page.waitForTimeout(600);
-  await page.getByTestId('composer-stop').click();
-  await expect(page.getByTestId('composer-stop')).toHaveCount(0, {
-    timeout: 10_000,
-  });
-
-  // We should now have 2 user msgs + 2 assistant msgs.
-  expect(await page.locator('.msg.user').count()).toBe(2);
-  expect(await page.locator('.msg.assistant').count()).toBe(2);
+  expect(await page.locator('.msg.user').count()).toBe(1);
 
   // No console errors leaked from the renderer.
   expect(
@@ -159,4 +150,43 @@ test('C2 user can stop a streaming reply then resume with the 续写 button', as
         !/aborted|AbortError|BodyStreamBuffer/i.test(e),
     ),
   ).toEqual([]);
+});
+
+test('C2 continue shows cost confirmation before high-cost resume', async ({ page }) => {
+  test.setTimeout(120_000);
+  await resetSidecar(env);
+  await seedDefaultChatModel();
+  await authedFetch(env, '/v1/memories', {
+    method: 'PUT',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      scope: 'global',
+      key: 'cost_confirm_threshold_usd',
+      value: '0.0000000001',
+    }),
+  });
+
+  await page.goto('/');
+  await expect(page.getByTestId('chat-panel')).toBeVisible({ timeout: 10_000 });
+
+  await page.getByTestId('composer-input').fill('请详细解释一下，并允许我停止后续写');
+  await page.getByTestId('composer-send').click();
+  await expect(page.getByTestId('cost-confirm-dialog')).toBeVisible({ timeout: 5_000 });
+  await page.getByTestId('cost-confirm-continue').click();
+
+  await expect(page.getByTestId('composer-stop')).toBeVisible({ timeout: 10_000 });
+  await page.waitForTimeout(800);
+  await page.getByTestId('composer-stop').click();
+  await expect(page.getByTestId('composer-stop')).toHaveCount(0, { timeout: 10_000 });
+  await expect(page.getByTestId('msg-continue')).toBeVisible({ timeout: 10_000 });
+
+  await page.getByTestId('msg-continue').click();
+  await expect(page.getByTestId('cost-confirm-dialog')).toBeVisible({ timeout: 5_000 });
+  await expect(page.getByTestId('cost-confirm-cheaper')).toBeDisabled();
+  expect(await page.locator('.msg.assistant').count()).toBe(1);
+
+  await page.getByTestId('cost-confirm-continue').click();
+  await expect(page.getByTestId('cost-confirm-dialog')).not.toBeVisible({ timeout: 15_000 });
+  await expect(page.locator('.msg.assistant')).toHaveCount(2, { timeout: 20_000 });
+  expect(await page.locator('.msg.user').count()).toBe(1);
 });

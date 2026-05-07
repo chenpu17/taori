@@ -21,6 +21,7 @@ import type {
   CatalogSyncResponse,
   DiscoveredModel,
 } from '@taori/shared';
+import { isChatCapable } from '@taori/shared';
 import { listProviderModels } from '../providers/registry.js';
 import { enrichVolcengineArkModel } from '../providers/volcengine_ark.js';
 import type { KeyStore } from '../keystore.js';
@@ -53,7 +54,7 @@ function catalogPatch(dm: DiscoveredModel): Parameters<ModelsRepo['patchPricing'
     capability: dm.capability,
     context_length: dm.context_length,
     supports_vision: dm.supports_vision,
-    supports_tools: dm.supports_tools ?? false,
+    supports_tools: dm.supports_tools ?? isChatCapable(dm.capability),
   };
 }
 
@@ -63,7 +64,7 @@ function capabilityPatch(dm: DiscoveredModel): Parameters<ModelsRepo['patchPrici
     capability: dm.capability,
     context_length: dm.context_length,
     supports_vision: dm.supports_vision,
-    supports_tools: dm.supports_tools ?? false,
+    supports_tools: dm.supports_tools ?? isChatCapable(dm.capability),
   };
 }
 

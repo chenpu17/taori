@@ -17,8 +17,9 @@
  * passed via ctx.testForce. This module never reaches a real adapter when
  * forced — keeps E2E hermetic.
  *
- * Adapters: openai (DALL-E), replicate, sd_webui. All return base64 data;
- * we never fetch URLs separately to avoid cross-host CORS / token leaks.
+ * Adapters: OpenAI-compatible, OpenRouter, PackyAPI, Ark, Huawei MaaS, Replicate, SD WebUI.
+ * URL-returning image APIs are fetched server-side, then persisted as local
+ * file rows so Renderer never needs provider tokens.
  */
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
@@ -75,6 +76,8 @@ interface AdapterResult {
   width: number;
   height: number;
 }
+
+const IMAGE_GENERATION_TIMEOUT_MS = 120_000;
 
 export function createImageGenerateTool(
   deps: ImageGenerateDeps,
@@ -137,7 +140,7 @@ export function createImageGenerateTool(
         const apiKey = provider.api_key_ref
           ? await deps.keystore.read(provider.api_key_ref)
           : null;
-        adapterResult = await callAdapter(provider.type, {
+        adapterResult = await callImageAdapterWithTimeout(provider.type, {
           baseUrl: provider.base_url,
           apiKey,
           modelName: model.model_name,
@@ -236,9 +239,11 @@ function vErr(msg: string): Error {
 
 async function callAdapter(
   type: string,
-  args: { baseUrl: string; apiKey: string | null; modelName: string; prompt: string },
+  args: AdapterArgs,
 ): Promise<AdapterResult> {
   switch (type) {
+    case 'openrouter':
+      return adapterOpenRouter(args);
     case 'openai':
       return adapterOpenAI(args);
     case 'custom':
@@ -251,9 +256,46 @@ async function callAdapter(
       return adapterVolcengineArk(args);
     case 'huawei_maas':
       return adapterHuaweiMaas(args);
+    case 'packyapi':
+      return adapterPackyApi(args);
+    case 'siliconflow':
+      return adapterSiliconFlow(args);
     default:
       throw vErr(`unsupported provider type for image_generate: ${type}`);
   }
+}
+
+interface AdapterArgs {
+  baseUrl: string;
+  apiKey: string | null;
+  modelName: string;
+  prompt: string;
+  signal: AbortSignal;
+}
+
+async function callImageAdapterWithTimeout(
+  type: string,
+  args: Omit<AdapterArgs, 'signal'>,
+): Promise<AdapterResult> {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), IMAGE_GENERATION_TIMEOUT_MS);
+  try {
+    return await callAdapter(type, { ...args, signal: controller.signal });
+  } catch (err) {
+    if (controller.signal.aborted || isAbortError(err)) {
+      throw Object.assign(
+        new Error(`image generation timed out after ${IMAGE_GENERATION_TIMEOUT_MS / 1000}s`),
+        { classification: 'network' },
+      );
+    }
+    throw err;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+function isAbortError(err: unknown): boolean {
+  return err instanceof DOMException && err.name === 'AbortError';
 }
 
 /**
@@ -266,6 +308,7 @@ async function adapterVolcengineArk(args: {
   apiKey: string | null;
   modelName: string;
   prompt: string;
+  signal: AbortSignal;
 }): Promise<AdapterResult> {
   if (!args.apiKey) throw vErr('Ark image adapter requires api_key');
   const url = `${args.baseUrl.replace(/\/+$/, '')}/images/generations`;
@@ -286,6 +329,7 @@ async function adapterVolcengineArk(args: {
       size: imgSize,
       response_format: 'b64_json',
     }),
+    signal: args.signal,
   });
   if (!res.ok) {
     const text = await res.text().catch(() => '');
@@ -301,7 +345,7 @@ async function adapterVolcengineArk(args: {
     return { ...parseBase64Image(item.b64_json), width: imgDim, height: imgDim };
   }
   if (item?.url) {
-    const imgRes = await fetch(item.url);
+    const imgRes = await fetch(item.url, { signal: args.signal });
     if (!imgRes.ok) throw new Error(`Ark image fetch failed ${imgRes.status}`);
     const buf = Buffer.from(await imgRes.arrayBuffer());
     return {
@@ -324,6 +368,7 @@ async function adapterHuaweiMaas(args: {
   apiKey: string | null;
   modelName: string;
   prompt: string;
+  signal: AbortSignal;
 }): Promise<AdapterResult> {
   if (!args.apiKey) throw vErr('Huawei MaaS image adapter requires api_key');
   const imageBase = args.baseUrl
@@ -343,6 +388,7 @@ async function adapterHuaweiMaas(args: {
       size: '1024x1024',
       response_format: 'b64_json',
     }),
+    signal: args.signal,
   });
   if (!res.ok) {
     const text = await res.text().catch(() => '');
@@ -358,7 +404,7 @@ async function adapterHuaweiMaas(args: {
     return { ...parseBase64Image(item.b64_json), width: 1024, height: 1024 };
   }
   if (item?.url) {
-    const imgRes = await fetch(item.url);
+    const imgRes = await fetch(item.url, { signal: args.signal });
     if (!imgRes.ok) throw new Error(`Huawei MaaS image fetch failed ${imgRes.status}`);
     const buf = Buffer.from(await imgRes.arrayBuffer());
     return {
@@ -376,6 +422,7 @@ async function adapterOpenAI(args: {
   apiKey: string | null;
   modelName: string;
   prompt: string;
+  signal: AbortSignal;
 }): Promise<AdapterResult> {
   if (!args.apiKey) throw vErr('OpenAI image adapter requires api_key');
   const url = `${args.baseUrl.replace(/\/+$/, '')}/images/generations`;
@@ -392,6 +439,7 @@ async function adapterOpenAI(args: {
       size: '1024x1024',
       response_format: 'b64_json',
     }),
+    signal: args.signal,
   });
   if (!res.ok) {
     const text = await res.text().catch(() => '');
@@ -399,10 +447,150 @@ async function adapterOpenAI(args: {
     Object.assign(err, { upstreamStatus: res.status });
     throw err;
   }
-  const json = (await res.json()) as { data?: Array<{ b64_json?: string }> };
-  const b64 = json.data?.[0]?.b64_json;
-  if (!b64) throw new Error('OpenAI images: missing b64_json');
-  return { ...parseBase64Image(b64), width: 1024, height: 1024 };
+  const json = (await res.json()) as { data?: Array<{ b64_json?: string; url?: string }> };
+  const item = json.data?.[0];
+  if (item?.b64_json) {
+    return { ...parseBase64Image(item.b64_json), width: 1024, height: 1024 };
+  }
+  if (item?.url) {
+    return fetchGeneratedImageUrl(item.url, 'OpenAI-compatible', 1024, 1024, args.signal);
+  }
+  throw new Error('OpenAI images: missing b64_json or url');
+}
+
+async function adapterOpenRouter(args: {
+  baseUrl: string;
+  apiKey: string | null;
+  modelName: string;
+  prompt: string;
+  signal: AbortSignal;
+}): Promise<AdapterResult> {
+  if (!args.apiKey) throw vErr('OpenRouter image adapter requires api_key');
+  const url = `${args.baseUrl.replace(/\/+$/, '')}/chat/completions`;
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: {
+      authorization: `Bearer ${args.apiKey}`,
+      'content-type': 'application/json',
+    },
+    body: JSON.stringify({
+      model: args.modelName,
+      messages: [{ role: 'user', content: args.prompt }],
+      modalities: ['image', 'text'],
+    }),
+    signal: args.signal,
+  });
+  if (!res.ok) {
+    const text = await res.text().catch(() => '');
+    const err = new Error(`OpenRouter images upstream ${res.status}: ${text.slice(0, 200)}`);
+    Object.assign(err, { upstreamStatus: res.status });
+    throw err;
+  }
+  const json = (await res.json()) as {
+    choices?: Array<{
+      message?: {
+        images?: Array<{
+          image_url?: { url?: string };
+          imageUrl?: { url?: string };
+          url?: string;
+        }>;
+      };
+    }>;
+  };
+  const image = json.choices?.[0]?.message?.images?.[0];
+  const imageUrl = image?.image_url?.url ?? image?.imageUrl?.url ?? image?.url;
+  if (!imageUrl) throw new Error('OpenRouter images: missing message.images[0].image_url.url');
+  if (imageUrl.startsWith('data:')) {
+    return { ...parseBase64Image(imageUrl), width: 1024, height: 1024 };
+  }
+  return fetchGeneratedImageUrl(imageUrl, 'OpenRouter', 1024, 1024, args.signal);
+}
+
+async function adapterPackyApi(args: {
+  baseUrl: string;
+  apiKey: string | null;
+  modelName: string;
+  prompt: string;
+  signal: AbortSignal;
+}): Promise<AdapterResult> {
+  if (!args.apiKey) throw vErr('PackyAPI image adapter requires api_key');
+  const url = `${args.baseUrl.replace(/\/+$/, '')}/images/generations`;
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: {
+      authorization: `Bearer ${args.apiKey}`,
+      'content-type': 'application/json',
+    },
+    body: JSON.stringify({
+      model: args.modelName,
+      prompt: args.prompt,
+      n: 1,
+      size: '1024x1024',
+      response_format: 'b64_json',
+    }),
+    signal: args.signal,
+  });
+  if (!res.ok) {
+    const text = await res.text().catch(() => '');
+    const err = new Error(`PackyAPI images upstream ${res.status}: ${text.slice(0, 200)}`);
+    Object.assign(err, { upstreamStatus: res.status });
+    throw err;
+  }
+  const json = (await res.json()) as { data?: Array<{ b64_json?: string; url?: string }> };
+  const item = json.data?.[0];
+  if (item?.b64_json) {
+    return { ...parseBase64Image(item.b64_json), width: 1024, height: 1024 };
+  }
+  if (item?.url) {
+    return fetchGeneratedImageUrl(item.url, 'PackyAPI', 1024, 1024, args.signal);
+  }
+  throw new Error('PackyAPI images: missing b64_json or url');
+}
+
+async function adapterSiliconFlow(args: {
+  baseUrl: string;
+  apiKey: string | null;
+  modelName: string;
+  prompt: string;
+  signal: AbortSignal;
+}): Promise<AdapterResult> {
+  if (!args.apiKey) throw vErr('SiliconFlow image adapter requires api_key');
+  const url = `${args.baseUrl.replace(/\/+$/, '')}/images/generations`;
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: {
+      authorization: `Bearer ${args.apiKey}`,
+      'content-type': 'application/json',
+    },
+    body: JSON.stringify({
+      model: args.modelName,
+      prompt: args.prompt,
+      image_size: '1024x1024',
+      batch_size: 1,
+      num_inference_steps: 20,
+      guidance_scale: 7.5,
+    }),
+    signal: args.signal,
+  });
+  if (!res.ok) {
+    const text = await res.text().catch(() => '');
+    const err = new Error(`SiliconFlow images upstream ${res.status}: ${text.slice(0, 200)}`);
+    Object.assign(err, { upstreamStatus: res.status });
+    throw err;
+  }
+  const json = (await res.json()) as {
+    images?: Array<{ url?: string; b64_json?: string; image?: string }>;
+    data?: Array<{ url?: string; b64_json?: string; image?: string }>;
+  };
+  const item = json.images?.[0] ?? json.data?.[0];
+  const b64 = item?.b64_json ?? item?.image;
+  if (b64) {
+    return { ...parseBase64Image(b64), width: 1024, height: 1024 };
+  }
+  if (item?.url) {
+    return fetchGeneratedImageUrl(item.url, 'SiliconFlow', 1024, 1024, args.signal);
+  }
+  throw new Error('SiliconFlow images: missing url or b64_json');
 }
 
 async function adapterReplicate(args: {
@@ -410,6 +598,7 @@ async function adapterReplicate(args: {
   apiKey: string | null;
   modelName: string;
   prompt: string;
+  signal: AbortSignal;
 }): Promise<AdapterResult> {
   if (!args.apiKey) throw vErr('Replicate adapter requires api_key');
   const url = `${args.baseUrl.replace(/\/+$/, '')}/predictions`;
@@ -425,6 +614,7 @@ async function adapterReplicate(args: {
       prefer: 'wait',
     },
     body: JSON.stringify({ version, input: { prompt: args.prompt } }),
+    signal: args.signal,
   });
   if (!res.ok) {
     const text = await res.text().catch(() => '');
@@ -436,7 +626,7 @@ async function adapterReplicate(args: {
   };
   const outputUrl = Array.isArray(json.output) ? json.output[0] : json.output;
   if (!outputUrl) throw new Error('Replicate: missing output url');
-  const fileRes = await fetch(outputUrl);
+  const fileRes = await fetch(outputUrl, { signal: args.signal });
   if (!fileRes.ok) throw new Error(`Replicate output fetch ${fileRes.status}`);
   const buf = Buffer.from(await fileRes.arrayBuffer());
   const mime = fileRes.headers.get('content-type') ?? 'image/png';
@@ -446,12 +636,14 @@ async function adapterReplicate(args: {
 async function adapterSdWebui(args: {
   baseUrl: string;
   prompt: string;
+  signal: AbortSignal;
 }): Promise<AdapterResult> {
   const url = `${args.baseUrl.replace(/\/+$/, '')}/sdapi/v1/txt2img`;
   const res = await fetch(url, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ prompt: args.prompt, steps: 20 }),
+    signal: args.signal,
   });
   if (!res.ok) {
     const text = await res.text().catch(() => '');
@@ -476,6 +668,28 @@ function parseBase64Image(raw: string, fallbackMime = 'image/png'): {
   return {
     b64: (b64 ?? '').replace(/\s/g, ''),
     mime: normalizeImageMime(mime),
+  };
+}
+
+async function fetchGeneratedImageUrl(
+  url: string,
+  label: string,
+  width: number,
+  height: number,
+  signal: AbortSignal,
+): Promise<AdapterResult> {
+  const parsed = new URL(url);
+  if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') {
+    throw vErr(`${label} image url must be http(s)`);
+  }
+  const imgRes = await fetch(url, { signal });
+  if (!imgRes.ok) throw new Error(`${label} image fetch failed ${imgRes.status}`);
+  const buf = Buffer.from(await imgRes.arrayBuffer());
+  return {
+    b64: buf.toString('base64'),
+    mime: imgRes.headers.get('content-type') ?? 'image/png',
+    width,
+    height,
   };
 }
 

@@ -22,6 +22,7 @@ import type { FastifyInstance } from 'fastify';
 import os from 'node:os';
 import path from 'node:path';
 import fs from 'node:fs';
+import { RunEventsRepo } from '../src/db/repos/index.js';
 
 const bearer = 'test_bearer_m24';
 
@@ -244,6 +245,221 @@ describe('M2.4 — image_generate via /v1/tools/invoke', () => {
     expect((c?.actual_cost_usd ?? 0)).toBeGreaterThan(0);
   });
 
+  it('PackyAPI gpt-image-2 accepts URL image responses and persists them locally', async () => {
+    const providers = new ProvidersRepo(db);
+    const models = new ModelsRepo(db);
+    const prov = providers.create({
+      name: 'PackyAPI',
+      type: 'packyapi',
+      base_url: 'https://www.packyapi.com/v1',
+      api_key: 'sk-packy-test',
+    });
+    await keystore.write(prov.api_key_ref!, 'sk-packy-test');
+    const packyModel = models.create({
+      provider_id: prov.id,
+      model_name: 'gpt-image-2',
+      capability: 'image',
+      display_name: 'GPT Image 2',
+      price_per_call: 0.05,
+    });
+
+    let imageGenerationCalls = 0;
+    let imageFetchCalls = 0;
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async (url, init) => {
+      if (String(url).includes('/images/generations')) {
+        imageGenerationCalls++;
+        const body = JSON.parse(String(init?.body ?? '{}')) as {
+          model?: string;
+          prompt?: string;
+          response_format?: string;
+          size?: string;
+        };
+        expect(body).toMatchObject({
+          model: 'gpt-image-2',
+          prompt: 'a robot',
+          size: '1024x1024',
+        });
+        expect(body.response_format).toBe('b64_json');
+        return new Response(
+          JSON.stringify({ data: [{ url: 'https://packy-cdn.test/generated.png' }] }),
+          { status: 200, headers: { 'content-type': 'application/json' } },
+        );
+      }
+      if (String(url) === 'https://packy-cdn.test/generated.png') {
+        imageFetchCalls++;
+        return new Response(Buffer.from('packy-image-bytes'), {
+          status: 200,
+          headers: { 'content-type': 'image/png' },
+        });
+      }
+      throw new Error(`unexpected fetch: ${url}`);
+    });
+
+    try {
+      const res = await invokeImage(null, packyModel.id);
+      expect(res.statusCode).toBe(200);
+      const body = res.json() as {
+        data: {
+          ok: boolean;
+          output?: { file_id: string; assistant_message_id: string; content_type: string };
+        };
+      };
+      expect(body.data.ok).toBe(true);
+      expect(body.data.output?.content_type).toBe('image/png');
+      expect(imageGenerationCalls).toBe(1);
+      expect(imageFetchCalls).toBe(1);
+      const fileRow = db.select().from(filesTable).all().find((f) => f.id === body.data.output?.file_id);
+      expect(fileRow?.mime_type).toBe('image/png');
+      expect(fs.readFileSync(fileRow!.original_path).toString('utf8')).toBe('packy-image-bytes');
+    } finally {
+      fetchSpy.mockRestore();
+    }
+  });
+
+  it('OpenRouter image adapter uses chat/completions image modality responses', async () => {
+    const providers = new ProvidersRepo(db);
+    const models = new ModelsRepo(db);
+    const prov = providers.create({
+      name: 'OpenRouter',
+      type: 'openrouter',
+      base_url: 'https://openrouter.ai/api/v1',
+      api_key: 'sk-or-test',
+    });
+    await keystore.write(prov.api_key_ref!, 'sk-or-test');
+    const openRouterImage = models.create({
+      provider_id: prov.id,
+      model_name: 'openai/gpt-image-1',
+      capability: 'image',
+      display_name: 'GPT Image 1',
+      price_per_call: 0.04,
+    });
+
+    let imageGenerationCalls = 0;
+    const png = Buffer.from('openrouter-image-bytes').toString('base64');
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async (url, init) => {
+      expect(String(url)).toBe('https://openrouter.ai/api/v1/chat/completions');
+      imageGenerationCalls++;
+      const body = JSON.parse(String(init?.body ?? '{}')) as {
+        model?: string;
+        modalities?: string[];
+        messages?: Array<{ role: string; content: string }>;
+      };
+      expect(body).toMatchObject({
+        model: 'openai/gpt-image-1',
+        modalities: ['image', 'text'],
+        messages: [{ role: 'user', content: 'a robot' }],
+      });
+      return new Response(
+        JSON.stringify({
+          choices: [
+            {
+              message: {
+                images: [
+                  {
+                    image_url: {
+                      url: `data:image/png;base64,${png}`,
+                    },
+                  },
+                ],
+              },
+            },
+          ],
+        }),
+        { status: 200, headers: { 'content-type': 'application/json' } },
+      );
+    });
+
+    try {
+      const res = await invokeImage(null, openRouterImage.id);
+      expect(res.statusCode).toBe(200);
+      const body = res.json() as {
+        data: {
+          ok: boolean;
+          output?: { file_id: string; content_type: string };
+        };
+      };
+      expect(body.data.ok).toBe(true);
+      expect(body.data.output?.content_type).toBe('image/png');
+      expect(imageGenerationCalls).toBe(1);
+      const fileRow = db.select().from(filesTable).all().find((f) => f.id === body.data.output?.file_id);
+      expect(fileRow?.mime_type).toBe('image/png');
+      expect(fs.readFileSync(fileRow!.original_path).toString('utf8')).toBe('openrouter-image-bytes');
+    } finally {
+      fetchSpy.mockRestore();
+    }
+  });
+
+  it('SiliconFlow image adapter uses image_size and persists URL image responses', async () => {
+    const providers = new ProvidersRepo(db);
+    const models = new ModelsRepo(db);
+    const prov = providers.create({
+      name: 'SiliconFlow',
+      type: 'siliconflow',
+      base_url: 'https://api.siliconflow.cn/v1',
+      api_key: 'sk-sf-test',
+    });
+    await keystore.write(prov.api_key_ref!, 'sk-sf-test');
+    const sfModel = models.create({
+      provider_id: prov.id,
+      model_name: 'black-forest-labs/FLUX.1-schnell',
+      capability: 'image',
+      display_name: 'FLUX.1 schnell',
+      price_per_call: 0.03,
+    });
+
+    let imageGenerationCalls = 0;
+    let imageFetchCalls = 0;
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async (url, init) => {
+      if (String(url).includes('/images/generations')) {
+        imageGenerationCalls++;
+        const body = JSON.parse(String(init?.body ?? '{}')) as {
+          model?: string;
+          prompt?: string;
+          image_size?: string;
+          size?: string;
+        };
+        expect(body).toMatchObject({
+          model: 'black-forest-labs/FLUX.1-schnell',
+          prompt: 'a robot',
+          image_size: '1024x1024',
+        });
+        expect(body.size).toBeUndefined();
+        return new Response(
+          JSON.stringify({ images: [{ url: 'https://sf-cdn.test/generated.png' }] }),
+          { status: 200, headers: { 'content-type': 'application/json' } },
+        );
+      }
+      if (String(url) === 'https://sf-cdn.test/generated.png') {
+        imageFetchCalls++;
+        return new Response(Buffer.from('siliconflow-image-bytes'), {
+          status: 200,
+          headers: { 'content-type': 'image/png' },
+        });
+      }
+      throw new Error(`unexpected fetch: ${url}`);
+    });
+
+    try {
+      const res = await invokeImage(null, sfModel.id);
+      expect(res.statusCode).toBe(200);
+      const body = res.json() as {
+        data: {
+          ok: boolean;
+          output?: { file_id: string; content_type: string };
+        };
+      };
+      expect(body.data.ok).toBe(true);
+      expect(body.data.output?.content_type).toBe('image/png');
+      expect(imageGenerationCalls).toBe(1);
+      expect(imageFetchCalls).toBe(1);
+      const fileRow = db.select().from(filesTable).all().find((f) => f.id === body.data.output?.file_id);
+      expect(fileRow?.mime_type).toBe('image/png');
+      expect(fs.readFileSync(fileRow!.original_path).toString('utf8')).toBe('siliconflow-image-bytes');
+    } finally {
+      fetchSpy.mockRestore();
+    }
+  });
+
   it('rejects non-image model with validation_error', async () => {
     const res = await invokeImage('success', chatModelId);
     const body = res.json() as { data: { ok: boolean; error?: { classification: string; message: string } } };
@@ -405,6 +621,158 @@ describe('M2.4 — image_generate via /v1/tools/invoke', () => {
       const attachments = JSON.parse(persisted[1]!.attachments ?? '[]') as Array<{ kind?: string; file_id?: string }>;
       expect(attachments[0]?.kind).toBe('image');
       expect(attachments[0]?.file_id).toBeTruthy();
+    } finally {
+      fetchSpy.mockRestore();
+    }
+  });
+
+  it('completes image-only tool turns when the provider does not send final text', async () => {
+    const models = new ModelsRepo(db);
+    const providers = new ProvidersRepo(db);
+    const provider = providers.list()[0]!;
+    const toolChat = models.create({
+      provider_id: provider.id,
+      model_name: 'gpt-tools-image-only',
+      capability: 'chat',
+      display_name: 'GPT tools image only',
+      supports_tools: true,
+    });
+
+    const toolCallBody =
+      `data: ${JSON.stringify({ id: '1', object: 'chat.completion.chunk', created: 1, model: 'm', choices: [{ index: 0, delta: { role: 'assistant', tool_calls: [{ index: 0, id: 'call_img_1', type: 'function', function: { name: 'image_generate', arguments: '' } }] }, finish_reason: null }] })}\n\n` +
+      `data: ${JSON.stringify({ id: '1', object: 'chat.completion.chunk', created: 1, model: 'm', choices: [{ index: 0, delta: { tool_calls: [{ index: 0, function: { arguments: '{"prompt":"image only"}' } }] }, finish_reason: null }] })}\n\n` +
+      `data: ${JSON.stringify({ id: '1', object: 'chat.completion.chunk', created: 1, model: 'm', choices: [{ index: 0, delta: {}, finish_reason: 'tool_calls' }], usage: { prompt_tokens: 5, completion_tokens: 1, total_tokens: 6 } })}\n\n` +
+      `data: [DONE]\n\n`;
+    let chatCalls = 0;
+    let imageCalls = 0;
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async (url, init) => {
+      if (String(url).includes('/images/generations')) {
+        imageCalls++;
+        return new Response(JSON.stringify({ data: [{ b64_json: Buffer.from('image-only-png').toString('base64') }] }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        });
+      }
+      chatCalls++;
+      if (chatCalls === 1) {
+        return new Response(toolCallBody, {
+          status: 200,
+          headers: { 'content-type': 'text/event-stream' },
+        });
+      }
+      return new Response(new ReadableStream({ start() {} }), {
+        status: 200,
+        headers: { 'content-type': 'text/event-stream' },
+      });
+    });
+
+    try {
+      const startedAt = Date.now();
+      const res = await app.inject({
+        method: 'POST',
+        url: '/v1/chat',
+        headers: { authorization: `Bearer ${bearer}`, 'content-type': 'application/json' },
+        payload: {
+          model_id: toolChat.id,
+          messages: [{ role: 'user', content: '生成一张只需要图片的图' }],
+        },
+      });
+      expect(Date.now() - startedAt).toBeLessThan(9000);
+      expect(res.statusCode).toBe(200);
+      expect(chatCalls).toBe(2);
+      expect(imageCalls).toBe(1);
+      expect(res.payload).toContain('"type":"tool_image_result"');
+      expect(res.payload).toContain(JSON.stringify('图片已生成。'));
+
+      const metaLine = res.payload
+        .split('\n')
+        .find((line) => line.startsWith('8:') && line.includes('"type":"meta"'));
+      const meta = JSON.parse(metaLine!.slice(2))[0] as { conversation_id: string; message_id: string };
+      const persisted = new MessagesRepo(db).listByConversation(meta.conversation_id);
+      const assistant = persisted.find((m) => m.id === meta.message_id)!;
+      expect(assistant.status).toBe('complete');
+      expect(assistant.content).toBe('图片已生成。');
+
+      const events = new RunEventsRepo(db).listByConversation(meta.conversation_id);
+      expect(events.map((e) => e.kind)).toEqual(expect.arrayContaining([
+        'tool.completed',
+        'model.completed',
+        'turn.completed',
+      ]));
+      expect(events.find((e) => e.kind === 'model.completed')?.payload?.image_tool_finalized_without_model_text).toBe(true);
+    } finally {
+      fetchSpy.mockRestore();
+    }
+  });
+
+  it('emits skip_tool recovery guidance when a tool fails but the model finishes', async () => {
+    const models = new ModelsRepo(db);
+    const providers = new ProvidersRepo(db);
+    const provider = providers.list()[0]!;
+    const toolChat = models.create({
+      provider_id: provider.id,
+      model_name: 'gpt-tools-image-fail-recovery',
+      capability: 'chat',
+      display_name: 'GPT tools image fail recovery',
+      supports_tools: true,
+    });
+
+    const toolCallBody =
+      `data: ${JSON.stringify({ id: '1', object: 'chat.completion.chunk', created: 1, model: 'm', choices: [{ index: 0, delta: { role: 'assistant', tool_calls: [{ index: 0, id: 'call_img_1', type: 'function', function: { name: 'image_generate', arguments: '' } }] }, finish_reason: null }] })}\n\n` +
+      `data: ${JSON.stringify({ id: '1', object: 'chat.completion.chunk', created: 1, model: 'm', choices: [{ index: 0, delta: { tool_calls: [{ index: 0, function: { arguments: '{"prompt":"will fail"}' } }] }, finish_reason: null }] })}\n\n` +
+      `data: ${JSON.stringify({ id: '1', object: 'chat.completion.chunk', created: 1, model: 'm', choices: [{ index: 0, delta: {}, finish_reason: 'tool_calls' }], usage: { prompt_tokens: 5, completion_tokens: 1, total_tokens: 6 } })}\n\n` +
+      `data: [DONE]\n\n`;
+    const finalTextBody =
+      `data: ${JSON.stringify({ id: '2', object: 'chat.completion.chunk', created: 1, model: 'm', choices: [{ index: 0, delta: { role: 'assistant', content: '工具失败，无法继续。' }, finish_reason: null }] })}\n\n` +
+      `data: ${JSON.stringify({ id: '2', object: 'chat.completion.chunk', created: 1, model: 'm', choices: [{ index: 0, delta: {}, finish_reason: 'stop' }], usage: { prompt_tokens: 6, completion_tokens: 5, total_tokens: 11 } })}\n\n` +
+      `data: [DONE]\n\n`;
+    let chatCalls = 0;
+    let imageCalls = 0;
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async (url) => {
+      if (String(url).includes('/images/generations')) {
+        imageCalls++;
+        return new Response(JSON.stringify({ error: { message: 'image tool failed' } }), {
+          status: 500,
+          headers: { 'content-type': 'application/json' },
+        });
+      }
+      chatCalls++;
+      return new Response(chatCalls === 1 ? toolCallBody : finalTextBody, {
+        status: 200,
+        headers: { 'content-type': 'text/event-stream' },
+      });
+    });
+
+    try {
+      const res = await app.inject({
+        method: 'POST',
+        url: '/v1/chat',
+        headers: { authorization: `Bearer ${bearer}`, 'content-type': 'application/json' },
+        payload: {
+          model_id: toolChat.id,
+          messages: [{ role: 'user', content: '生成一张会失败的图' }],
+        },
+      });
+      expect(res.statusCode).toBe(200);
+      expect(chatCalls).toBe(2);
+      expect(imageCalls).toBe(1);
+      expect(res.payload).toContain('"type":"failure_decision"');
+      expect(res.payload).toContain('"can_skip_tool":true');
+      expect(res.payload).toContain('"tool_name":"builtin.image_generate"');
+
+      const metaLine = res.payload
+        .split('\n')
+        .find((line) => line.startsWith('8:') && line.includes('"type":"meta"'));
+      const meta = JSON.parse(metaLine!.slice(2))[0] as { conversation_id: string; message_id: string };
+      const assistant = new MessagesRepo(db).listByConversation(meta.conversation_id).find((m) => m.id === meta.message_id)!;
+      expect(assistant.status).toBe('complete');
+
+      const events = new RunEventsRepo(db).listByConversation(meta.conversation_id);
+      expect(events.map((e) => e.kind)).toEqual(expect.arrayContaining([
+        'tool.failed',
+        'model.completed',
+        'turn.completed',
+      ]));
     } finally {
       fetchSpy.mockRestore();
     }

@@ -1,4 +1,5 @@
 import React, { useState, useRef, useEffect } from 'react';
+import { EmptyState } from './EmptyState.js';
 import { modelDisplayWithProvider } from './modelDisplay.js';
 
 export interface Conversation {
@@ -141,9 +142,11 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({
       if (e.key === 'Escape') {
         onClose();
       } else if (e.key === 'ArrowDown') {
+        if (results.length === 0) return;
         e.preventDefault();
         setSelectedIdx(i => (i + 1) % results.length);
       } else if (e.key === 'ArrowUp') {
+        if (results.length === 0) return;
         e.preventDefault();
         setSelectedIdx(i => (i - 1 + results.length) % results.length);
       } else if (e.key === 'Enter') {
@@ -207,21 +210,39 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({
           data-testid="cmd-palette-input"
         />
         <ul className="cmd-palette-results">
-          {results.map((result, idx) => (
-            <li
-              key={result.id}
-              className={`cmd-result ${idx === selectedIdx ? 'selected' : ''}`}
-              data-testid="cmd-result"
-              data-category={result.category}
-              onClick={() => handleSelect(result)}
-              onMouseEnter={() => setSelectedIdx(idx)}
-            >
-              <span className="cmd-category">{result.category}</span>
-              <span className="cmd-title">{result.title}</span>
-              {result.subtitle && <span className="cmd-subtitle">{result.subtitle}</span>}
+          {results.length === 0 ? (
+            <li className="cmd-result-empty">
+              <EmptyState
+                title="没有匹配结果"
+                hint="试试搜索会话标题、模型名，或输入设置 / 帮助 / 圆桌。"
+                icon="⌘"
+                compact
+                tone="muted"
+                testId="cmd-result-empty"
+              />
             </li>
-          ))}
+          ) : (
+            results.map((result, idx) => (
+              <li
+                key={result.id}
+                className={`cmd-result ${idx === selectedIdx ? 'selected' : ''}`}
+                data-testid="cmd-result"
+                data-category={result.category}
+                onClick={() => handleSelect(result)}
+                onMouseEnter={() => setSelectedIdx(idx)}
+              >
+                <span className="cmd-category">{result.category}</span>
+                <span className="cmd-title">{result.title}</span>
+                {result.subtitle && <span className="cmd-subtitle">{result.subtitle}</span>}
+              </li>
+            ))
+          )}
         </ul>
+        <div className="cmd-palette-footer" aria-hidden="true">
+          <span>↑↓ 选择</span>
+          <span>Enter 打开</span>
+          <span>Esc 关闭</span>
+        </div>
       </div>
     </div>
   );

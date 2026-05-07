@@ -21,11 +21,22 @@ export interface McpServerConfig {
   env: Record<string, string>;
 }
 
+type McpClassification = 'tool_timeout' | 'mcp_crashed';
+
+interface ClassifiedMcpError extends Error {
+  classification: McpClassification;
+}
+
+interface PooledSession {
+  session: McpStdioSession;
+  ready: Promise<McpStdioSession>;
+}
+
+const pool = new Map<string, PooledSession>();
+
 export async function listMcpTools(config: McpServerConfig): Promise<McpToolInfo[]> {
-  const session = new McpStdioSession(config);
   try {
-    await session.start();
-    await session.initialize();
+    const session = await getPooledSession(config);
     const result = await session.request('tools/list', {});
     const tools = result && typeof result === 'object' && Array.isArray((result as { tools?: unknown }).tools)
       ? (result as { tools: unknown[] }).tools
@@ -42,8 +53,9 @@ export async function listMcpTools(config: McpServerConfig): Promise<McpToolInfo
         };
       })
       .filter((tool): tool is McpToolInfo => tool !== null);
-  } finally {
-    session.close();
+  } catch (e) {
+    if (isFatalMcpError(e)) closeMcpServerSession(config);
+    throw e;
   }
 }
 
@@ -52,16 +64,87 @@ export async function callMcpTool(
   toolName: string,
   args: Record<string, unknown>,
 ): Promise<unknown> {
-  const session = new McpStdioSession(config);
   try {
-    await session.start();
-    await session.initialize();
+    const session = await getPooledSession(config);
     return await session.request('tools/call', {
       name: toolName,
       arguments: args,
     });
-  } finally {
-    session.close();
+  } catch (e) {
+    if (isFatalMcpError(e)) closeMcpServerSession(config);
+    throw e;
+  }
+}
+
+export function closeMcpServerSession(config: McpServerConfig): void {
+  const key = sessionKey(config);
+  const pooled = pool.get(key);
+  pool.delete(key);
+  pooled?.session.close();
+}
+
+export function closeAllMcpSessions(): void {
+  for (const pooled of pool.values()) pooled.session.close();
+  pool.clear();
+}
+
+async function getPooledSession(config: McpServerConfig): Promise<McpStdioSession> {
+  const key = sessionKey(config);
+  const existing = pool.get(key);
+  if (existing) return existing.ready;
+
+  const session = new McpStdioSession(config);
+  const ready = (async () => {
+    try {
+      await session.start();
+      await session.initialize();
+      return session;
+    } catch (e) {
+      session.close();
+      if (pool.get(key)?.session === session) pool.delete(key);
+      throw e;
+    }
+  })();
+  pool.set(key, { session, ready });
+  return ready;
+}
+
+function sessionKey(config: McpServerConfig): string {
+  return JSON.stringify({
+    command: config.command,
+    args: config.args,
+    env: Object.keys(config.env)
+      .sort()
+      .map((key) => [key, config.env[key]]),
+  });
+}
+
+function classifiedError(message: string, classification: McpClassification): ClassifiedMcpError {
+  return Object.assign(new Error(message), { classification });
+}
+
+function isFatalMcpError(err: unknown): boolean {
+  return Boolean(
+    err &&
+      typeof err === 'object' &&
+      'classification' in err &&
+      ((err as { classification?: unknown }).classification === 'tool_timeout' ||
+        (err as { classification?: unknown }).classification === 'mcp_crashed'),
+  );
+}
+
+function processExitedMessage(code: number | null, signal: NodeJS.Signals | null): string {
+  return `MCP server exited${code == null ? '' : ` with code ${code}`}${signal ? ` (${signal})` : ''}`;
+}
+
+function isChildAlive(child: ChildProcessWithoutNullStreams): boolean {
+  return child.exitCode == null && child.signalCode == null && !child.killed;
+}
+
+function writeOrThrow(child: ChildProcessWithoutNullStreams, data: string | Buffer): void {
+  const ok = child.stdin.write(data);
+  if (!ok && child.stdin.destroyed) {
+    throw classifiedError('MCP server stdin is closed', 'mcp_crashed');
   }
 }
 
@@ -81,7 +164,8 @@ class McpStdioSession {
   constructor(private readonly config: McpServerConfig) {}
 
   async start(): Promise<void> {
-    if (this.child) return;
+    if (this.child && isChildAlive(this.child)) return;
+    if (this.child) this.close();
     const child = spawn(this.config.command, this.config.args, {
       env: { ...process.env, ...this.config.env },
       stdio: ['pipe', 'pipe', 'pipe'],
@@ -91,19 +175,36 @@ class McpStdioSession {
     child.stderr.on('data', () => {
       /* stderr is intentionally not surfaced; failed requests carry context. */
     });
-    child.on('exit', () => {
+    child.on('exit', (code, signal) => {
       for (const [id, pending] of this.pending) {
         clearTimeout(pending.timer);
-        pending.reject(new Error(`MCP server exited before response ${id}`));
+        pending.reject(
+          classifiedError(`${processExitedMessage(code, signal)} before response ${id}`, 'mcp_crashed'),
+        );
       }
       this.pending.clear();
     });
     await new Promise<void>((resolve, reject) => {
-      const timer = setTimeout(resolve, 100);
-      child.once('error', (err) => {
-        clearTimeout(timer);
-        reject(err);
-      });
+      const cleanup = (): void => {
+        child.off('spawn', onSpawn);
+        child.off('error', onError);
+        child.off('exit', onExit);
+      };
+      const onSpawn = (): void => {
+        cleanup();
+        resolve();
+      };
+      const onError = (err: Error): void => {
+        cleanup();
+        reject(classifiedError(`MCP server failed to start: ${err.message}`, 'mcp_crashed'));
+      };
+      const onExit = (code: number | null, signal: NodeJS.Signals | null): void => {
+        cleanup();
+        reject(classifiedError(processExitedMessage(code, signal), 'mcp_crashed'));
+      };
+      child.once('spawn', onSpawn);
+      child.once('error', onError);
+      child.once('exit', onExit);
     });
   }
 
@@ -111,33 +212,42 @@ class McpStdioSession {
     await this.request('initialize', {
       protocolVersion: '2024-11-05',
       capabilities: {},
-      clientInfo: { name: 'taori', version: '0.0.0' },
+      clientInfo: { name: 'taori', version: '0.0.1' },
     });
     this.notify('notifications/initialized', {});
   }
 
   request(method: string, params: unknown, timeoutMs = 15_000): Promise<unknown> {
     if (!this.child) throw new Error('MCP session is not started');
+    if (!isChildAlive(this.child)) {
+      throw classifiedError('MCP server is not running', 'mcp_crashed');
+    }
     const id = this.nextId++;
     const message: JsonRpcMessage = { jsonrpc: '2.0', id, method, params };
     const payload = Buffer.from(JSON.stringify(message), 'utf8');
-    this.child.stdin.write(`Content-Length: ${payload.byteLength}\r\n\r\n`);
-    this.child.stdin.write(payload);
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
         this.pending.delete(id);
-        reject(new Error(`MCP request timed out: ${method}`));
+        reject(classifiedError(`MCP request timed out: ${method}`, 'tool_timeout'));
       }, timeoutMs);
       this.pending.set(id, { resolve, reject, timer });
+      try {
+        writeOrThrow(this.child!, `Content-Length: ${payload.byteLength}\r\n\r\n`);
+        writeOrThrow(this.child!, payload);
+      } catch (e) {
+        clearTimeout(timer);
+        this.pending.delete(id);
+        reject(e);
+      }
     });
   }
 
   notify(method: string, params: unknown): void {
-    if (!this.child) return;
+    if (!this.child || !isChildAlive(this.child)) return;
     const message: JsonRpcMessage = { jsonrpc: '2.0', method, params };
     const payload = Buffer.from(JSON.stringify(message), 'utf8');
-    this.child.stdin.write(`Content-Length: ${payload.byteLength}\r\n\r\n`);
-    this.child.stdin.write(payload);
+    writeOrThrow(this.child, `Content-Length: ${payload.byteLength}\r\n\r\n`);
+    writeOrThrow(this.child, payload);
   }
 
   close(): void {
@@ -146,7 +256,7 @@ class McpStdioSession {
     if (!child) return;
     for (const [, pending] of this.pending) clearTimeout(pending.timer);
     this.pending.clear();
-    child.stdin.end();
+    if (!child.stdin.destroyed) child.stdin.end();
     child.kill();
   }
 

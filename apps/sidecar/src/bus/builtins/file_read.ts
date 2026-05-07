@@ -17,10 +17,10 @@
  * and text is sliced. The chat layer is responsible for surfacing this to
  * the user.
  */
-import { promises as fs } from 'node:fs';
 import { z } from 'zod';
 import type { ToolDescriptor } from '../index.js';
 import type { FilesRepo } from '../../db/repos/index.js';
+import { extractFileText } from '../../files/extract.js';
 
 const InputSchema = z.object({
   file_id: z.string().min(1),
@@ -64,7 +64,7 @@ export function createFileReadTool(repo: FilesRepo): ToolDescriptor<
       let text = row.extracted_text ?? '';
       let truncated = false;
       if (!text) {
-        const fullText = await extract(row.original_path, row.mime_type);
+        const fullText = await extractFileText(row.original_path, row.mime_type);
         // Truncate BEFORE persisting so a 50MB PDF doesn't bloat the DB.
         // The bytes column still records the original size on disk.
         if (fullText.length > MAX_CHARS) truncated = true;
@@ -85,28 +85,4 @@ export function createFileReadTool(repo: FilesRepo): ToolDescriptor<
       };
     },
   };
-}
-
-async function extract(path: string | null, mime: string): Promise<string> {
-  if (!path) {
-    throw Object.assign(new Error('file has no original_path'), {
-      classification: 'validation_error',
-    });
-  }
-  const lower = mime.toLowerCase();
-  if (lower.startsWith('text/') || lower === 'application/json' || lower === '') {
-    return await fs.readFile(path, 'utf8');
-  }
-  if (lower === 'application/pdf') {
-    const buf = await fs.readFile(path);
-    // @ts-expect-error -- pdf-parse has no types for its inner module path.
-    const mod = (await import('pdf-parse/lib/pdf-parse.js')) as unknown as {
-      default: (b: Buffer) => Promise<{ text: string }>;
-    };
-    const parsed = await mod.default(buf);
-    return parsed.text ?? '';
-  }
-  throw Object.assign(new Error(`unsupported mime for file_read: ${mime}`), {
-    classification: 'validation_error',
-  });
 }

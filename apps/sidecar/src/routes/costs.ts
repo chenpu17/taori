@@ -26,6 +26,7 @@ const BreakdownQuery = z.object({
 
 const CallLogsQuery = z.object({
   limit: z.coerce.number().int().min(1).max(200).optional(),
+  cost_record_id: z.string().min(1).optional(),
 });
 
 export function registerCostsRoute(app: FastifyInstance, deps: BuildServerArgs): void {
@@ -49,7 +50,12 @@ export function registerCostsRoute(app: FastifyInstance, deps: BuildServerArgs):
     }
     return {
       ok: true,
-      data: { rows: repo.callLogs(parsed.data.limit ?? 100) },
+      data: {
+        rows: repo.callLogs({
+          limit: parsed.data.limit ?? 100,
+          costRecordId: parsed.data.cost_record_id,
+        }),
+      },
     };
   });
 

@@ -21,6 +21,7 @@ import {
 } from '@taori/shared';
 import type { KeyStore } from '../keystore.js';
 import type { CostInsert } from '../db/repos/index.js';
+import { normalizeOllamaOpenAiBaseUrl } from '../providers/ollama.js';
 import { FALLBACK_PERSONAS } from './fallback-personas.js';
 
 export interface AnalyzerDeps {
@@ -171,7 +172,7 @@ export async function runAnalyzer(
   pendingRoundtableId: string,
   conversationId: string,
 ): Promise<AnalyzerSuccess | AnalyzerFailure> {
-  if (!input.analyzerProvider.api_key_ref) {
+  if (!input.analyzerProvider.api_key_ref && input.analyzerProvider.type !== 'ollama') {
     return {
       ok: false,
       reason: 'no_key',
@@ -188,10 +189,14 @@ export async function runAnalyzer(
     };
   }
   let apiKey: string | null = null;
-  try {
-    apiKey = await deps.keystore.read(input.analyzerProvider.api_key_ref);
-  } catch (e) {
-    deps.log.warn({ err: e }, 'roundtable.analyzer.keystore_read_failed');
+  if (input.analyzerProvider.type === 'ollama') {
+    apiKey = 'ollama-local';
+  } else {
+    try {
+      apiKey = await deps.keystore.read(input.analyzerProvider.api_key_ref as string);
+    } catch (e) {
+      deps.log.warn({ err: e }, 'roundtable.analyzer.keystore_read_failed');
+    }
   }
   if (!apiKey) {
     return {
@@ -227,7 +232,9 @@ export async function runAnalyzer(
   }
 
   const provider = createOpenAI({
-    baseURL: input.analyzerProvider.base_url.replace(/\/$/, ''),
+    baseURL: input.analyzerProvider.type === 'ollama'
+      ? normalizeOllamaOpenAiBaseUrl(input.analyzerProvider.base_url)
+      : input.analyzerProvider.base_url.replace(/\/$/, ''),
     apiKey,
   });
   const startedAt = Date.now();
