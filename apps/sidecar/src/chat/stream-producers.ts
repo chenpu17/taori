@@ -1,7 +1,6 @@
 import type { PassThrough } from 'node:stream';
-import { createOpenAI } from '@ai-sdk/openai';
 import { streamText } from 'ai';
-import { calculateCostUsd } from '@taori/shared';
+import { calculateCostUsd, type Model, type Provider } from '@taori/shared';
 import type { MemoriesRepo, ModelsRepo } from '../db/repos/index.js';
 import {
   classifyProviderError,
@@ -15,15 +14,29 @@ import {
   recordRunEvent,
   type ProduceCtx,
 } from './run-stream.js';
+import { createChatModel } from '../providers/chat-model.js';
 import {
   buildUpstreamTools,
   withCapabilityToolInstruction,
 } from './upstream-tools.js';
 
-const IMAGE_TOOL_FINAL_TEXT = '图片已生成。';
+export const IMAGE_TOOL_FINAL_TEXT = '图片已生成。';
 const IMAGE_TOOL_FINAL_GRACE_MS = 1500;
 
-function buildFailureDecision(
+export type EmitToolTrace = (
+  payload: {
+    event: 'start' | 'finish';
+    call_id: string;
+    tool: string;
+    label: string;
+    input?: string;
+    ok?: boolean;
+    output?: string;
+    duration_ms?: number;
+  },
+) => void;
+
+export function buildFailureDecision(
   classification: string,
   ctx: ProduceCtx,
   modelsRepo: ModelsRepo,
@@ -71,7 +84,9 @@ export async function produceUpstreamStream(
   stream: PassThrough,
   signal: AbortSignal,
   ctx: ProduceCtx,
-  cfg: { baseURL: string; apiKey: string; modelName: string },
+  cfg: { apiKey: string },
+  providerRecord: Provider,
+  modelRecord: Model,
   modelsRepo: ModelsRepo,
   memoriesRepo: MemoriesRepo,
 ): Promise<void> {
@@ -152,9 +167,12 @@ export async function produceUpstreamStream(
       throw synthetic;
     }
 
-    const provider = createOpenAI({
-      baseURL: cfg.baseURL.replace(/\/$/, ''),
+    const { model } = createChatModel({
+      provider: providerRecord,
+      model: modelRecord,
       apiKey: cfg.apiKey,
+      memoriesRepo,
+      conversationId: ctx.conversationId,
     });
 
     const upstreamTools = buildUpstreamTools({ ...ctx, runtimeState }, write, emitToolTrace);
@@ -162,7 +180,7 @@ export async function produceUpstreamStream(
     toolsWereSent = tools != null;
 
     const result = await streamText({
-      model: provider.chat(cfg.modelName),
+      model,
       messages: tools
         ? withCapabilityToolInstruction(upstream.messages, upstreamTools.flags)
         : upstream.messages,
@@ -239,6 +257,36 @@ export async function produceUpstreamStream(
         label: '模型调用失败',
         summary: '内容被供应商安全策略拦截',
         payload: { classification: 'content_filter', finish_reason: finishReason },
+      });
+      return;
+    }
+
+    if (!signal.aborted && chunks === 0) {
+      const detail = '模型本次调用已完成，但没有返回任何可显示文本。请重试，或切换到另一模型继续。';
+      const decision = buildFailureDecision('unknown', ctx, modelsRepo, memoriesRepo, detail);
+      write(`8:${JSON.stringify([decision])}\n`);
+      write(
+        `3:${JSON.stringify(`provider_error/unknown: ${detail}`)}\n`,
+      );
+      write(
+        `d:${JSON.stringify({
+          finishReason: 'error',
+          usage: { promptTokens: promptTokens ?? 0, completionTokens: completionTokens ?? 0 },
+        })}\n`,
+      );
+      ctx.log.warn({ finishReason, durationMs: Date.now() - startedAt }, 'chat.empty_response');
+      recordRunEvent(ctx, {
+        kind: 'model.failed',
+        status: 'failed',
+        label: '模型调用失败',
+        summary: '模型返回空响应',
+        payload: {
+          classification: 'unknown',
+          finish_reason: finishReason ?? null,
+          prompt_tokens: promptTokens,
+          completion_tokens: completionTokens,
+          duration_ms: Date.now() - startedAt,
+        },
       });
       return;
     }
@@ -376,7 +424,7 @@ export async function produceUpstreamStream(
   }
 }
 
-async function waitForTextDeltaOrImageToolGrace(
+export async function waitForTextDeltaOrImageToolGrace(
   nextDelta: Promise<IteratorResult<string>>,
   shouldStartGrace: () => boolean,
 ): Promise<IteratorResult<string> | 'image-tool-finalize'> {

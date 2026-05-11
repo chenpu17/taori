@@ -27,6 +27,12 @@ export const QuickCompareRequestSchema = z.object({
   conversation_id: z.string().optional(),
   messages: z.array(ChatMessageSchema).min(1),
   model_ids: z.array(z.string().min(1)).min(2).max(3).optional(),
+  participant_configs: z.array(
+    z.object({
+      model_id: z.string().min(1),
+      tool_names: z.array(z.string().min(1)).max(64).optional(),
+    }),
+  ).min(2).max(3).optional(),
   attachments: z.array(ChatAttachmentSchema).max(8, '最多同时上传 8 个附件').optional(),
   persona_id: z.string().min(1).nullable().optional(),
   confirmed_cost: z.boolean().optional(),
@@ -52,6 +58,7 @@ export const QuickCompareOutputSchema = z.object({
   participant_index: z.number().int().nonnegative(),
   model_id: z.string(),
   provider_id: z.string().nullable(),
+  tool_names: z.array(z.string()),
   content: z.string(),
   status: QuickCompareOutputStatusSchema,
   error_classification: ErrorClassificationSchema.nullable(),
@@ -77,6 +84,7 @@ export const QuickCompareAnnotationSchema = z.discriminatedUnion('type', [
     output_id: z.string(),
     index: z.number().int().nonnegative(),
     model_id: z.string(),
+    tool_names: z.array(z.string()).optional(),
   }),
   z.object({
     type: z.literal('qc.participant_delta'),

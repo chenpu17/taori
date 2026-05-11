@@ -35,6 +35,7 @@ export type FileSearchRequest = z.infer<typeof FileSearchRequestSchema>;
 export const FileSearchResultSchema = z.object({
   chunk_id: z.string(),
   file_id: z.string(),
+  file_name: z.string().nullable(),
   conversation_id: z.string().nullable(),
   message_id: z.string().nullable(),
   chunk_index: z.number().int().nonnegative(),
@@ -64,6 +65,7 @@ export type FileSearchToolInput = z.infer<typeof FileSearchToolInputSchema>;
 export const FileSearchToolResultSchema = z.object({
   results: z.array(z.object({
     file_id: z.string(),
+    file_name: z.string().nullable().optional(),
     chunk_id: z.string(),
     snippet: z.string(),
     chunk_index: z.number().int().nonnegative(),

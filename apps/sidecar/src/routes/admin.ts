@@ -654,6 +654,7 @@ export function registerAdminRoute(app: FastifyInstance, deps: BuildServerArgs):
         supports_vision: row.supports_vision,
         supports_tools: row.supports_tools,
         supports_json: row.supports_json,
+        thinking_enabled: row.thinking_enabled ?? null,
         is_default_for: row.is_default_for,
         fallback_order: row.fallback_order,
         user_rating: row.user_rating,

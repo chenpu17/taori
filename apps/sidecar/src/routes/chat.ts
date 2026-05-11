@@ -26,6 +26,7 @@
  * classifyProviderError so the Renderer can decide retry behavior.
  */
 
+import path from 'node:path';
 import type { FastifyInstance } from 'fastify';
 import {
   ChatRequestSchema,
@@ -133,6 +134,8 @@ export function registerChatRoute(
       model: model ?? null,
       convRepo,
       msgRepo,
+      filesRepo,
+      filesDir: path.join(path.dirname(deps.config.dbPath), 'files'),
       memoriesRepo,
       personasRepo,
     });
@@ -267,6 +270,7 @@ export function registerChatRoute(
       abortSignal: abortController.signal,
       isAborted: dataStream.isAborted,
       ctx,
+      model: model ?? null,
       provider: model ? provider : null,
       modelName: model?.model_name ?? body.model_id,
       keystore: deps.keystore,
@@ -378,6 +382,7 @@ export function registerChatRoute(
       abortSignal: abortController.signal,
       isAborted: dataStream.isAborted,
       ctx,
+      model,
       provider,
       modelName: model.model_name,
       keystore: deps.keystore,
@@ -645,6 +650,7 @@ export function registerChatRoute(
       abortSignal: abortController.signal,
       isAborted: dataStream.isAborted,
       ctx,
+      model,
       provider,
       modelName: model.model_name,
       keystore: deps.keystore,
