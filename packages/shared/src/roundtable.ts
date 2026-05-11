@@ -6,6 +6,7 @@
  */
 
 import { z } from 'zod';
+import { PromptTemplateSchema } from './schemas.js';
 
 export const RoundtableModeSchema = z.enum(['fast', 'deep', 'auto']);
 export type RoundtableMode = z.infer<typeof RoundtableModeSchema>;
@@ -157,6 +158,30 @@ export const RoundtableSchema = z.object({
   completed_at: z.number().nullable(),
 });
 export type Roundtable = z.infer<typeof RoundtableSchema>;
+
+export const RoundtableHistoryEntrySchema = z.object({
+  id: z.string(),
+  topic: z.string(),
+  mode: RoundtableStoredModeSchema,
+  created_at: z.number().int(),
+  recommended_decision: z.string().nullable(),
+  consensus: z.array(z.string()),
+  risks: z.array(z.string()),
+  divergence_topics: z.array(z.string()),
+});
+export type RoundtableHistoryEntry = z.infer<typeof RoundtableHistoryEntrySchema>;
+
+export const RoundtableHistoryResponseSchema = z.object({
+  roundtable_id: z.string(),
+  items: z.array(RoundtableHistoryEntrySchema),
+});
+export type RoundtableHistoryResponse = z.infer<typeof RoundtableHistoryResponseSchema>;
+
+export const RoundtableSaveTemplateResponseSchema = z.object({
+  ok: z.literal(true),
+  template: PromptTemplateSchema,
+});
+export type RoundtableSaveTemplateResponse = z.infer<typeof RoundtableSaveTemplateResponseSchema>;
 
 export const RoundtableMessageStatusSchema = z.enum([
   'pending',
