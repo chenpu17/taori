@@ -48,7 +48,6 @@ import { createWebFetchTool, createWebFetchToolWithDeps } from './bus/builtins/w
 import { createWebSearchTool, createWebSearchToolWithDeps } from './bus/builtins/web_search.js';
 import { CostsRepo, FilesRepo, FileChunksRepo, ProvidersRepo, ModelsRepo, MessagesRepo, ConversationsRepo, MemoriesRepo } from './db/repos/index.js';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
 
 export interface BuildServerArgs {
   config: SidecarConfig;
@@ -632,11 +631,19 @@ export function buildServer(args: BuildServerArgs): FastifyInstance {
 
 function resolveStandaloneWebAssets(config: SidecarConfig): string | null {
   if (!config.standalone) return null;
-  const currentDir = path.dirname(fileURLToPath(import.meta.url));
+  const runtimeEntrypoint =
+    process.argv[1] && process.argv[1].trim()
+      ? path.dirname(fs.realpathSync(process.argv[1]))
+      : null;
   const candidates = [
-    // npm global install: <prefix>/lib/node_modules/@chenpu17/taori/dist/cli.cjs → ../dist-web
-    path.resolve(currentDir, '..', 'dist-web'),
-    path.resolve(currentDir, '..', '..', '..', 'packages', 'npm', 'dist-web'),
+    ...(runtimeEntrypoint
+      ? [
+          // npm global install resolves argv[1] through the bin symlink back to
+          // <prefix>/node_modules/@chenpu17/taori/dist/cli.cjs, so ../dist-web
+          // is the packaged Web UI location.
+          path.resolve(runtimeEntrypoint, '..', 'dist-web'),
+        ]
+      : []),
     path.resolve(process.cwd(), 'packages', 'npm', 'dist-web'),
     path.resolve(process.cwd(), 'dist-web'),
   ];
