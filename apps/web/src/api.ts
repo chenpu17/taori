@@ -22,8 +22,10 @@ import type {
   ModelDiscoveryResponse,
   ModelCapability,
   Roundtable,
+  RoundtableHistoryResponse,
   RoundtableMode,
   RoundtableMessage,
+  RoundtableSaveTemplateResponse,
   Participant,
   PromptTemplate,
   PromptTemplateCreate,
@@ -54,6 +56,7 @@ import type {
   RecoverRunRequest,
   McpServer,
   McpServerCreate,
+  McpServerRuntimeResponse,
   McpServerUpdate,
   FileSearchRequest,
   FileSearchResponse,
@@ -385,7 +388,7 @@ export const api = {
 
   costsDashboardBreakdown: (
     scope: 'today' | 'week' | 'month',
-    groupBy: 'model' | 'conversation' | 'feature',
+    groupBy: 'model' | 'conversation' | 'feature' | 'tag',
   ) => {
     const params = new URLSearchParams({ scope, group_by: groupBy });
     return authedFetch(`/v1/costs/breakdown?${params.toString()}`).then((r) =>
@@ -393,7 +396,7 @@ export const api = {
         ok: boolean;
         data: {
           scope: 'today' | 'week' | 'month';
-          group_by: 'model' | 'conversation' | 'feature';
+          group_by: 'model' | 'conversation' | 'feature' | 'tag';
           rows: Array<{
             key: string;
             label: string;
@@ -416,6 +419,37 @@ export const api = {
         };
       }>(r),
     );
+  },
+
+  costsExport: (
+    scope: 'session' | 'today' | 'week' | 'month',
+    groupBy: 'model_feature' | 'model' | 'conversation' | 'feature' | 'tag',
+    format: 'csv' | 'json',
+    conversationId?: string | null,
+  ) => {
+    const params = new URLSearchParams({
+      scope,
+      group_by: groupBy,
+      format,
+    });
+    if (conversationId) params.set('conversation_id', conversationId);
+    return authedFetch(`/v1/costs/export?${params.toString()}`).then(async (res) => {
+      if (!res.ok) {
+        let body: unknown = null;
+        try { body = await res.json(); } catch { /* ignore */ }
+        const message =
+          body && typeof body === 'object' && 'message' in body
+            ? String((body as { message?: unknown }).message)
+            : `${res.status} ${res.statusText}`;
+        throw new Error(message);
+      }
+      const disposition = res.headers.get('content-disposition') ?? '';
+      const filenameMatch = /filename="([^"]+)"/i.exec(disposition);
+      return {
+        blob: await res.blob(),
+        filename: filenameMatch?.[1] ?? `taori-costs-${groupBy}-${scope}.${format}`,
+      };
+    });
   },
 
   costsCallLogs: (limit = 50, options?: { costRecordId?: string | null }) => {
@@ -878,6 +912,18 @@ export const api = {
         tools: Array<{ name: string; description: string }>;
       }>(r),
     ),
+  getMcpServerRuntime: (id: string) =>
+    authedFetch(`/v1/mcp/servers/${id}/runtime`).then((r) =>
+      json<McpServerRuntimeResponse>(r),
+    ),
+  restartMcpServer: (id: string) =>
+    authedFetch(`/v1/mcp/servers/${id}/restart`, { method: 'POST' }).then((r) =>
+      json<{
+        ok: boolean;
+        server: McpServer;
+        tools: Array<{ name: string; description: string }>;
+      }>(r),
+    ),
   invokeTool: (
     name: string,
     input: unknown,
@@ -970,6 +1016,14 @@ export const api = {
         messages: RoundtableMessage[];
         total_cost_usd: number;
       }>(r),
+    ),
+  getRoundtableHistory: (id: string, limit = 4) =>
+    authedFetch(`/v1/roundtable/${id}/history?limit=${encodeURIComponent(String(limit))}`).then((r) =>
+      json<RoundtableHistoryResponse>(r),
+    ),
+  saveRoundtableTemplate: (id: string) =>
+    authedFetch(`/v1/roundtable/${id}/template`, { method: 'POST' }).then((r) =>
+      json<RoundtableSaveTemplateResponse>(r),
     ),
   getActiveRoundtableForConversation: (id: string) =>
     authedFetch(`/v1/conversations/${id}/roundtable`).then((r) =>
