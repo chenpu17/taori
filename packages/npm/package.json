@@ -1,6 +1,6 @@
 {
   "name": "@chenpu17/taori",
-  "version": "0.0.9",
+  "version": "0.0.10",
   "description": "Taori standalone sidecar CLI.",
   "type": "module",
   "scripts": {
