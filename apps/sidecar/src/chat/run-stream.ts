@@ -35,9 +35,16 @@ export interface ProduceCtx {
   pricePerCall: number | null;
   userText: string;
   messages: { role: 'user' | 'assistant' | 'system'; content: string }[];
-  attachments: { kind: 'image' | 'text' | 'pdf'; mime: string; data_b64: string; name?: string }[];
+  attachments: {
+    kind: 'image' | 'text' | 'pdf';
+    mime: string;
+    data_b64: string;
+    name?: string;
+    file_id?: string;
+  }[];
   personaName: string | null;
   toolPolicy: Record<string, boolean>;
+  defaultSearchToolName?: string | null;
   log: { info: (...a: unknown[]) => void; warn: (...a: unknown[]) => void; error: (...a: unknown[]) => void };
   /** dev-only test hook: force classification on upstream call (M2 §6.1) */
   forcedClassification: string | null;
@@ -159,6 +166,13 @@ export function buildUpstreamMessages(ctx: ProduceCtx): { messages: any[]; stats
         mimeType: a.mime,
       });
     } else if (a.kind === 'text' || a.kind === 'pdf') {
+      if (a.file_id) {
+        const fallbackName = a.kind === 'pdf' ? 'document.pdf' : 'attachment.txt';
+        const name = a.name ?? fallbackName;
+        const prefix = a.kind === 'pdf' ? '【附件 PDF】' : '【附件】';
+        textBlocks.push(`${prefix}${name}（已建立索引，将按问题检索相关片段）`);
+        continue;
+      }
       let decoded = '';
       try {
         decoded = Buffer.from(a.data_b64, 'base64').toString('utf-8');
@@ -332,6 +346,7 @@ export function finalizeOnEnd(
   };
   let upstreamErrored = false;
   let upstreamClassification: string | null = null;
+  let upstreamErrorMessage: string | null = null;
   // Tap text chunks for persistence. The producers write `0:"…"\n` lines for
   // text — parse them back so we can reconstruct what was actually sent. The
   // PassThrough stream may emit `data` events whose boundaries do NOT align
@@ -373,6 +388,7 @@ export function finalizeOnEnd(
         if (typeof payload === 'string') {
           const m = /^provider_error\/([a-z_]+)/.exec(payload);
           if (m) upstreamClassification = m[1] ?? null;
+          upstreamErrorMessage = payload.replace(/^provider_error\/[a-z_]+:\s*/i, '') || payload;
         }
       } catch {
         /* ignore non-JSON */
@@ -460,7 +476,11 @@ export function finalizeOnEnd(
       status === 'incomplete' && collected.trim().length === 0
         ? '（本次回答在生成完成前被中断，未收到可保存的内容。请重试或继续提问。）'
         : collected;
-    msgRepo.finalize(ctx.messageId, { content: persistedContent, status });
+    msgRepo.finalize(ctx.messageId, {
+      content: persistedContent,
+      status,
+      error: upstreamErrored ? upstreamErrorMessage : null,
+    });
     writeCost(!aborted && !upstreamErrored);
     recordRunEvent(ctx, {
       kind: upstreamErrored

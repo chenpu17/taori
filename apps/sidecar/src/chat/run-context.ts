@@ -20,6 +20,10 @@ import { ensureFileIndexed } from '../files/indexer.js';
 
 type AttachmentForCtx = ProduceCtx['attachments'][number];
 
+function fallbackSnippet(content: string): string {
+  return content.replace(/\s+/g, ' ').trim().slice(0, 220);
+}
+
 function buildFileSnippetMessage(results: FileSearchResult[], contextLength: number | null): {
   message: { role: 'system'; content: string } | null;
   used: FileSearchResult[];
@@ -124,6 +128,29 @@ export async function buildProduceCtx(args: {
         limit: 6,
         include_content: true,
       });
+      const requestFileIds = new Set(
+        (args.attachments ?? [])
+          .filter((attachment) => attachment.kind !== 'image' && typeof attachment.file_id === 'string')
+          .map((attachment) => attachment.file_id as string),
+      );
+      for (const fileId of requestFileIds) {
+        if (results.some((result) => result.file_id === fileId)) continue;
+        const head = args.fileChunksRepo.listByFile(fileId)[0];
+        if (!head) continue;
+        results.push({
+          chunk_id: head.id,
+          file_id: head.file_id,
+          file_name: args.filesRepo.get(fileId)?.original_path?.split('/').pop() ?? null,
+          conversation_id: head.conversation_id,
+          message_id: head.message_id,
+          chunk_index: head.chunk_index,
+          content: head.content,
+          snippet: fallbackSnippet(head.content),
+          score: 0,
+          char_start: head.char_start,
+          char_end: head.char_end,
+        });
+      }
       fileContext = buildFileSnippetMessage(results, model?.context_length ?? null);
       if (fileContext.used.length > 0) {
         args.runEventsRepo.append({
@@ -140,10 +167,12 @@ export async function buildProduceCtx(args: {
             chunks: fileContext.used.map((result) => ({
               chunk_id: result.chunk_id,
               file_id: result.file_id,
+              file_name: result.file_name,
               chunk_index: result.chunk_index,
               score: result.score,
               char_start: result.char_start,
               char_end: result.char_end,
+              snippet: result.snippet,
             })),
           },
         });
@@ -168,6 +197,7 @@ export async function buildProduceCtx(args: {
     ...(memoryContext.systemMessage ? [memoryContext.systemMessage] : []),
     ...(fileContext.message ? [fileContext.message] : []),
   ];
+  const defaultSearchToolName = args.memoriesRepo.getEffective(args.conversationId, 'default_search_tool');
   return {
     runId: args.runId,
     conversationId: args.conversationId,
@@ -189,6 +219,7 @@ export async function buildProduceCtx(args: {
       args.conversationId,
       { skipToolName: args.skipToolName },
     ),
+    defaultSearchToolName,
     log: args.log,
     forcedClassification: args.forcedClassification,
     capability: model?.capability ?? 'chat',

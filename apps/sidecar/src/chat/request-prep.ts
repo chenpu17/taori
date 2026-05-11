@@ -4,6 +4,7 @@ import type { Db } from '../db/index.js';
 import type {
   ConversationRow,
   ConversationsRepo,
+  FilesRepo,
   MemoriesRepo,
   MessageRow,
   MessagesRepo,
@@ -12,6 +13,7 @@ import type {
 import { MessagesRepo as TxMessagesRepo } from '../db/repos/index.js';
 import { detectImageCommand, detectImageIntent } from '../intent.js';
 import type { BoundPersona } from './run-actions.js';
+import { persistSearchableAttachments } from './attachment-persistence.js';
 
 type ChatAttachment = NonNullable<ChatRequest['attachments']>[number];
 type ChatMessage = ChatRequest['messages'][number];
@@ -33,10 +35,12 @@ export async function prepareChatRequest(args: {
   model: Model | null;
   convRepo: ConversationsRepo;
   msgRepo: MessagesRepo;
+  filesRepo: FilesRepo;
+  filesDir: string;
   memoriesRepo: MemoriesRepo;
   personasRepo: PersonasRepo;
 }): Promise<PreparedChatRequest> {
-  const attachments = [...(args.body.attachments ?? [])];
+  let attachments = [...(args.body.attachments ?? [])];
   const hasImage = attachments.some((a) => a.kind === 'image');
   const lastUserMsg = [...args.body.messages].reverse().find((m) => m.role === 'user');
 
@@ -97,6 +101,17 @@ export async function prepareChatRequest(args: {
           status: 'streaming',
         });
       });
+
+  if (sourceUserMessageId && attachments.length > 0) {
+    attachments = await persistSearchableAttachments({
+      conversationId: conversation.id,
+      messageId: sourceUserMessageId,
+      attachments,
+      filesRepo: args.filesRepo,
+      filesDir: args.filesDir,
+    });
+    args.msgRepo.updateAttachments(sourceUserMessageId, JSON.stringify(attachments));
+  }
 
   return {
     conversation,
