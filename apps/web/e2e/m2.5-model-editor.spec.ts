@@ -64,3 +64,24 @@ test('model-editor: change capability chat → image and set per-image price', a
   expect(body.models[0].price_per_image).toBeCloseTo(0.04, 4);
   expect(body.models[0].is_default_for).toBeNull();
 });
+
+test('model-editor: save per-model thinking override', async ({ page }) => {
+  const env = readSidecarEnv();
+  await resetSidecar(env);
+  await seedDefaultModel(env);
+  await page.goto('/');
+  await page.getByTestId('open-model-center').click();
+  await expect(page.getByTestId('model-center')).toBeVisible();
+  await page.getByTestId('model-center-tab-chat').click();
+
+  await page.locator('[data-testid^="model-edit-"]').first().click();
+  await expect(page.getByTestId('model-editor')).toBeVisible();
+  await page.getByTestId('model-editor-thinking').selectOption('enabled');
+  await page.getByTestId('model-editor-save').click();
+  await expect(page.getByTestId('model-editor')).toHaveCount(0);
+
+  const res = await authedFetch(env, '/v1/models');
+  const body = (await res.json()) as { models: Array<{ thinking_enabled: boolean | null }> };
+  expect(body.models).toHaveLength(1);
+  expect(body.models[0].thinking_enabled).toBe(true);
+});

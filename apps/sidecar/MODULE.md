@@ -23,8 +23,9 @@ Taori 业务编排进程，负责 LLM 调用、工具调度、圆桌执行、SQL
 
 ## 当前合同变化
 
-- 新增 MCP stdio Server 管理与工具注册。
+- MCP 管理从“仅本地 stdio server”扩展到“本地 stdio + 托管远程 bridge”：Sidecar 可把搏查远程 SSE 搜索解析为受控本地 proxy 进程，Renderer 只保存 API Key，不暴露底层 `mcp-remote` 命令细节。
 - 普通聊天链路会把会话有效且模型支持 tools 的 MCP 工具动态暴露给上游模型；MCP 工具调用复用长连接 stdio session，并把超时/崩溃归类为工具错误。
+- Sidecar 记忆新增 `default_search_tool` 约定键；普通聊天、Quick Compare 与 Roundtable 在暴露工具时会只保留一个首选搜索工具。若首选工具不可用，则自动回退到 `builtin.web_search` 或当前首个可用搜索工具。
 - 新增 `POST /v1/runs/:id/continue`：仅允许续写 `incomplete` 的助手消息，创建 `kind='continue'` 子 run，不插入新的 user message，并通过 `parent_run_id` / `continued_from_message_id` 保留恢复链路；高成本或超预算时会先返回 `cost_confirmation_required`，确认前不创建 assistant message、不启动上游调用。
 - 新增 `POST /v1/runs/:id/recover`：Sidecar 执行 `retry_same_model` / `switch_model` / `compact_context` / `skip_tool` 恢复动作，创建 `kind='retry'` 子 run，写入 `recovery.started` 与 `recovery.completed/failed`；`compact_context` 当前使用确定性摘要压缩较早历史，`skip_tool` 会基于原 run 的最后一个失败工具临时禁用该工具并继续，`continue` 仍走专用 continue API；高成本或超预算时同样要求 `confirmed_cost` 二次提交。
 - `run_events` 仍是运行生命周期 append-only 真相源；新增 `agent_runs` 物化 Header 表作为 `/v1/conversations/:id/runs` 查询索引，事件写入时同步更新，缺失时仍可从事件推导兜底。
@@ -40,4 +41,6 @@ Taori 业务编排进程，负责 LLM 调用、工具调度、圆桌执行、SQL
 - `/health` 对 Tauri Rust control channel 的诊断探测使用短超时，只影响 `control_channel` 诊断字段，不承担 Keychain 可用性深度验证；Keychain 深度检查仍由用户主动触发的 `/v1/selfcheck`、Provider 测试、同步或真实调用路径完成。
 - `/v1/selfcheck` 默认不读写 Keychain，只把 keystore 项标为已跳过；只有 `?include_keychain=1` 才执行临时 Keychain probe。
 - `/v1/providers/key-status` 在 Keychain 模式下默认拒绝隐式读取，必须带 `confirm_keychain=1` 才串行读取 Provider Keychain 状态；control channel 的 Keychain 读/写/删有显式超时，避免 macOS 授权阻塞导致请求长期挂起。
-- Provider registry 新增 `deepseek`、`packyapi` 与 `siliconflow`：DeepSeek 官方走 OpenAI-compatible `/models` 发现 `deepseek-v4-flash` / `deepseek-v4-pro` 并标记为支持 tools 的 chat 模型；PackyAPI 默认导入 `gpt-image-2` 并走 OpenAI-compatible `/images/generations`；SiliconFlow 使用 OpenAI-compatible `/models` 发现模型，图像生成走专用 `image_size` 请求并支持 URL 返回落地为本地文件。
+- Provider registry 新增 `deepseek`、`packyapi` 与 `siliconflow`：DeepSeek 官方走 OpenAI-compatible `/models` 发现 `deepseek-v4-flash` / `deepseek-v4-pro`；普通文本流仍复用通用 OpenAI-compatible chat path，但当 DeepSeek 官方聊天模型启用 tools 时，Sidecar 会切换到 provider-specific 的 Chat Completions tool loop，显式回传 `assistant.reasoning_content` 以兼容官方 thinking + tool calling 协议。PackyAPI 默认导入 `gpt-image-2` 并走 OpenAI-compatible `/images/generations`；SiliconFlow 使用 OpenAI-compatible `/models` 发现模型，图像生成走专用 `image_size` 请求并支持 URL 返回落地为本地文件。
+- Sidecar 现支持模型 thinking 配置：全局默认值复用 `memories(scope='global', key='thinking_enabled')`，单模型 `models.thinking_enabled` 可覆盖全局；聊天、Quick Compare、Roundtable、自动记忆抽取与 `/v1/models/:id/test` 共用统一解析。当前已知适配：OpenRouter → `reasoning`，DeepSeek 官方 → `thinking`，OpenAI/custom 的 GPT-5 / o 系列 → `reasoning_effort`；未确认的 provider 保持不注入 thinking 参数。
+- standalone npm CLI 新增 daemon 生命周期：`taori daemon start|status|stop`；默认仍前台监听 `127.0.0.1`，但 standalone 可通过 `--host 0.0.0.0` 进入远程 / Web 部署模式。desktop 托管语义不变，仍由 Rust 负责本地 sidecar 的 spawn / 守护。

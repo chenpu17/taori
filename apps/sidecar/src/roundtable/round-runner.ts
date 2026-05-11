@@ -16,7 +16,6 @@
 
 import type { PassThrough } from 'node:stream';
 import { streamText, tool } from 'ai';
-import { createOpenAI } from '@ai-sdk/openai';
 import { z } from 'zod';
 import {
   calculateCostUsd,
@@ -38,8 +37,9 @@ import type {
 } from '../db/repos/index.js';
 import type { KeyStore } from '../keystore.js';
 import { classifyProviderError } from '../providers/registry.js';
-import { normalizeOllamaOpenAiBaseUrl } from '../providers/ollama.js';
 import type { CapabilityBus } from '../bus/index.js';
+import { applyPreferredSearchToolSelection } from '../chat/upstream-tools.js';
+import { createChatModel } from '../providers/chat-model.js';
 
 export interface RoundRunnerDeps {
   modelsRepo: ModelsRepo;
@@ -159,16 +159,44 @@ function buildToolsForParticipant(args: {
   if (!bus || !args.model.supports_tools) return { instruction: null };
   const used = new Set<string>();
   const exposed: Record<string, any> = {};
-  const allowed = bus
+  const allowed = applyPreferredSearchToolSelection(
+    {
+      messageId: args.msgRow.id,
+      conversationId: args.rt.conversation_id,
+      sourceUserMessageId: args.msgRow.id,
+      supportsTools: true,
+      toolPolicy: Object.fromEntries(
+        bus
+          .list()
+          .filter((item) => item.enabled)
+          .map((item) => [item.name, true]),
+      ),
+      bus,
+      imageModelId: null,
+      filesRepo: null,
+      log: args.deps.log,
+      defaultSearchToolName: args.deps.memoriesRepo?.getEffective(
+        args.rt.conversation_id,
+        'default_search_tool',
+      ) ?? null,
+    },
+    bus
+      .list()
+      .filter((item) => item.enabled)
+      .map((item) => item.name),
+  );
+  const allowedSet = new Set(allowed);
+  const allowedTools = bus
     .list()
     .filter((item) => item.enabled)
     .filter(
       (item) =>
-        item.name === 'builtin.web_search' ||
-        item.name === 'builtin.web_fetch' ||
-        item.source === 'mcp',
+        allowedSet.has(item.name) &&
+        (item.name === 'builtin.web_fetch' ||
+          item.name === 'builtin.web_search' ||
+          item.name.startsWith('mcp.')),
     );
-  for (const item of allowed) {
+  for (const item of allowedTools) {
     const aiName = safeAiToolName(item.name, used);
     exposed[aiName] = tool({
       description: item.description,
@@ -247,7 +275,7 @@ function buildToolsForParticipant(args: {
   return {
     tools: exposed,
     instruction:
-      '你可以使用可用工具辅助发言。需要最新网页信息时使用 web_search/web_fetch；需要本地扩展能力时使用 MCP 工具。工具结果必须整合进你的观点，避免只复述工具输出。',
+      '你可以使用可用工具辅助发言。需要最新网页信息时，优先使用当前可用的默认搜索工具，并在需要读取具体链接时使用 web_fetch；需要本地扩展能力时使用 MCP 工具。工具结果必须整合进你的观点，避免只复述工具输出。',
   };
 }
 
@@ -298,11 +326,12 @@ async function runOneParticipant(
         roundtable_message_id: msgRow.id,
       },
     });
-    const aiProvider = createOpenAI({
-      baseURL: provider.type === 'ollama'
-        ? normalizeOllamaOpenAiBaseUrl(provider.base_url)
-        : provider.base_url.replace(/\/$/, ''),
+    const { model: chatModel } = createChatModel({
+      provider,
+      model,
       apiKey,
+      memoriesRepo: deps.memoriesRepo,
+      conversationId: rt.conversation_id,
     });
     const roundtableTools = buildToolsForParticipant({
       deps,
@@ -314,7 +343,7 @@ async function runOneParticipant(
       stream,
     });
     const result = await streamText({
-      model: aiProvider.chat(model.model_name),
+      model: chatModel,
       system: roundtableTools.instruction ? `${system}\n\n${roundtableTools.instruction}` : system,
       prompt,
       maxTokens: 800,

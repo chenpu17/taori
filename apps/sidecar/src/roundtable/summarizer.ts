@@ -23,7 +23,6 @@
 
 import type { PassThrough } from 'node:stream';
 import { streamText } from 'ai';
-import { createOpenAI } from '@ai-sdk/openai';
 import {
   SummarySchema,
   calculateCostUsd,
@@ -34,6 +33,7 @@ import {
 } from '@taori/shared';
 import type {
   CostsRepo,
+  MemoriesRepo,
   ModelsRepo,
   ProvidersRepo,
   RunEventInsert,
@@ -44,7 +44,7 @@ import type {
 } from '../db/repos/index.js';
 import type { KeyStore } from '../keystore.js';
 import { classifyProviderError } from '../providers/registry.js';
-import { normalizeOllamaOpenAiBaseUrl } from '../providers/ollama.js';
+import { createChatModel } from '../providers/chat-model.js';
 
 export interface SummarizerDeps {
   modelsRepo: ModelsRepo;
@@ -53,6 +53,7 @@ export interface SummarizerDeps {
   rtRepo: RoundtablesRepo;
   rtMsgRepo: RoundtableMessagesRepo;
   keystore: KeyStore;
+  memoriesRepo?: MemoriesRepo | null;
   runEvents?: RoundtableRunEvents | null;
   log: { info: (...a: unknown[]) => void; warn: (...a: unknown[]) => void; error: (...a: unknown[]) => void };
 }
@@ -189,17 +190,18 @@ async function runOneAttempt(
   stream: PassThrough,
   signal: AbortSignal,
 ): Promise<AttemptOutcome> {
-  const aiProvider = createOpenAI({
-    baseURL: provider.type === 'ollama'
-      ? normalizeOllamaOpenAiBaseUrl(provider.base_url)
-      : provider.base_url.replace(/\/$/, ''),
+  const { model: chatModel } = createChatModel({
+    provider,
+    model,
     apiKey,
+    memoriesRepo: deps.memoriesRepo,
+    conversationId: rt.conversation_id,
   });
   const startedAt = Date.now();
   let accumulated = '';
   try {
     const result = await streamText({
-      model: aiProvider.chat(model.model_name),
+      model: chatModel,
       system,
       prompt,
       maxTokens: 1200,

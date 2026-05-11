@@ -64,6 +64,7 @@ export const models = sqliteTable(
     supports_json: integer('supports_json', { mode: 'boolean' })
       .notNull()
       .default(false),
+    thinking_enabled: integer('thinking_enabled', { mode: 'boolean' }),
     is_default_for: text('is_default_for'),
     fallback_order: integer('fallback_order').notNull().default(0),
     user_rating: integer('user_rating'),
@@ -484,6 +485,7 @@ export const quick_compare_outputs = sqliteTable(
     provider_id: text('provider_id').references(() => providers.id, {
       onDelete: 'set null',
     }),
+    tool_names: text('tool_names').notNull().default('[]'),
     content: text('content').notNull().default(''),
     status: text('status').notNull().default('pending'),
     error_classification: text('error_classification'),

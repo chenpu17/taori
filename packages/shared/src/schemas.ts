@@ -125,6 +125,7 @@ export const ModelSchema = z.object({
   supports_vision: z.boolean(),
   supports_tools: z.boolean(),
   supports_json: z.boolean(),
+  thinking_enabled: z.boolean().nullable(),
   is_default_for: ModelCapabilitySchema.nullable(),
   enabled: z.boolean(),
   fallback_order: z.number().int().nonnegative(),
@@ -152,6 +153,7 @@ export const ModelCreateSchema = z.object({
   supports_vision: z.boolean().optional(),
   supports_tools: z.boolean().optional(),
   supports_json: z.boolean().optional(),
+  thinking_enabled: z.boolean().nullable().optional(),
   is_default_for: ModelCapabilitySchema.nullable().optional(),
   enabled: z.boolean().optional(),
 });
@@ -177,6 +179,7 @@ export const ModelUpdateSchema = z.object({
   supports_vision: z.boolean().optional(),
   supports_tools: z.boolean().optional(),
   supports_json: z.boolean().optional(),
+  thinking_enabled: z.boolean().nullable().optional(),
 });
 export type ModelUpdate = z.infer<typeof ModelUpdateSchema>;
 
@@ -195,8 +198,39 @@ export const ModelHealthRowSchema = z.object({
   avg_duration_ms: z.number().nonnegative().nullable(),
   last_failure_at: z.number().int().nullable(),
   last_failure_classification: ErrorClassificationSchema.nullable(),
+  failure_distribution_24h: z.array(
+    z.object({
+      classification: ErrorClassificationSchema,
+      failures: z.number().int().nonnegative(),
+    }),
+  ),
+  failure_trend_24h: z.array(
+    z.object({
+      bucket_start: z.number().int().nonnegative(),
+      label: z.string(),
+      failures: z.number().int().nonnegative(),
+      classifications: z.array(
+        z.object({
+          classification: ErrorClassificationSchema,
+          failures: z.number().int().nonnegative(),
+        }),
+      ),
+    }),
+  ),
 });
 export type ModelHealthRow = z.infer<typeof ModelHealthRowSchema>;
+
+export const CostBreakdownGroupBySchema = z.enum([
+  'model_feature',
+  'model',
+  'conversation',
+  'feature',
+  'tag',
+]);
+export type CostBreakdownGroupBy = z.infer<typeof CostBreakdownGroupBySchema>;
+
+export const CostReportFormatSchema = z.enum(['csv', 'json']);
+export type CostReportFormat = z.infer<typeof CostReportFormatSchema>;
 
 export const ModelRecommendationTaskSchema = z.enum([
   'general',
@@ -360,6 +394,27 @@ export const McpServerRefreshResponseSchema = z.object({
   ),
 });
 export type McpServerRefreshResponse = z.infer<typeof McpServerRefreshResponseSchema>;
+
+export const McpServerLogEntrySchema = z.object({
+  ts: z.number().int(),
+  level: z.enum(['info', 'warn', 'error']),
+  message: z.string(),
+});
+export type McpServerLogEntry = z.infer<typeof McpServerLogEntrySchema>;
+
+export const McpServerRuntimeResponseSchema = z.object({
+  ok: z.literal(true),
+  server: McpServerSchema,
+  session_running: z.boolean(),
+  tools: z.array(
+    z.object({
+      name: z.string(),
+      description: z.string(),
+    }),
+  ),
+  logs: z.array(McpServerLogEntrySchema),
+});
+export type McpServerRuntimeResponse = z.infer<typeof McpServerRuntimeResponseSchema>;
 
 export const PromptTemplateSchema = z.object({
   id: z.string(),
@@ -550,6 +605,7 @@ export const BackupModelRecordSchema = z.object({
   supports_vision: z.boolean(),
   supports_tools: z.boolean(),
   supports_json: z.boolean(),
+  thinking_enabled: z.boolean().nullable().optional().default(null),
   is_default_for: z.string().nullable(),
   fallback_order: z.number().int(),
   user_rating: z.number().int().nullable(),
@@ -774,6 +830,7 @@ export const ChatAttachmentSchema = z.object({
   // multi-GB payloads.
   data_b64: z.string().max(10_000_000, '单个附件不能超过 10MB'),
   name: z.string().optional(),
+  file_id: z.string().optional(),
 });
 export type ChatAttachment = z.infer<typeof ChatAttachmentSchema>;
 

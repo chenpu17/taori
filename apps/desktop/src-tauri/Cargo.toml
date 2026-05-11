@@ -1,6 +1,6 @@
 [package]
 name = "taori-desktop"
-version = "0.0.5"
+version = "0.0.6"
 description = "Taori desktop shell (Tauri 2)"
 edition = "2021"
 rust-version = "1.77"
@@ -14,7 +14,7 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-tauri = { version = "2", features = [] }
+tauri = { version = "2", features = ["tray-icon"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["full"] }
@@ -28,6 +28,10 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 once_cell = "1"
 anyhow = "1"
 subtle = "2"
+tauri-plugin-global-shortcut = "2"
+tauri-plugin-clipboard-manager = "2"
+base64 = "0.22"
+image = { version = "0.25", default-features = false, features = ["png"] }
 
 [features]
 default = ["custom-protocol"]

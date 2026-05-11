@@ -11,7 +11,6 @@
  */
 
 import { generateText } from 'ai';
-import { createOpenAI } from '@ai-sdk/openai';
 import {
   AnalyzerOutputSchema,
   calculateCostUsd,
@@ -20,12 +19,13 @@ import {
   type Provider,
 } from '@taori/shared';
 import type { KeyStore } from '../keystore.js';
-import type { CostInsert } from '../db/repos/index.js';
-import { normalizeOllamaOpenAiBaseUrl } from '../providers/ollama.js';
+import type { CostInsert, MemoriesRepo } from '../db/repos/index.js';
 import { FALLBACK_PERSONAS } from './fallback-personas.js';
+import { createChatModel } from '../providers/chat-model.js';
 
 export interface AnalyzerDeps {
   keystore: KeyStore;
+  memoriesRepo?: MemoriesRepo | null;
   log: { warn: (...a: unknown[]) => void; info: (...a: unknown[]) => void };
 }
 
@@ -231,17 +231,18 @@ export async function runAnalyzer(
     };
   }
 
-  const provider = createOpenAI({
-    baseURL: input.analyzerProvider.type === 'ollama'
-      ? normalizeOllamaOpenAiBaseUrl(input.analyzerProvider.base_url)
-      : input.analyzerProvider.base_url.replace(/\/$/, ''),
+  const { model: chatModel } = createChatModel({
+    provider: input.analyzerProvider,
+    model: input.analyzerModel,
     apiKey,
+    memoriesRepo: deps.memoriesRepo,
+    conversationId,
   });
   const startedAt = Date.now();
 
   try {
     const result = await generateText({
-      model: provider.chat(input.analyzerModel.model_name),
+      model: chatModel,
       system: SYSTEM_PROMPT,
       prompt: buildUserPrompt(input),
       temperature: 0.4,

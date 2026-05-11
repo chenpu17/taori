@@ -23,7 +23,8 @@ Taori React Renderer，负责聊天、控制中心、模型中心、工具配置
 
 ## 当前合同变化
 
-- 控制中心工具页新增 MCP Server 添加、刷新、启停、删除入口。
+- 控制中心工具页按“搜索工具 / 其他内置工具 / 高级 MCP Bridge”三段重排：搏查搜索改为托管远程 SSE 接入卡片，不再向普通用户暴露 `npx mcp-remote` 细节；自定义 stdio/bridge 仍保留在高级区。
+- 控制中心工具页新增“默认搜索工具”全局设置，用户选择会同时影响普通聊天、Quick Compare 与 Roundtable 的联网搜索入口；未配置时回退到内置网页搜索。
 - 模型编辑器新增 `pricing_meta` JSON 编辑。
 - 圆桌参与者列新增 `rt.tool_trace` 可视化，并在刷新后保留本轮工具痕迹。
 - 聊天消息的“续写”按钮改为调用 Sidecar `POST /v1/runs/:id/continue`，不再追加“请继续上文”这类合成用户消息；若 Sidecar 返回 `cost_confirmation_required`，复用成本确认弹窗并以 `confirmed_cost=true` 二次提交；完成后刷新消息、运行时间线、实时成本和侧边栏。
@@ -38,3 +39,5 @@ Taori React Renderer，负责聊天、控制中心、模型中心、工具配置
 - Help Center 新增“真实模型能力诊断”，消费 Sidecar `GET /v1/diagnostics/real-provider/latest`，只展示最近 `verify:real` 本地产物摘要，不主动读取 Keychain、不发起真实模型调用。
 - Onboarding 供应商预设新增 PackyAPI / PackyCode 与硅基流动 SiliconFlow；默认 Base URL 来自 `packages/shared` 常量，前端只采集用户输入的 API Key，不持久化或日志输出明文。
 - Onboarding 供应商预设新增 DeepSeek 官方；默认 Base URL 来自 `packages/shared` 的 `DEFAULT_DEEPSEEK_BASE_URL`，前端只采集用户输入的 API Key，不持久化或日志输出明文。
+- 聊天头部的“模板市场”把内置工作流、已启用 Workflow Recipe 与用户自定义 Prompt 模板统一收敛为本地模板发现入口；支持搜索、预览、按来源筛选，并保持一键套用 / 填写变量后套用闭环。
+- Settings 新增全局 thinking 开关（`thinking_enabled`）；ModelCenter 的模型编辑器新增“跟随全局 / 总是开启 / 总是关闭”三态覆盖，并通过 `PATCH /v1/models/:id` 持久化到单模型 `thinking_enabled`。

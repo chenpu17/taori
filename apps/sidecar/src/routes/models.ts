@@ -16,7 +16,6 @@
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { generateText, tool } from 'ai';
-import { createOpenAI } from '@ai-sdk/openai';
 import {
   ModelCreateSchema,
   ModelUpdateSchema,
@@ -29,13 +28,13 @@ import {
   type ModelRecommendation,
   type ModelRecommendationTask,
 } from '@taori/shared';
-import { ProvidersRepo, ModelsRepo, CostsRepo } from '../db/repos/index.js';
+import { ProvidersRepo, ModelsRepo, CostsRepo, MemoriesRepo } from '../db/repos/index.js';
 import {
   classifyProviderError,
   isToolPayloadUnsupportedError,
 } from '../providers/registry.js';
-import { normalizeOllamaOpenAiBaseUrl } from '../providers/ollama.js';
 import type { BuildServerArgs } from '../server.js';
+import { createChatModel } from '../providers/chat-model.js';
 
 const z_capability = z.object({ capability: ModelCapabilitySchema });
 
@@ -64,6 +63,8 @@ function zeroHealth(modelId: string): ModelHealthRow {
     avg_duration_ms: null,
     last_failure_at: null,
     last_failure_classification: null,
+    failure_distribution_24h: [],
+    failure_trend_24h: [],
   };
 }
 
@@ -166,6 +167,7 @@ export function registerModelsRoute(
   const repo = new ModelsRepo(deps.db);
   const providersRepo = new ProvidersRepo(deps.db);
   const costsRepo = new CostsRepo(deps.db);
+  const memoriesRepo = new MemoriesRepo(deps.db);
 
   app.get('/v1/models', async () => {
     return { models: repo.list() };
@@ -184,6 +186,8 @@ export function registerModelsRoute(
           avg_duration_ms: null,
           last_failure_at: null,
           last_failure_classification: null,
+          failure_distribution_24h: [],
+          failure_trend_24h: [],
         }
       );
     });
@@ -437,14 +441,14 @@ export function registerModelsRoute(
       }
       const started = Date.now();
       try {
-        const sdk = createOpenAI({
-          baseURL: provider.type === 'ollama'
-            ? normalizeOllamaOpenAiBaseUrl(provider.base_url)
-            : provider.base_url.replace(/\/$/, ''),
+        const { model: chatModel } = createChatModel({
+          provider,
+          model,
           apiKey,
+          memoriesRepo,
         });
         await generateText({
-          model: sdk.chat(model.model_name),
+          model: chatModel,
           prompt: 'ping',
           maxTokens: 1,
           abortSignal: AbortSignal.timeout(8000),
@@ -458,7 +462,7 @@ export function registerModelsRoute(
         if (model.capability === 'chat' || model.capability === 'multimodal') {
           try {
             await generateText({
-              model: sdk.chat(model.model_name),
+              model: chatModel,
               prompt: 'Reply exactly: ok. Do not call any tools.',
               maxTokens: 3,
               abortSignal: AbortSignal.timeout(8000),

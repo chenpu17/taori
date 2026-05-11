@@ -309,6 +309,7 @@ CREATE TABLE IF NOT EXISTS quick_compare_outputs (
   participant_index INTEGER NOT NULL,
   model_id TEXT NOT NULL REFERENCES models(id) ON DELETE CASCADE,
   provider_id TEXT REFERENCES providers(id) ON DELETE SET NULL,
+  tool_names TEXT NOT NULL DEFAULT '[]',
   content TEXT NOT NULL DEFAULT '',
   status TEXT NOT NULL DEFAULT 'pending',
   error_classification TEXT,
@@ -367,6 +368,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS memories_scope_key_uniq_v2
     ['pricing_meta', 'TEXT'],
     ['price_synced_at', 'INTEGER'],
     ['modalities', 'TEXT'],
+    ['thinking_enabled', 'INTEGER'],
   ];
   for (const [name, type] of additive) {
     if (!cols.some((c) => c.name === name)) {
@@ -403,6 +405,12 @@ CREATE UNIQUE INDEX IF NOT EXISTS memories_scope_key_uniq_v2
   }
   if (!costCols.some((c) => c.name === 'first_token_ms')) {
     sqlite.exec(`ALTER TABLE cost_records ADD COLUMN first_token_ms INTEGER`);
+  }
+  const qcOutputCols = sqlite
+    .prepare(`PRAGMA table_info(quick_compare_outputs)`)
+    .all() as Array<{ name: string }>;
+  if (!qcOutputCols.some((c) => c.name === 'tool_names')) {
+    sqlite.exec(`ALTER TABLE quick_compare_outputs ADD COLUMN tool_names TEXT NOT NULL DEFAULT '[]'`);
   }
   return drizzle(sqlite, { schema });
 }

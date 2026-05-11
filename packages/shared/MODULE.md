@@ -30,3 +30,4 @@
 - `ContextSnapshotAnnotationSchema` 新增可选 `context_window`，用于展示本次上游上下文窗口策略、估算 token、模型窗口预算和省略消息数量。
 - `ToolHealthRowSchema` 定义工具健康视图合同：最近 24h 调用、失败、平均耗时和最近失败分类。
 - `ProviderTypeSchema` 新增 `deepseek`、`packyapi` 与 `siliconflow`；共享常量新增 `DEFAULT_DEEPSEEK_BASE_URL`、`DEFAULT_PACKYAPI_BASE_URL`、`DEFAULT_SILICONFLOW_BASE_URL`，用于 Web onboarding 与 Sidecar provider adapter 保持默认接入点一致。
+- `ModelSchema` / `ModelCreateSchema` / `ModelUpdateSchema` / `BackupModelRecordSchema` 新增 `thinking_enabled: boolean | null`，用于“跟随全局 / 单模型覆盖”的思考开关合同。

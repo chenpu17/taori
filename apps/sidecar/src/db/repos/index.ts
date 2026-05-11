@@ -7,6 +7,7 @@
  * concerns are layered on by the route handlers.
  */
 
+import path from 'node:path';
 import { eq, and, isNotNull, asc, desc, inArray, sql } from 'drizzle-orm';
 import { type Db } from '../index.js';
 import { isChatCapable } from '@taori/shared';
@@ -143,6 +144,7 @@ function toModel(row: ModelRow): Model {
     supports_vision: row.supports_vision,
     supports_tools: row.supports_tools,
     supports_json: row.supports_json,
+    thinking_enabled: row.thinking_enabled ?? null,
     is_default_for: (row.is_default_for as ModelCapability | null) ?? null,
     enabled: row.enabled,
     fallback_order: row.fallback_order ?? 0,
@@ -181,6 +183,16 @@ function parseStringArray(raw: string | null): string[] {
   }
 }
 
+function parseConversationTags(raw: string | null): string[] {
+  return Array.from(
+    new Set(
+      parseStringArray(raw)
+        .map((item) => item.trim())
+        .filter((item) => item.length > 0),
+    ),
+  ).slice(0, 3);
+}
+
 function parseStringRecord(raw: string | null): Record<string, string> {
   if (!raw) return {};
   try {
@@ -217,6 +229,7 @@ function toQuickCompareOutput(row: QuickCompareOutputRow): QuickCompareOutput {
     participant_index: row.participant_index,
     model_id: row.model_id,
     provider_id: row.provider_id,
+    tool_names: parseStringArray(row.tool_names),
     content: row.content,
     status: row.status as QuickCompareOutputStatus,
     error_classification: row.error_classification as QuickCompareOutput['error_classification'],
@@ -604,6 +617,7 @@ export class ModelsRepo {
         supports_vision: input.supports_vision ?? false,
         supports_tools: input.supports_tools ?? isChatCapable(input.capability),
         supports_json: input.supports_json ?? false,
+        thinking_enabled: input.thinking_enabled ?? null,
         is_default_for: input.enabled === false ? null : (input.is_default_for ?? null),
         fallback_order: 0,
         user_rating: null,
@@ -747,6 +761,9 @@ export class ModelsRepo {
         }),
         ...(patch.supports_json !== undefined && {
           supports_json: patch.supports_json,
+        }),
+        ...(patch.thinking_enabled !== undefined && {
+          thinking_enabled: patch.thinking_enabled,
         }),
         updated_at: Date.now(),
       })
@@ -1531,10 +1548,12 @@ export interface QuickCompareOutputCreate {
   participant_index: number;
   model_id: string;
   provider_id?: string | null;
+  tool_names?: string[];
   status?: QuickCompareOutputStatus;
 }
 
 export interface QuickCompareOutputPatch {
+  tool_names?: string[];
   content?: string;
   status?: QuickCompareOutputStatus;
   error_classification?: QuickCompareOutput['error_classification'];
@@ -1618,6 +1637,7 @@ export class QuickCompareRepo {
         participant_index: input.participant_index,
         model_id: input.model_id,
         provider_id: input.provider_id ?? null,
+        tool_names: JSON.stringify(input.tool_names ?? []),
         content: '',
         status: input.status ?? 'pending',
         error_classification: null,
@@ -1656,6 +1676,7 @@ export class QuickCompareRepo {
     const row = this.db
       .update(quick_compare_outputs)
       .set({
+        ...(patch.tool_names !== undefined && { tool_names: JSON.stringify(patch.tool_names) }),
         ...(patch.content !== undefined && { content: patch.content }),
         ...(patch.status !== undefined && { status: patch.status }),
         ...(patch.error_classification !== undefined && {
@@ -1897,6 +1918,7 @@ export class CostsRepo {
     created_at: number;
     conversation_id: string | null;
     conversation_title: string | null;
+    conversation_tags: string[];
   }> {
     if (scope === 'session' && !conversationId) return [];
     const clauses = [];
@@ -1915,6 +1937,7 @@ export class CostsRepo {
         created_at: cost_records.created_at,
         conversation_id: cost_records.conversation_id,
         conversation_title: conversations.title,
+        conversation_tags: conversations.tags,
       })
       .from(cost_records)
       .leftJoin(conversations, eq(cost_records.conversation_id, conversations.id))
@@ -1928,8 +1951,12 @@ export class CostsRepo {
       created_at: number;
       conversation_id: string | null;
       conversation_title: string | null;
+      conversation_tags: string | null;
     }>;
-    return rows;
+    return rows.map((row) => ({
+      ...row,
+      conversation_tags: parseConversationTags(row.conversation_tags),
+    }));
   }
 
   private makeTrendBuckets(
@@ -2158,6 +2185,22 @@ export class CostsRepo {
 
   modelHealth24h(): Map<string, ModelHealthRow> {
     const since = Date.now() - 24 * 60 * 60 * 1000;
+    const bucketSizeMs = 3 * 60 * 60 * 1000;
+    const bucketCount = 8;
+    const bucketBase = Math.floor(since / bucketSizeMs) * bucketSizeMs;
+    const makeEmptyTrend = () =>
+      Array.from({ length: bucketCount }, (_, index) => ({
+        bucket_start: bucketBase + index * bucketSizeMs,
+        label: new Date(bucketBase + index * bucketSizeMs).toLocaleTimeString([], {
+          hour: '2-digit',
+          minute: '2-digit',
+        }),
+        failures: 0,
+        classifications: [] as Array<{
+          classification: ErrorClassification;
+          failures: number;
+        }>,
+      }));
     const rows = this.db
       .select({
         model_id: cost_records.model_id,
@@ -2190,6 +2233,8 @@ export class CostsRepo {
         firstTokenCount: number;
         durationTotal: number;
         durationCount: number;
+        failureDistribution: Map<ErrorClassification, number>;
+        failureTrendMaps: Array<Map<ErrorClassification, number>>;
       }
     >();
 
@@ -2203,10 +2248,14 @@ export class CostsRepo {
         avg_duration_ms: null,
         last_failure_at: null,
         last_failure_classification: null,
+        failure_distribution_24h: [],
+        failure_trend_24h: makeEmptyTrend(),
         firstTokenTotal: 0,
         firstTokenCount: 0,
         durationTotal: 0,
         durationCount: 0,
+        failureDistribution: new Map<ErrorClassification, number>(),
+        failureTrendMaps: Array.from({ length: bucketCount }, () => new Map<ErrorClassification, number>()),
       };
       current.calls_24h += 1;
       if (!row.success) {
@@ -2214,6 +2263,22 @@ export class CostsRepo {
         if (current.last_failure_at == null || row.created_at >= current.last_failure_at) {
           current.last_failure_at = row.created_at;
           current.last_failure_classification = row.classification ?? null;
+        }
+        if (row.classification) {
+          current.failureDistribution.set(
+            row.classification,
+            (current.failureDistribution.get(row.classification) ?? 0) + 1,
+          );
+          const rawBucketIndex = Math.floor((row.created_at - bucketBase) / bucketSizeMs);
+          const bucketIndex = Math.min(
+            bucketCount - 1,
+            Math.max(0, rawBucketIndex),
+          );
+          const trendBucket = current.failureTrendMaps[bucketIndex]!;
+          trendBucket.set(
+            row.classification,
+            (trendBucket.get(row.classification) ?? 0) + 1,
+          );
         }
       }
       if (typeof row.first_token_ms === 'number') {
@@ -2229,6 +2294,19 @@ export class CostsRepo {
 
     const out = new Map<string, ModelHealthRow>();
     for (const [modelId, row] of grouped.entries()) {
+      const failure_distribution_24h = Array.from(row.failureDistribution.entries())
+        .map(([classification, failures]) => ({ classification, failures }))
+        .sort((a, b) => b.failures - a.failures);
+      const failure_trend_24h = row.failure_trend_24h.map((bucket, index) => {
+        const classifications = Array.from(row.failureTrendMaps[index]!.entries())
+          .map(([classification, failures]) => ({ classification, failures }))
+          .sort((a, b) => b.failures - a.failures);
+        return {
+          ...bucket,
+          failures: classifications.reduce((sum, item) => sum + item.failures, 0),
+          classifications,
+        };
+      });
       out.set(modelId, {
         model_id: row.model_id,
         calls_24h: row.calls_24h,
@@ -2239,6 +2317,8 @@ export class CostsRepo {
           row.durationCount > 0 ? row.durationTotal / row.durationCount : null,
         last_failure_at: row.last_failure_at,
         last_failure_classification: row.last_failure_classification,
+        failure_distribution_24h,
+        failure_trend_24h,
       });
     }
     return out;
@@ -2455,7 +2535,7 @@ export class CostsRepo {
 
   breakdownBy(
     scope: 'session' | 'today' | 'week' | 'month',
-    groupBy: 'model' | 'conversation' | 'feature',
+    groupBy: 'model' | 'conversation' | 'feature' | 'tag',
     conversationId: string | null,
   ): Array<{
     key: string;
@@ -2501,54 +2581,81 @@ export class CostsRepo {
 
     for (const row of rows) {
       const bucketStart = this.bucketStartForScope(scope, row.created_at);
-      let key: string;
-      let label: string;
-      let modelId: string | null = null;
-      let modelNameSnapshot: string | null = null;
-      let feature: string | null = null;
-      let targetConversationId: string | null = null;
-      let conversationTitle: string | null = null;
-      if (groupBy === 'model') {
-        modelId = row.model_id;
-        modelNameSnapshot = row.model_name_snapshot;
-        key = row.model_id ?? `snapshot:${row.model_name_snapshot ?? 'deleted'}`;
-        label = row.model_name_snapshot ?? '(已删除模型)';
-      } else if (groupBy === 'conversation') {
-        targetConversationId = row.conversation_id;
-        conversationTitle = row.conversation_title;
-        key = row.conversation_id ?? 'no-conversation';
-        label =
-          row.conversation_title
-          ?? (row.conversation_id ? '未命名会话' : '无会话归属');
-      } else {
-        feature = row.feature;
-        key = row.feature;
-        label = row.feature;
+      const segments =
+        groupBy === 'tag'
+          ? (row.conversation_tags.length > 0 ? row.conversation_tags : ['未归档项目']).map((tag) => ({
+              key: `tag:${tag}`,
+              label: tag,
+              modelId: null,
+              modelNameSnapshot: null,
+              feature: null,
+              conversationId: null,
+              conversationTitle: null,
+              weight: 1 / (row.conversation_tags.length > 0 ? row.conversation_tags.length : 1),
+            }))
+          : [(() => {
+              if (groupBy === 'model') {
+                return {
+                  key: row.model_id ?? `snapshot:${row.model_name_snapshot ?? 'deleted'}`,
+                  label: row.model_name_snapshot ?? '(已删除模型)',
+                  modelId: row.model_id,
+                  modelNameSnapshot: row.model_name_snapshot,
+                  feature: null,
+                  conversationId: null,
+                  conversationTitle: null,
+                  weight: 1,
+                };
+              }
+              if (groupBy === 'conversation') {
+                return {
+                  key: row.conversation_id ?? 'no-conversation',
+                  label: row.conversation_title ?? (row.conversation_id ? '未命名会话' : '无会话归属'),
+                  modelId: null,
+                  modelNameSnapshot: null,
+                  feature: null,
+                  conversationId: row.conversation_id,
+                  conversationTitle: row.conversation_title,
+                  weight: 1,
+                };
+              }
+              return {
+                key: row.feature,
+                label: row.feature,
+                modelId: null,
+                modelNameSnapshot: null,
+                feature: row.feature,
+                conversationId: null,
+                conversationTitle: null,
+                weight: 1,
+              };
+            })()];
+
+      for (const segment of segments) {
+        const current = grouped.get(segment.key) ?? {
+          key: segment.key,
+          label: segment.label,
+          model_id: segment.modelId,
+          model_name_snapshot: segment.modelNameSnapshot,
+          conversation_id: segment.conversationId,
+          conversation_title: segment.conversationTitle,
+          feature: segment.feature,
+          sum_usd: 0,
+          count: 0,
+          success_count: 0,
+          billed_failure_count: 0,
+          trend: bucketTemplate.map((bucket) => ({ ...bucket })),
+        };
+        current.sum_usd += row.sum_usd * segment.weight;
+        current.count += segment.weight;
+        current.success_count += row.success ? segment.weight : 0;
+        current.billed_failure_count += !row.success && row.sum_usd > 0 ? segment.weight : 0;
+        const idx = bucketIndex.get(bucketStart);
+        if (idx != null) {
+          current.trend[idx]!.sum_usd += row.sum_usd * segment.weight;
+          current.trend[idx]!.count += segment.weight;
+        }
+        grouped.set(segment.key, current);
       }
-      const current = grouped.get(key) ?? {
-        key,
-        label,
-        model_id: modelId,
-        model_name_snapshot: modelNameSnapshot,
-        conversation_id: targetConversationId,
-        conversation_title: conversationTitle,
-        feature,
-        sum_usd: 0,
-        count: 0,
-        success_count: 0,
-        billed_failure_count: 0,
-        trend: bucketTemplate.map((bucket) => ({ ...bucket })),
-      };
-      current.sum_usd += row.sum_usd;
-      current.count += 1;
-      current.success_count += row.success ? 1 : 0;
-      current.billed_failure_count += !row.success && row.sum_usd > 0 ? 1 : 0;
-      const idx = bucketIndex.get(bucketStart);
-      if (idx != null) {
-        current.trend[idx]!.sum_usd += row.sum_usd;
-        current.trend[idx]!.count += 1;
-      }
-      grouped.set(key, current);
     }
     return Array.from(grouped.values()).sort((a, b) => b.sum_usd - a.sum_usd);
   }
@@ -2923,6 +3030,7 @@ export class FileChunksRepo {
       SELECT
         fc.id AS chunk_id,
         fc.file_id AS file_id,
+        f.original_path AS original_path,
         fc.conversation_id AS conversation_id,
         fc.message_id AS message_id,
         fc.chunk_index AS chunk_index,
@@ -2932,12 +3040,14 @@ export class FileChunksRepo {
         fc.char_end AS char_end
       FROM file_chunk_fts
       JOIN file_chunks fc ON fc.id = file_chunk_fts.chunk_id
+      JOIN files f ON f.id = fc.file_id
       WHERE file_chunk_fts MATCH ${match}
       ORDER BY bm25(file_chunk_fts) ASC
       LIMIT ${Math.max(limit * 4, limit)}
     `) as Array<{
       chunk_id: string;
       file_id: string;
+      original_path: string | null;
       conversation_id: string | null;
       message_id: string | null;
       chunk_index: number;
@@ -2958,6 +3068,7 @@ export class FileChunksRepo {
       out.push({
         chunk_id: row.chunk_id,
         file_id: row.file_id,
+        file_name: row.original_path ? path.basename(row.original_path) : null,
         conversation_id: row.conversation_id,
         message_id: row.message_id,
         chunk_index: row.chunk_index,

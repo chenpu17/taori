@@ -401,6 +401,289 @@ describe('chat M1.2', () => {
     }
   });
 
+  it('deepseek official tool loop preserves reasoning_content across tool roundtrips', async () => {
+    const provRepo = new ProvidersRepo(db);
+    const modRepo = new ModelsRepo(db);
+    const provider = provRepo.create({
+      name: 'DeepSeek',
+      type: 'deepseek',
+      base_url: 'https://api.deepseek.com',
+      api_key: 'sk-deepseek-test',
+    });
+    await keystore.write(provider.api_key_ref!, 'sk-deepseek-test');
+    const model = modRepo.create({
+      provider_id: provider.id,
+      model_name: 'deepseek-v4-flash',
+      capability: 'chat',
+      display_name: 'DeepSeek V4 Flash',
+      supports_tools: true,
+    });
+
+    let callCount = 0;
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async (_url, init) => {
+      callCount++;
+      const body = JSON.parse(String(init?.body ?? '{}')) as {
+        stream?: boolean;
+        messages?: Array<Record<string, unknown>>;
+        tools?: Array<{ function?: { name?: string } }>;
+      };
+      expect(String(_url)).toBe('https://api.deepseek.com/chat/completions');
+      if (callCount === 1) {
+        expect(body.stream).toBe(false);
+        expect(body.tools?.some((tool) => tool.function?.name === 'web_search')).toBe(true);
+        return new Response(
+          JSON.stringify({
+            choices: [
+              {
+                message: {
+                  content: null,
+                  reasoning_content: 'Need current info before answering.',
+                  tool_calls: [
+                    {
+                      id: 'call_web_1',
+                      type: 'function',
+                      function: {
+                        name: 'web_search',
+                        arguments: '{"query":"DeepSeek V4 Flash tool calling"}',
+                      },
+                    },
+                  ],
+                },
+                finish_reason: 'tool_calls',
+              },
+            ],
+            usage: { prompt_tokens: 12, completion_tokens: 5, total_tokens: 17 },
+          }),
+          { status: 200, headers: { 'content-type': 'application/json' } },
+        );
+      }
+      if (callCount === 2) {
+        expect(body.stream).toBe(false);
+        const assistantWithReasoning = body.messages?.find((message) =>
+          message.role === 'assistant' && message.reasoning_content === 'Need current info before answering.',
+        );
+        expect(assistantWithReasoning).toBeTruthy();
+        const toolResult = body.messages?.find((message) => message.role === 'tool');
+        expect(toolResult).toBeTruthy();
+        return new Response(
+          JSON.stringify({
+            choices: [
+              {
+                message: {
+                  content: 'According to the latest docs, it supports tool calls.',
+                  reasoning_content: 'I have enough evidence now.',
+                },
+                finish_reason: 'stop',
+              },
+            ],
+            usage: { prompt_tokens: 18, completion_tokens: 6, total_tokens: 24 },
+          }),
+          { status: 200, headers: { 'content-type': 'application/json' } },
+        );
+      }
+      throw new Error(`unexpected DeepSeek fetch call #${callCount}`);
+    });
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/v1/chat',
+      headers: { authorization: `Bearer ${bearer}`, 'content-type': 'application/json' },
+      payload: {
+        model_id: model.id,
+        messages: [{ role: 'user', content: '查一下 DeepSeek V4 Flash 是否支持工具调用' }],
+      },
+    });
+    expect(res.statusCode).toBe(200);
+    expect(fetchSpy).toHaveBeenCalledTimes(2);
+    expect(res.payload).toContain('According to the latest docs, ');
+    expect(res.payload).toContain('it supports tool calls.');
+    expect(res.payload).toContain('"tool":"builtin.web_search"');
+  });
+
+  it('deepseek official tool loop allows multiple tool rounds before final answer', async () => {
+    const provRepo = new ProvidersRepo(db);
+    const modRepo = new ModelsRepo(db);
+    const provider = provRepo.create({
+      name: 'DeepSeek',
+      type: 'deepseek',
+      base_url: 'https://api.deepseek.com',
+      api_key: 'sk-deepseek-test',
+    });
+    await keystore.write(provider.api_key_ref!, 'sk-deepseek-test');
+    const model = modRepo.create({
+      provider_id: provider.id,
+      model_name: 'deepseek-v4-flash',
+      capability: 'chat',
+      display_name: 'DeepSeek V4 Flash',
+      supports_tools: true,
+    });
+
+    let callCount = 0;
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async (_url, init) => {
+      callCount++;
+      const body = JSON.parse(String(init?.body ?? '{}')) as {
+        stream?: boolean;
+        messages?: Array<Record<string, unknown>>;
+        tools?: Array<{ function?: { name?: string } }>;
+      };
+      expect(String(_url)).toBe('https://api.deepseek.com/chat/completions');
+      expect(body.stream).toBe(false);
+      if (callCount <= 3) {
+        const priorToolMessages = body.messages?.filter((message) => message.role === 'tool') ?? [];
+        expect(priorToolMessages).toHaveLength(callCount - 1);
+        return new Response(
+          JSON.stringify({
+            choices: [
+              {
+                message: {
+                  content: null,
+                  reasoning_content: `Round ${callCount} reasoning`,
+                  tool_calls: [
+                    {
+                      id: `call_web_${callCount}`,
+                      type: 'function',
+                      function: {
+                        name: 'web_search',
+                        arguments: JSON.stringify({ query: `DeepSeek step ${callCount}` }),
+                      },
+                    },
+                  ],
+                },
+                finish_reason: 'tool_calls',
+              },
+            ],
+            usage: { prompt_tokens: 10 + callCount, completion_tokens: 2, total_tokens: 12 + callCount },
+          }),
+          { status: 200, headers: { 'content-type': 'application/json' } },
+        );
+      }
+      const allReasoningMessages = body.messages?.filter((message) => message.role === 'assistant') ?? [];
+      expect(allReasoningMessages.some((message) => message.reasoning_content === 'Round 3 reasoning')).toBe(true);
+      expect(body.messages?.filter((message) => message.role === 'tool')).toHaveLength(3);
+      return new Response(
+        JSON.stringify({
+          choices: [
+            {
+              message: {
+                content: 'Final answer after three searches.',
+                reasoning_content: 'Enough evidence gathered.',
+              },
+              finish_reason: 'stop',
+            },
+          ],
+          usage: { prompt_tokens: 21, completion_tokens: 5, total_tokens: 26 },
+        }),
+        { status: 200, headers: { 'content-type': 'application/json' } },
+      );
+    });
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/v1/chat',
+      headers: { authorization: `Bearer ${bearer}`, 'content-type': 'application/json' },
+      payload: {
+        model_id: model.id,
+        messages: [{ role: 'user', content: '多搜几次再回答' }],
+      },
+    });
+    expect(res.statusCode).toBe(200);
+    expect(fetchSpy).toHaveBeenCalledTimes(4);
+    expect(res.payload).toContain('Final answer after three searches.');
+    expect(res.payload).toContain('"tool":"builtin.web_search"');
+  }, 15000);
+
+  it('deepseek official tool loop finalizes with tool_choice none after repeated tool rounds', async () => {
+    const provRepo = new ProvidersRepo(db);
+    const modRepo = new ModelsRepo(db);
+    const provider = provRepo.create({
+      name: 'DeepSeek',
+      type: 'deepseek',
+      base_url: 'https://api.deepseek.com',
+      api_key: 'sk-deepseek-test',
+    });
+    await keystore.write(provider.api_key_ref!, 'sk-deepseek-test');
+    const model = modRepo.create({
+      provider_id: provider.id,
+      model_name: 'deepseek-v4-flash',
+      capability: 'chat',
+      display_name: 'DeepSeek V4 Flash',
+      supports_tools: true,
+    });
+
+    let callCount = 0;
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async (_url, init) => {
+      callCount++;
+      const body = JSON.parse(String(init?.body ?? '{}')) as {
+        stream?: boolean;
+        messages?: Array<Record<string, unknown>>;
+        tools?: Array<{ function?: { name?: string } }>;
+        tool_choice?: string;
+        thinking?: { type?: string };
+      };
+      expect(String(_url)).toBe('https://api.deepseek.com/chat/completions');
+      expect(body.stream).toBe(false);
+      if (callCount <= 8) {
+        return new Response(
+          JSON.stringify({
+            choices: [
+              {
+                message: {
+                  content: null,
+                  reasoning_content: `Round ${callCount} reasoning`,
+                  tool_calls: [
+                    {
+                      id: `call_web_${callCount}`,
+                      type: 'function',
+                      function: {
+                        name: 'web_search',
+                        arguments: JSON.stringify({ query: `DeepSeek step ${callCount}` }),
+                      },
+                    },
+                  ],
+                },
+                finish_reason: 'tool_calls',
+              },
+            ],
+            usage: { prompt_tokens: 10 + callCount, completion_tokens: 2, total_tokens: 12 + callCount },
+          }),
+          { status: 200, headers: { 'content-type': 'application/json' } },
+        );
+      }
+      expect(body.tool_choice).toBe('none');
+      expect(body).not.toHaveProperty('thinking');
+      const lastMessage = body.messages?.at(-1);
+      expect(lastMessage?.role).toBe('system');
+      expect(String(lastMessage?.content ?? '')).toContain('Do not call any more tools');
+      return new Response(
+        JSON.stringify({
+          choices: [
+            {
+              message: {
+                content: 'Final answer from finalize request.',
+              },
+              finish_reason: 'stop',
+            },
+          ],
+          usage: { prompt_tokens: 30, completion_tokens: 4, total_tokens: 34 },
+        }),
+        { status: 200, headers: { 'content-type': 'application/json' } },
+      );
+    });
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/v1/chat',
+      headers: { authorization: `Bearer ${bearer}`, 'content-type': 'application/json' },
+      payload: {
+        model_id: model.id,
+        messages: [{ role: 'user', content: '先多次搜索，再收口作答' }],
+      },
+    });
+    expect(res.statusCode).toBe(200);
+    expect(fetchSpy).toHaveBeenCalledTimes(9);
+    expect(res.payload).toContain('Final answer from finalize request.');
+  }, 20000);
+
   it('upstream-path: classifies upstream error and persists assistant as failed', async () => {
     const provRepo = new ProvidersRepo(db);
     const modRepo = new ModelsRepo(db);
@@ -440,6 +723,52 @@ describe('chat M1.2', () => {
     const msgs = new MessagesRepo(db).listByConversation(meta.conversation_id);
     const asst = msgs.find((m) => m.role === 'assistant')!;
     expect(['failed', 'complete']).toContain(asst.status);
+  });
+
+  it('upstream-path: treats zero-text completion as failed instead of silent success', async () => {
+    const provRepo = new ProvidersRepo(db);
+    const modRepo = new ModelsRepo(db);
+    const provider = provRepo.create({
+      name: 'OR',
+      type: 'openrouter',
+      base_url: 'https://openrouter.example.com/api/v1',
+      api_key: 'sk-empty',
+    });
+    await keystore.write(provider.api_key_ref!, 'sk-empty');
+    const model = modRepo.create({
+      provider_id: provider.id,
+      model_name: 'empty-stream',
+      capability: 'chat',
+      display_name: 'Empty Stream',
+    });
+
+    const sseBody =
+      `data: ${JSON.stringify({ id: '1', object: 'chat.completion.chunk', created: 1, model: 'm', choices: [{ index: 0, delta: { role: 'assistant' }, finish_reason: null }] })}\n\n` +
+      `data: ${JSON.stringify({ id: '1', object: 'chat.completion.chunk', created: 1, model: 'm', choices: [{ index: 0, delta: {}, finish_reason: 'stop' }], usage: { prompt_tokens: 5, completion_tokens: 0, total_tokens: 5 } })}\n\n` +
+      `data: [DONE]\n\n`;
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+      new Response(sseBody, {
+        status: 200,
+        headers: { 'content-type': 'text/event-stream' },
+      }),
+    );
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/v1/chat',
+      headers: { authorization: `Bearer ${bearer}`, 'content-type': 'application/json' },
+      payload: { model_id: model.id, messages: [{ role: 'user', content: 'hello' }] },
+    });
+    expect(res.statusCode).toBe(200);
+    const lines = res.payload.split('\n').filter(Boolean);
+    expect(lines.some((line) => line.includes('provider_error/unknown: 模型本次调用已完成，但没有返回任何可显示文本。请重试，或切换到另一模型继续。'))).toBe(true);
+    expect(lines.some((line) => /finishReason":"error"/.test(line))).toBe(true);
+
+    const meta = JSON.parse(lines.find((line) => line.startsWith('8:'))!.slice(2))[0];
+    const msgs = new MessagesRepo(db).listByConversation(meta.conversation_id);
+    const asst = msgs.find((m) => m.role === 'assistant')!;
+    expect(asst.status).toBe('failed');
+    expect(asst.error).toContain('没有返回任何可显示文本');
   });
 
   it('rejects image attachment for non-vision model with validation_error', async () => {

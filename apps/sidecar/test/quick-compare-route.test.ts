@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -25,6 +25,7 @@ describe('quick compare route', () => {
   let qcRepo: QuickCompareRepo;
   let msgRepo: MessagesRepo;
   let modelsRepo: ModelsRepo;
+  let keystore: MemoryStore;
 
   beforeEach(async () => {
     dbPath = path.join(os.tmpdir(), `taori-quick-compare-route-${Date.now()}-${Math.random()}.db`);
@@ -51,6 +52,7 @@ describe('quick compare route', () => {
         supports_json: index === 2,
       }).id,
     );
+    keystore = new MemoryStore();
     app = buildServer({
       config: {
         port: 0,
@@ -63,18 +65,19 @@ describe('quick compare route', () => {
       },
       db,
       control: new ControlClient({ url: null, bearer: null }),
-      keystore: new MemoryStore(),
+      keystore,
       startedAt: Date.now(),
     });
     await app.ready();
   });
 
   afterEach(async () => {
+    vi.restoreAllMocks();
     await app.close();
     fs.rmSync(dbPath, { force: true });
   });
 
-  async function createCompare(): Promise<{ compareId: string; outputIds: string[] }> {
+  async function createCompare(payload?: Record<string, unknown>): Promise<{ compareId: string; outputIds: string[] }> {
     const res = await app.inject({
       method: 'POST',
       url: '/v1/quick-compare',
@@ -82,6 +85,7 @@ describe('quick compare route', () => {
       payload: {
         model_ids: [models[0], models[1], models[2]],
         messages: [{ role: 'user', content: '比较三个方案' }],
+        ...payload,
       },
     });
 
@@ -136,6 +140,31 @@ describe('quick compare route', () => {
     expect(qcRepo.getOutput(outputIds[1])?.status).toBe('complete');
   });
 
+  it('persists per-participant tool selections and reuses them on retry', async () => {
+    const { compareId, outputIds } = await createCompare({
+      participant_configs: [
+        { model_id: models[0], tool_names: ['builtin.web_search'] },
+        { model_id: models[1], tool_names: [] },
+        { model_id: models[2], tool_names: ['builtin.web_search', 'builtin.web_fetch'] },
+      ],
+    });
+
+    const outputs = qcRepo.listOutputs(compareId);
+    expect(outputs[0]?.tool_names).toEqual([]);
+    expect(outputs[1]?.tool_names).toEqual([]);
+    expect(outputs[2]?.tool_names).toEqual(['builtin.web_search', 'builtin.web_fetch']);
+
+    const retryRes = await app.inject({
+      method: 'POST',
+      url: `/v1/quick-compare/${compareId}/retry`,
+      headers: { ...auth, 'content-type': 'application/json' },
+      payload: { output_id: outputIds[2] },
+    });
+    expect(retryRes.statusCode).toBe(200);
+    expect(retryRes.body).toContain('"tool_names":["builtin.web_search","builtin.web_fetch"]');
+    expect(qcRepo.getOutput(outputIds[2])?.tool_names).toEqual(['builtin.web_search', 'builtin.web_fetch']);
+  });
+
   it('returns user-facing validation errors for ineligible requested models', async () => {
     const provider = new ProvidersRepo(db).list()[0]!;
     const disabledModel = modelsRepo.create({
@@ -177,5 +206,219 @@ describe('quick compare route', () => {
     expect(res.statusCode).toBe(400);
     expect(res.json().message).toContain('当前会话模型暂不可用于 Quick Compare');
     expect(res.json().message).not.toContain(models[0]);
+  });
+
+  it('uses DeepSeek official tool loop for quick compare participants', async () => {
+    const providers = new ProvidersRepo(db);
+    const provider = providers.create({
+      name: 'DeepSeek 官方',
+      type: 'deepseek',
+      base_url: 'https://api.deepseek.com',
+      api_key: 'sk-deepseek-test',
+    });
+    await keystore.write(provider.api_key_ref!, 'sk-deepseek-test');
+    const deepseekModel = modelsRepo.create({
+      provider_id: provider.id,
+      model_name: 'deepseek-v4-flash',
+      display_name: 'DeepSeek V4 Flash',
+      capability: 'chat',
+      supports_tools: true,
+    });
+
+    let deepseekCalls = 0;
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (url, init) => {
+      const body = JSON.parse(String(init?.body ?? '{}')) as {
+        stream?: boolean;
+        messages?: Array<Record<string, unknown>>;
+        tools?: Array<{ function?: { name?: string } }>;
+      };
+      if (String(url) === 'https://api.deepseek.com/chat/completions') {
+        deepseekCalls++;
+        expect(body.stream).toBe(false);
+        if (deepseekCalls === 1) {
+          expect(body.tools?.some((tool) => tool.function?.name === 'web_search')).toBe(true);
+          return new Response(JSON.stringify({
+            choices: [{
+              message: {
+                content: null,
+                reasoning_content: 'Need web evidence.',
+                tool_calls: [{
+                  id: 'call_web_1',
+                  type: 'function',
+                  function: {
+                    name: 'web_search',
+                    arguments: '{"query":"quick compare deepseek"}',
+                  },
+                }],
+              },
+              finish_reason: 'tool_calls',
+            }],
+            usage: { prompt_tokens: 10, completion_tokens: 4, total_tokens: 14 },
+          }), { status: 200, headers: { 'content-type': 'application/json' } });
+        }
+        const hasReasoning = body.messages?.some((message) =>
+          message.role === 'assistant' && message.reasoning_content === 'Need web evidence.',
+        );
+        expect(hasReasoning).toBe(true);
+        return new Response(JSON.stringify({
+          choices: [{
+            message: {
+              content: 'DeepSeek quick compare answer.',
+            },
+            finish_reason: 'stop',
+          }],
+          usage: { prompt_tokens: 20, completion_tokens: 8, total_tokens: 28 },
+        }), { status: 200, headers: { 'content-type': 'application/json' } });
+      }
+      throw new Error(`unexpected fetch ${String(url)}`);
+    });
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/v1/quick-compare',
+      headers: { ...auth, 'content-type': 'application/json' },
+      payload: {
+        model_ids: [deepseekModel.id, models[0]],
+        participant_configs: [
+          { model_id: deepseekModel.id, tool_names: ['builtin.web_search'] },
+          { model_id: models[0], tool_names: [] },
+        ],
+        messages: [{ role: 'user', content: '比较两个方案' }],
+      },
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect(deepseekCalls).toBe(2);
+    expect(res.body).toContain('DeepSeek quick compare answer.');
+    expect(res.body).toContain('"type":"qc.tool_trace"');
+  }, 15000);
+
+  it('uses DeepSeek tool loop for hosted deepseek-v4 models on compatible providers', async () => {
+    const providers = new ProvidersRepo(db);
+    const provider = providers.create({
+      name: '阿里云百炼',
+      type: 'custom',
+      base_url: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+      api_key: 'sk-bailian-test',
+    });
+    await keystore.write(provider.api_key_ref!, 'sk-bailian-test');
+    const hostedModel = modelsRepo.create({
+      provider_id: provider.id,
+      model_name: 'deepseek-v4-flash',
+      display_name: 'deepseek-v4-flash',
+      capability: 'chat',
+      supports_tools: true,
+    });
+
+    let calls = 0;
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (url, init) => {
+      if (String(url) !== 'https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions') {
+        throw new Error(`unexpected fetch ${String(url)}`);
+      }
+      calls++;
+      const body = JSON.parse(String(init?.body ?? '{}')) as {
+        stream?: boolean;
+        messages?: Array<Record<string, unknown>>;
+        tools?: Array<{ function?: { name?: string } }>;
+      };
+      expect(body.stream).toBe(false);
+      if (calls === 1) {
+        expect(body.tools?.some((tool) => tool.function?.name === 'web_search')).toBe(true);
+        return new Response(JSON.stringify({
+          choices: [{
+            message: {
+              content: '',
+              reasoning_content: 'Need evidence first.',
+              tool_calls: [{
+                id: 'call_web_1',
+                type: 'function',
+                function: {
+                  name: 'web_search',
+                  arguments: '{"query":"hosted deepseek"}',
+                },
+              }],
+            },
+            finish_reason: 'tool_calls',
+          }],
+          usage: { prompt_tokens: 10, completion_tokens: 4, total_tokens: 14 },
+        }), { status: 200, headers: { 'content-type': 'application/json' } });
+      }
+      expect(body.messages?.some((message) =>
+        message.role === 'assistant' && message.reasoning_content === 'Need evidence first.',
+      )).toBe(true);
+      return new Response(JSON.stringify({
+        choices: [{
+          message: {
+            content: 'Hosted deepseek-v4 answer.',
+          },
+          finish_reason: 'stop',
+        }],
+        usage: { prompt_tokens: 18, completion_tokens: 6, total_tokens: 24 },
+      }), { status: 200, headers: { 'content-type': 'application/json' } });
+    });
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/v1/quick-compare',
+      headers: { ...auth, 'content-type': 'application/json' },
+      payload: {
+        model_ids: [hostedModel.id, models[0]],
+        participant_configs: [
+          { model_id: hostedModel.id, tool_names: ['builtin.web_search'] },
+          { model_id: models[0], tool_names: [] },
+        ],
+        messages: [{ role: 'user', content: '比较两个方案' }],
+      },
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect(calls).toBe(2);
+    expect(res.body).toContain('Hosted deepseek-v4 answer.');
+  }, 15000);
+
+  it('marks empty quick compare provider output as failed instead of complete', async () => {
+    const providers = new ProvidersRepo(db);
+    const provider = providers.create({
+      name: 'OpenRouter',
+      type: 'openrouter',
+      base_url: 'https://openrouter.example.com/api/v1',
+      api_key: 'sk-empty',
+    });
+    await keystore.write(provider.api_key_ref!, 'sk-empty');
+    const model = modelsRepo.create({
+      provider_id: provider.id,
+      model_name: 'empty-model',
+      display_name: 'Empty Model',
+      capability: 'chat',
+      supports_tools: true,
+    });
+
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(
+      `data: ${JSON.stringify({ id: '1', object: 'chat.completion.chunk', created: 1, model: 'm', choices: [{ index: 0, delta: {}, finish_reason: 'stop' }], usage: { prompt_tokens: 4, completion_tokens: 0, total_tokens: 4 } })}\n\n` +
+      `data: [DONE]\n\n`,
+      { status: 200, headers: { 'content-type': 'text/event-stream' } },
+    ));
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/v1/quick-compare',
+      headers: { ...auth, 'content-type': 'application/json' },
+      payload: {
+        model_ids: [model.id, models[0]],
+        participant_configs: [
+          { model_id: model.id, tool_names: ['builtin.web_search'] },
+          { model_id: models[0], tool_names: [] },
+        ],
+        messages: [{ role: 'user', content: '比较两个方案' }],
+      },
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect(res.body).toContain('"type":"qc.participant_failed"');
+    const compareId = /"compare_id":"([^"]+)"/.exec(res.body)?.[1];
+    expect(compareId).toBeTruthy();
+    const outputs = qcRepo.listOutputs(compareId!);
+    const failed = outputs.find((output) => output.model_id === model.id);
+    expect(failed?.status).toBe('failed');
   });
 });

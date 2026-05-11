@@ -25,6 +25,7 @@ import {
   type Provider,
   type ProviderUpdate,
 } from '@taori/shared';
+import { providerTypeDisplay } from './providerLabels.js';
 
 const CAPABILITY_TABS: { id: ModelCapability; label: string; hint: string }[] = [
   { id: 'chat', label: '💬 文本对话', hint: '纯文本聊天 / 长文本' },
@@ -62,6 +63,39 @@ interface ManagedModelDiff {
   changes: string[];
 }
 
+interface ProviderProfile {
+  category: string;
+  focus: string;
+  pricingHint: string;
+  errorHint: string;
+  fallbackHint: string;
+  preferredFallbackTypes: Array<Provider['type']>;
+  rank: number;
+}
+
+interface ProviderInsight {
+  provider: Provider;
+  profile: ProviderProfile;
+  managedCount: number;
+  enabledCount: number;
+  healthCalls24h: number;
+  failures24h: number;
+  modelsWithFailures: number;
+  avgFirstTokenMs: number | null;
+  latestFailureLabel: string;
+  capabilityLabels: string[];
+  keyStateLabel: string;
+  statusLabel: string;
+  keyState: 'not_required' | 'missing' | 'verified' | 'unchecked';
+  isReady: boolean;
+  isOperational: boolean;
+  monthlyCostUsd: number;
+  syncedCount: number;
+  freshSyncedCount: number;
+  lastSyncedAt: number | null;
+  fallbackLabel: string;
+}
+
 const FAILURE_LABELS: Record<string, string> = {
   rate_limit: '限流',
   quota: '额度耗尽',
@@ -70,6 +104,127 @@ const FAILURE_LABELS: Record<string, string> = {
   content_filter: '内容拦截',
   unknown: '未知失败',
   key_missing: 'Key 缺失',
+};
+
+const CAPABILITY_LABELS: Record<ModelCapability, string> = {
+  chat: '对话',
+  multimodal: '视觉',
+  image: '生图',
+  video: '视频',
+  asr: '识别',
+  tts: '语音',
+  embedding: '嵌入',
+};
+
+const PROVIDER_PROFILES: Record<Provider['type'], ProviderProfile> = {
+  deepseek: {
+    category: '国内直连',
+    focus: 'DeepSeek 官方直连，适合作为主力中文推理 / 编码入口。',
+    pricingHint: '官方价格语义最直接，适合做成本基线。',
+    errorHint: '重点关注 auth / quota / rate_limit，通常最能反映官方额度与权限状态。',
+    fallbackHint: '官方不稳时优先切到硅基流动或 OpenRouter，保证同类 chat 模型继续工作。',
+    preferredFallbackTypes: ['siliconflow', 'openrouter', 'ollama'],
+    rank: 10,
+  },
+  siliconflow: {
+    category: '国内聚合',
+    focus: '硅基流动适合作为国内多模型聚合层，承担国产模型 fallback。',
+    pricingHint: '适合统一比较多家模型价格，但价格同步后要关注具体模型族差异。',
+    errorHint: '出现 config_error 时通常优先检查模型名、能力匹配和是否误开 tools/vision。',
+    fallbackHint: '高频任务可把官方直连放前、硅基放后，既保稳定也保扩展面。',
+    preferredFallbackTypes: ['deepseek', 'volcengine_ark', 'openrouter', 'ollama'],
+    rank: 20,
+  },
+  volcengine_ark: {
+    category: '国内直连',
+    focus: '火山方舟覆盖 Doubao / Seedream / 视频模型，适合中文多模态主力。',
+    pricingHint: '图像 / 视频模型价格形态差异大，建议结合价格同步时间一起看。',
+    errorHint: '重点关注 rate_limit / config_error，尤其是模型能力和请求参数是否匹配。',
+    fallbackHint: '图像或视觉链路异常时，可准备 SiliconFlow / OpenRouter 作为备用出口。',
+    preferredFallbackTypes: ['siliconflow', 'openrouter', 'ollama'],
+    rank: 15,
+  },
+  huawei_maas: {
+    category: '国内直连',
+    focus: '华为云 MaaS 更像企业接入面，适合作为兼容 OpenAI 的稳态出口。',
+    pricingHint: '适合补强企业云场景，但价格与能力矩阵要和主力模型分开看。',
+    errorHint: '出现 auth / network 时优先排查企业网络、区域和接入域名。',
+    fallbackHint: '企业链路不稳时，优先保留一个公网聚合出口做兜底。',
+    preferredFallbackTypes: ['openrouter', 'siliconflow', 'ollama'],
+    rank: 25,
+  },
+  packyapi: {
+    category: '专用图像',
+    focus: 'PackyAPI 更适合承担固定图像生成出口。',
+    pricingHint: '单次/单图价格更关键，适合和火山图像模型并排比较。',
+    errorHint: '图像失败优先看 quota / config_error，通常和模型或套餐约束相关。',
+    fallbackHint: '图像任务建议至少保留一个火山或 SiliconFlow 备用模型。',
+    preferredFallbackTypes: ['volcengine_ark', 'siliconflow', 'openrouter'],
+    rank: 50,
+  },
+  openrouter: {
+    category: '海外聚合',
+    focus: 'OpenRouter 适合作为广覆盖兜底层，用来接住多家海外模型。',
+    pricingHint: '价格同步面最广，适合做跨 provider 决策与对照。',
+    errorHint: 'rate_limit / quota 之外，也要关注上游模型不支持 tools 的语义。',
+    fallbackHint: '当国内直连异常时，可临时切到 OpenRouter 保证任务不中断。',
+    preferredFallbackTypes: ['deepseek', 'siliconflow', 'ollama'],
+    rank: 40,
+  },
+  ollama: {
+    category: '本地',
+    focus: 'Ollama 适合作为离线 / 内网 fallback，稳定但能力与速度取决于本机。',
+    pricingHint: '本地成本看不到外部账单，但要结合机器资源和首 token 延迟判断。',
+    errorHint: '失败通常更偏本地进程 / 模型未拉取 / 端口不可达。',
+    fallbackHint: '本地模型适合做最后一道兜底，不建议一开始就承担高价值主任务。',
+    preferredFallbackTypes: ['deepseek', 'siliconflow', 'openrouter'],
+    rank: 60,
+  },
+  custom: {
+    category: '兼容接入',
+    focus: 'OpenAI 兼容入口，可用于通义 / Kimi / 智谱等尚未做预设的端点。',
+    pricingHint: '接第三方兼容端点时，建议手动补齐价格信息，否则很难做成本判断。',
+    errorHint: 'config_error 最值得关注，通常说明能力声明和真实上游不一致。',
+    fallbackHint: '把兼容端点放在明确主力 provider 后面，用作定向补位更稳妥。',
+    preferredFallbackTypes: ['siliconflow', 'openrouter', 'ollama'],
+    rank: 30,
+  },
+  openai: {
+    category: '官方',
+    focus: 'OpenAI 适合承担国际通用基线，对比意义大于本地化优势。',
+    pricingHint: '更适合作为对照成本基线，而不是中文 BYOK 用户的唯一主力。',
+    errorHint: '重点关注 quota / rate_limit / model mismatch。',
+    fallbackHint: '需要中文本地化体验时，优先准备国内直连或本地模型作为后备。',
+    preferredFallbackTypes: ['deepseek', 'siliconflow', 'openrouter'],
+    rank: 70,
+  },
+  anthropic: {
+    category: '官方',
+    focus: 'Anthropic 更适合高质量长文本与审阅任务。',
+    pricingHint: '适合作为质量标杆，不一定适合高频低成本入口。',
+    errorHint: '出现 content_filter 时要和普通 auth / quota 错误分开看。',
+    fallbackHint: '高质量列可保留 Anthropic，执行层建议另备国产或聚合模型。',
+    preferredFallbackTypes: ['openrouter', 'deepseek', 'ollama'],
+    rank: 80,
+  },
+  replicate: {
+    category: '专用图像',
+    focus: 'Replicate 适合接特定图像 / 多模态模型。',
+    pricingHint: '价格形态因模型差异很大，最好作为专用通道使用。',
+    errorHint: '网络与配置错误要优先排查模型 ID 和运行参数。',
+    fallbackHint: '不要单点依赖，最好配一个火山或 Packy 图像出口。',
+    preferredFallbackTypes: ['packyapi', 'volcengine_ark', 'openrouter'],
+    rank: 90,
+  },
+  sd_webui: {
+    category: '本地',
+    focus: 'Stable Diffusion WebUI 适合本地图像实验。',
+    pricingHint: '没有外部账单，但会消耗本地 GPU/CPU 资源。',
+    errorHint: '重点看本地服务可用性与模型权重是否准备完整。',
+    fallbackHint: '本地生图失败时，要准备一个云端图像 provider 兜底。',
+    preferredFallbackTypes: ['packyapi', 'volcengine_ark', 'openrouter'],
+    rank: 95,
+  },
 };
 
 function priceChanged(a: number | null | undefined, b: number | null | undefined): boolean {
@@ -150,6 +305,61 @@ function formatAgo(ts: number | null): string {
   return `${Math.floor(diff / hour)} 小时前`;
 }
 
+function providerNeedsApiKey(provider: Provider): boolean {
+  return provider.type !== 'ollama' && provider.type !== 'sd_webui';
+}
+
+function sparklinePath(points: number[], width: number, height: number): string {
+  if (points.length === 0) return '';
+  const max = Math.max(...points, 1);
+  const stepX = points.length <= 1 ? width : width / (points.length - 1);
+  return points
+    .map((value, index) => {
+      const x = Number((index * stepX).toFixed(2));
+      const y = Number((height - (value / max) * (height - 4) - 2).toFixed(2));
+      return `${index === 0 ? 'M' : 'L'}${x},${y}`;
+    })
+    .join(' ');
+}
+
+function FailureTrendSparkline({
+  trend,
+}: {
+  trend: ModelHealthRow['failure_trend_24h'];
+}): JSX.Element {
+  const values = trend.map((item) => item.failures);
+  const path = sparklinePath(values, 180, 44);
+  const hasValue = values.some((value) => value > 0);
+  return (
+    <svg
+      className="model-health-trend__sparkline"
+      viewBox="0 0 180 44"
+      aria-hidden="true"
+    >
+      <path d="M0 42.5H180" stroke="currentColor" strokeOpacity="0.08" />
+      {hasValue ? (
+        <path
+          d={path}
+          stroke="currentColor"
+          strokeWidth="2.5"
+          strokeLinecap="round"
+          strokeLinejoin="round"
+          fill="none"
+        />
+      ) : (
+        <path
+          d="M0 24 L180 24"
+          stroke="currentColor"
+          strokeWidth="2"
+          strokeLinecap="round"
+          strokeOpacity="0.35"
+          fill="none"
+        />
+      )}
+    </svg>
+  );
+}
+
 export function ModelCenter({
   onClose,
   onChanged,
@@ -175,29 +385,35 @@ export function ModelCenter({
     providerId: string | null;
   } | null>(null);
   const [modelQuery, setModelQuery] = useState('');
-  const [providerFilter, setProviderFilter] = useState<string>('all');
   const [statusFilter, setStatusFilter] = useState<'all' | 'enabled' | 'disabled'>('all');
   const [featureFilter, setFeatureFilter] = useState<ModelFeatureFilter>('all');
   const [sortKey, setSortKey] = useState<ModelSortKey>('priority');
   const [selectedModelIds, setSelectedModelIds] = useState<Set<string>>(new Set());
-  const [providerMenuId, setProviderMenuId] = useState<string | null>(null);
+  const [selectedProviderId, setSelectedProviderId] = useState<string | null>(null);
   const [providerKeyStatus, setProviderKeyStatus] = useState<Map<string, boolean> | null>(null);
   const [providerKeyChecking, setProviderKeyChecking] = useState(false);
   const [providerKeyCheckedAt, setProviderKeyCheckedAt] = useState<number | null>(null);
   const [providerKeyError, setProviderKeyError] = useState<string | null>(null);
+  const [monthlyModelCosts, setMonthlyModelCosts] = useState<Map<string, number>>(new Map());
   const syncing = syncingTarget !== null;
 
   const refresh = async (): Promise<void> => {
     setLoading(true);
     try {
-      const [{ providers: ps }, { models: ms }, healthRes] = await Promise.all([
+      const [{ providers: ps }, { models: ms }, healthRes, costRes] = await Promise.all([
         api.listProviders(),
         api.listModels(),
         api.modelsHealth().catch(() => ({ rows: [] })),
+        api.costsDashboardBreakdown('month', 'model').catch(() => ({ data: { rows: [] } })),
       ]);
       setProviders(ps);
       setModels(ms);
       setHealthRows(new Map(healthRes.rows.map((row) => [row.model_id, row])));
+      setMonthlyModelCosts(new Map(
+        (costRes.data.rows ?? [])
+          .filter((row) => row.model_id)
+          .map((row) => [row.model_id as string, row.sum_usd ?? 0]),
+      ));
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
@@ -208,6 +424,14 @@ export function ModelCenter({
   useEffect(() => {
     void refresh();
   }, []);
+
+  useEffect(() => {
+    setSelectedProviderId((current) => {
+      if (providers.length === 0) return null;
+      if (current && providers.some((provider) => provider.id === current)) return current;
+      return providers[0]?.id ?? null;
+    });
+  }, [providers]);
 
   // Esc closes the page (a11y + matches Settings).
   useEffect(() => {
@@ -239,6 +463,129 @@ export function ModelCenter({
     return stats;
   }, [models, providers]);
 
+  const selectedProvider = useMemo(
+    () => providers.find((provider) => provider.id === selectedProviderId) ?? null,
+    [providers, selectedProviderId],
+  );
+
+  const providerInsights = useMemo<ProviderInsight[]>(() => {
+    const enabledChatProviders = providers.filter((provider) =>
+      provider.enabled && models.some((model) =>
+        model.provider_id === provider.id && model.enabled && isChatCapable(model.capability),
+      ),
+    );
+    return providers.map((provider) => {
+      const profile = PROVIDER_PROFILES[provider.type];
+      const providerModels = models.filter((model) => model.provider_id === provider.id);
+      const providerHealthRows = providerModels
+        .map((model) => healthRows.get(model.id))
+        .filter((row): row is ModelHealthRow => Boolean(row));
+      const failureCounts = new Map<string, number>();
+      let healthCalls24h = 0;
+      let failures24h = 0;
+      let weightedFirstTokenSum = 0;
+      let weightedFirstTokenCalls = 0;
+      for (const row of providerHealthRows) {
+        healthCalls24h += row.calls_24h;
+        failures24h += row.failures_24h;
+        if (row.avg_first_token_ms != null && row.calls_24h > 0) {
+          weightedFirstTokenSum += row.avg_first_token_ms * row.calls_24h;
+          weightedFirstTokenCalls += row.calls_24h;
+        }
+        for (const item of row.failure_distribution_24h) {
+          failureCounts.set(
+            item.classification,
+            (failureCounts.get(item.classification) ?? 0) + item.failures,
+          );
+        }
+      }
+      const topFailure = Array.from(failureCounts.entries()).sort((a, b) => b[1] - a[1])[0] ?? null;
+      const monthlyCostUsd = providerModels.reduce(
+        (sum, model) => sum + (monthlyModelCosts.get(model.id) ?? 0),
+        0,
+      );
+      const syncedModels = providerModels.filter((model) => model.price_synced_at != null);
+      const freshSyncedCount = syncedModels.filter((model) =>
+        (model.price_synced_at ?? 0) >= Date.now() - 3 * 24 * 60 * 60 * 1000,
+      ).length;
+      const lastSyncedAt = syncedModels.reduce<number | null>(
+        (latest, model) => Math.max(latest ?? 0, model.price_synced_at ?? 0) || latest,
+        null,
+      );
+      const keyKnown = providerKeyStatus?.get(provider.id);
+      const requiresApiKey = providerNeedsApiKey(provider);
+      const keyState: ProviderInsight['keyState'] = !requiresApiKey
+        ? 'not_required'
+        : !provider.api_key_ref
+          ? 'missing'
+          : keyKnown === true
+            ? 'verified'
+            : keyKnown === false
+              ? 'missing'
+              : 'unchecked';
+      const keyStateLabel = keyState === 'not_required'
+        ? '无需云端 Key'
+        : keyState === 'verified'
+          ? 'Key 已确认'
+          : keyState === 'unchecked'
+            ? 'Key 未复核'
+            : provider.api_key_ref
+              ? 'Key 缺失'
+              : '未配置 Key';
+      const isReady = keyState === 'not_required' || keyState === 'verified' || keyState === 'unchecked';
+      const isOperational = provider.enabled && isReady;
+      const statusLabel = !provider.enabled
+        ? '未启用'
+        : isOperational
+          ? '已启用'
+          : '未启用（待补 Key）';
+      const capabilities = Array.from(
+        new Set(
+          providerModels
+            .map((model) => CAPABILITY_LABELS[model.capability])
+            .filter(Boolean),
+        ),
+      ).slice(0, 5);
+      const fallbackCandidate = profile.preferredFallbackTypes
+        .map((type) =>
+          enabledChatProviders.find((candidate) =>
+            candidate.id !== provider.id && candidate.type === type,
+          ) ?? null)
+        .find((candidate): candidate is Provider => Boolean(candidate));
+      return {
+        provider,
+        profile,
+        managedCount: providerModels.length,
+        enabledCount: providerModels.filter((model) => model.enabled).length,
+        healthCalls24h,
+        failures24h,
+        modelsWithFailures: providerHealthRows.filter((row) => row.failures_24h > 0).length,
+        avgFirstTokenMs: weightedFirstTokenCalls > 0 ? weightedFirstTokenSum / weightedFirstTokenCalls : null,
+        latestFailureLabel: topFailure
+          ? `${FAILURE_LABELS[topFailure[0]] ?? topFailure[0]} × ${topFailure[1]}`
+          : '近 24h 无明显失败',
+        capabilityLabels: capabilities,
+        keyStateLabel,
+        statusLabel,
+        keyState,
+        isReady,
+        isOperational,
+        monthlyCostUsd,
+        syncedCount: syncedModels.length,
+        freshSyncedCount,
+        lastSyncedAt,
+        fallbackLabel: fallbackCandidate
+          ? `建议 fallback 到 ${fallbackCandidate.name}`
+          : profile.fallbackHint,
+      };
+    }).sort((a, b) => a.profile.rank - b.profile.rank || b.monthlyCostUsd - a.monthlyCostUsd);
+  }, [healthRows, models, monthlyModelCosts, providerKeyStatus, providers]);
+
+  const selectedInsight = useMemo(
+    () => providerInsights.find((insight) => insight.provider.id === selectedProviderId) ?? null,
+    [providerInsights, selectedProviderId],
+  );
+
   const modelsByCap = useMemo(() => {
     const out = new Map<ModelCapability, Model[]>();
     for (const tab of CAPABILITY_TABS) out.set(tab.id, []);
@@ -258,7 +605,6 @@ export function ModelCenter({
   }, [models]);
 
   const onSync = async (providerId?: string): Promise<void> => {
-    setProviderMenuId(null);
     setSyncingTarget(providerId ?? 'all');
     setError(null);
     try {
@@ -320,7 +666,6 @@ export function ModelCenter({
   };
 
   const onDeleteProvider = async (p: Provider): Promise<void> => {
-    setProviderMenuId(null);
     if (!window.confirm(`删除 Provider “${p.name}”？该 Provider 下的全部模型将一并删除。`)) return;
     try {
       await api.deleteProvider(p.id);
@@ -409,7 +754,6 @@ export function ModelCenter({
   } | null>(null);
 
   const onTestProvider = async (p: Provider): Promise<void> => {
-    setProviderMenuId(null);
     setTestResult(null);
     const firstModel = models.find((m) => m.provider_id === p.id);
     if (!firstModel) {
@@ -471,14 +815,16 @@ export function ModelCenter({
 
   useEffect(() => {
     setSelectedModelIds(new Set());
-  }, [activeTab, modelQuery, providerFilter, statusFilter, featureFilter, sortKey]);
+  }, [activeTab, modelQuery, selectedProviderId, statusFilter, featureFilter, sortKey]);
 
   const activeTabModels = (modelsByCap.get(activeTab) ?? [])
     .slice()
     .sort((a, b) => a.fallback_order - b.fallback_order);
+  const scopedTabModels = selectedProviderId
+    ? activeTabModels.filter((model) => model.provider_id === selectedProviderId)
+    : activeTabModels;
   const query = modelQuery.trim().toLowerCase();
-  const visibleModels = activeTabModels.filter((m) => {
-    if (providerFilter !== 'all' && m.provider_id !== providerFilter) return false;
+  const visibleModels = scopedTabModels.filter((m) => {
     if (statusFilter === 'enabled' && !m.enabled) return false;
     if (statusFilter === 'disabled' && m.enabled) return false;
     if (featureFilter === 'tools' && !m.supports_tools) return false;
@@ -515,11 +861,29 @@ export function ModelCenter({
     return a.fallback_order - b.fallback_order;
   });
   const tab = CAPABILITY_TABS.find((t) => t.id === activeTab)!;
-  const activeEnabledCount = activeTabModels.filter((m) => m.enabled).length;
-  const activeDisabledCount = activeTabModels.length - activeEnabledCount;
+  const activeEnabledCount = scopedTabModels.filter((m) => m.enabled).length;
+  const activeDisabledCount = scopedTabModels.length - activeEnabledCount;
   const selectedVisibleIds = visibleModels
     .map((m) => m.id)
     .filter((id) => selectedModelIds.has(id));
+  const selectedProviderModels = selectedProviderId
+    ? models.filter((model) => model.provider_id === selectedProviderId)
+    : [];
+  const selectedProviderModelGroups = CAPABILITY_TABS.map((tab) => {
+    const scopedModels = selectedProviderModels.filter((model) => model.capability === tab.id);
+    return {
+      id: tab.id,
+      label: CAPABILITY_LABELS[tab.id],
+      total: scopedModels.length,
+      enabled: scopedModels.filter((model) => model.enabled).length,
+    };
+  }).filter((item) => item.total > 0);
+  const selectedProviderNeedsKey = selectedProvider ? providerNeedsApiKey(selectedProvider) : false;
+  const selectedProviderKeyMissing = selectedProvider
+    ? selectedProviderNeedsKey &&
+      (!selectedProvider.api_key_ref || providerKeyStatus?.get(selectedProvider.id) === false)
+    : false;
+  const selectedProviderReady = selectedProvider ? !selectedProviderKeyMissing : false;
 
   const toggleSelectModel = (id: string): void => {
     setSelectedModelIds((current) => {
@@ -606,7 +970,7 @@ export function ModelCenter({
         <div className="model-center__providers-head">
           <div>
             <h3>Providers</h3>
-            <p className="hint">不会自动读取系统钥匙串；需要确认 Key 状态时手动检查。</p>
+            <p className="hint">左侧选 Provider，右侧只看当前 Provider 的配置、连接和模型清单。</p>
           </div>
           <div className="model-center__providers-actions">
             <button
@@ -643,148 +1007,264 @@ export function ModelCenter({
         {providers.length === 0 ? (
           <p className="hint">尚未配置 Provider，点击上方“+ 添加 Provider”导入。</p>
         ) : (
-          <ul className="provider-chips">
-            {providers.map((p) => {
-              const keyKnown = providerKeyStatus?.get(p.id);
-              const keyMissing = p.api_key_ref && keyKnown === false;
-              const keyAvailable = p.api_key_ref && keyKnown === true;
-              return (
-              <li
-                key={p.id}
-                className={`provider-chip ${p.enabled ? '' : 'is-off'} ${keyMissing ? 'has-key-missing' : ''}`}
-                data-testid={`provider-chip-${p.id}`}
-              >
-                <span className="provider-chip__name">{p.name}</span>
-                <span className="provider-chip__type">{p.type}</span>
-                {keyMissing ? (
-                  <button
-                    type="button"
-                    className="provider-chip__key-missing"
-                    title="系统钥匙串中找不到该 Provider 的 API Key，点击重新填写"
-                    data-testid={`provider-chip-key-missing-${p.id}`}
-                    onClick={() => {
-                      setProviderMenuId(null);
-                      setEditingProvider(p);
-                    }}
-                  >
-                    Key 缺失
-                  </button>
-                ) : p.api_key_ref && (
-                  <span
-                    className={`provider-chip__key-warn ${keyAvailable ? 'is-ok' : ''}`}
-                    title={
-                      keyAvailable
-                        ? '系统钥匙串中已确认存在 API Key'
-                        : 'API Key 已保存引用；仅在手动检查、测试连接、同步模型或发送消息时读取'
-                    }
-                    data-testid={`provider-chip-key-warn-${p.id}`}
-                  >
-                    🔑
-                  </span>
-                )}
-                <span
-                  className="provider-chip__count"
-                  data-testid={`provider-chip-count-${p.id}`}
-                  title="已管理模型 / 启用 / 停用"
-                >
-                  {providerStats.get(p.id)?.total ?? 0} 个 · 开 {providerStats.get(p.id)?.enabled ?? 0} · 关 {providerStats.get(p.id)?.disabled ?? 0}
-                </span>
-                <button
-                  type="button"
-                  className="provider-chip__test"
-                  onClick={() =>
-                    setImportDrawer({
-                      capability: 'all',
-                      providerId: p.id,
-                    })
-                  }
-                  data-testid={`provider-chip-library-${p.id}`}
-                  title="打开供应商模型库并刷新候选清单"
-                >
-                  模型库
-                </button>
-                <div className="provider-chip__menu-wrap">
-                  <button
-                    type="button"
-                    className="provider-chip__more"
-                    onClick={() => setProviderMenuId((current) => (current === p.id ? null : p.id))}
-                    data-testid={`provider-chip-more-${p.id}`}
-                    aria-expanded={providerMenuId === p.id}
-                    aria-haspopup="menu"
-                    title="更多 Provider 操作"
-                  >
-                    更多
-                  </button>
-                  {providerMenuId === p.id && (
-                    <div
-                      className="provider-chip__menu"
-                      role="menu"
-                      data-testid={`provider-chip-menu-${p.id}`}
-                    >
+          <div className="provider-workspace" data-testid="provider-workspace">
+            <aside className="provider-nav" aria-label="Provider 列表">
+              <ul className="provider-nav__list">
+                {providerInsights.map((insight) => {
+                  const keyMissing = insight.keyState === 'missing';
+                  const keyAvailable = insight.keyState === 'verified';
+                  const stats = providerStats.get(insight.provider.id);
+                  const dotState = !insight.provider.enabled
+                    ? 'off'
+                    : !insight.isOperational
+                      ? 'bad'
+                      : insight.keyState === 'unchecked'
+                        ? 'warn'
+                        : 'ok';
+                  const dotTitle = !insight.provider.enabled
+                    ? '未启用'
+                    : !insight.isOperational
+                      ? insight.statusLabel
+                      : insight.keyState === 'unchecked'
+                        ? '待校验 Key'
+                        : '正常';
+                  return (
+                    <li key={insight.provider.id}>
                       <button
                         type="button"
-                        role="menuitem"
-                        onClick={() => void onSync(p.id)}
-                        disabled={syncing}
-                        data-testid={`provider-menu-sync-${p.id}`}
-                        title="只同步该 Provider 的已管理模型价格与能力"
-                      >
-                        {syncingTarget === p.id ? '同步中' : '同步'}
-                      </button>
-                      <button
-                        type="button"
-                        role="menuitem"
+                        className={`provider-nav__item ${selectedProviderId === insight.provider.id ? 'is-active' : ''} ${insight.provider.enabled ? '' : 'is-off'} ${!insight.isOperational && insight.provider.enabled ? 'is-unready' : ''} ${keyMissing ? 'has-key-missing' : ''}`}
+                        data-testid={`provider-nav-item-${insight.provider.id}`}
                         onClick={() => {
-                          setProviderMenuId(null);
-                          setEditingProvider(p);
+                          setSelectedProviderId(insight.provider.id);
                         }}
-                        data-testid={`provider-menu-edit-${p.id}`}
-                        title="编辑 Provider 名称、Base URL、API Key 与启停状态"
                       >
-                        {keyMissing ? '重新填写 Key' : '编辑'}
+                        <span className="provider-nav__item-row provider-nav__item-row--primary">
+                          <span
+                            className={`provider-nav__dot is-${dotState}`}
+                            aria-hidden="true"
+                            title={dotTitle}
+                          />
+                          <span className="provider-nav__item-name">{insight.provider.name}</span>
+                          <span className="provider-nav__item-type">{providerTypeDisplay(insight.provider)}</span>
+                        </span>
+                        <span className="provider-nav__item-row provider-nav__item-row--meta">
+                          <span
+                            className="provider-nav__item-count"
+                            data-testid={`provider-chip-count-${insight.provider.id}`}
+                          >
+                            {stats?.total ?? 0} 个 · 启用 {stats?.enabled ?? 0}
+                          </span>
+                          <span className="provider-nav__sep" aria-hidden="true">·</span>
+                          <span className="provider-nav__item-state">{insight.statusLabel}</span>
+                        </span>
+                        {/* keep legacy hooks for tests but visually hide except when key missing */}
+                        <span className="provider-nav__item-badges" hidden>
+                          <span className="provider-nav__badge">{insight.profile.category}</span>
+                          <span className="provider-nav__badge">
+                            {insight.statusLabel}
+                          </span>
+                          <span className="provider-nav__badge">{insight.keyStateLabel}</span>
+                        </span>
+                        {keyMissing ? (
+                          <span
+                            role="button"
+                            tabIndex={0}
+                            className="provider-nav__key-missing"
+                            data-testid={`provider-chip-key-missing-${insight.provider.id}`}
+                            onClick={(event) => {
+                              event.stopPropagation();
+                              setEditingProvider(insight.provider);
+                            }}
+                            onKeyDown={(event) => {
+                              if (event.key === 'Enter' || event.key === ' ') {
+                                event.preventDefault();
+                                event.stopPropagation();
+                                setEditingProvider(insight.provider);
+                              }
+                            }}
+                          >
+                            Key 缺失
+                          </span>
+                        ) : insight.provider.api_key_ref ? (
+                          <span
+                            className={`provider-chip__key-warn ${keyAvailable ? 'is-ok' : ''}`}
+                            data-testid={`provider-chip-key-warn-${insight.provider.id}`}
+                          >
+                            🔑
+                          </span>
+                        ) : null}
                       </button>
-                      <button
-                        type="button"
-                        role="menuitem"
-                        onClick={() => void onTestProvider(p)}
-                        data-testid={`provider-menu-test-${p.id}`}
-                        title="测试连接"
-                      >
-                        测试
-                      </button>
-                      <button
-                        type="button"
-                        role="menuitem"
-                        className="is-danger"
-                        onClick={() => void onDeleteProvider(p)}
-                        data-testid={`provider-menu-delete-${p.id}`}
-                        aria-label={`删除 ${p.name}`}
-                      >
-                        删除
-                      </button>
+                    </li>
+                  );
+                })}
+              </ul>
+            </aside>
+
+            {selectedInsight && selectedProvider && (
+              <section className="provider-detail" data-testid={`provider-detail-${selectedProvider.id}`}>
+                <header className="provider-detail__head">
+                  <div className="provider-detail__summary">
+                    <div className="provider-detail__title">
+                      <strong>{selectedProvider.name}</strong>
+                      <span className="provider-detail__badge">{selectedInsight.profile.category}</span>
+                      <span className={`provider-detail__badge ${selectedInsight.isOperational ? 'is-ok' : 'is-warning'}`}>
+                        {selectedInsight.statusLabel}
+                      </span>
+                      <span className={`provider-detail__badge ${selectedInsight.keyState === 'verified' || selectedInsight.keyState === 'not_required' ? 'is-ok' : 'is-warning'}`}>
+                        {selectedInsight.keyStateLabel}
+                      </span>
                     </div>
-                  )}
+                    <p className="provider-detail__focus">{selectedInsight.profile.focus}</p>
+                  </div>
+                  <div className="provider-detail__actions">
+                    <button
+                      type="button"
+                      className="btn-primary"
+                      onClick={() => {
+                        if (!selectedProviderReady) {
+                          setEditingProvider(selectedProvider);
+                          return;
+                        }
+                        setImportDrawer({
+                          capability: 'all',
+                          providerId: selectedProvider.id,
+                        });
+                      }}
+                      data-testid={`provider-detail-library-${selectedProvider.id}`}
+                      title={selectedProviderReady ? '查询并管理该 Provider 的模型清单' : '请先补齐并确认 API Key'}
+                    >
+                      {selectedProviderReady ? '查询模型清单' : '先补 API Key'}
+                    </button>
+                    <button
+                      type="button"
+                      className="model-center-action-btn model-center-action-btn--secondary"
+                      onClick={() => void onSync(selectedProvider.id)}
+                      disabled={syncing || !selectedProviderReady}
+                      data-testid={`provider-detail-sync-${selectedProvider.id}`}
+                    >
+                      {syncingTarget === selectedProvider.id ? '同步中…' : '同步价格'}
+                    </button>
+                    <button
+                      type="button"
+                      className="model-center-action-btn model-center-action-btn--secondary"
+                      onClick={() => void onTestProvider(selectedProvider)}
+                      data-testid={`provider-detail-test-${selectedProvider.id}`}
+                      title={selectedProviderReady ? '测试与该 Provider 的连接' : '测试当前配置 (会返回 key_missing)'}
+                    >
+                      测试连接
+                    </button>
+                    <button
+                      type="button"
+                      className="model-center-action-btn model-center-action-btn--secondary"
+                      onClick={() => {
+                        setEditingProvider(selectedProvider);
+                      }}
+                      data-testid={`provider-menu-edit-${selectedProvider.id}`}
+                    >
+                      {selectedProviderKeyMissing ? '补 API Key' : '编辑 Provider'}
+                    </button>
+                    <button
+                      type="button"
+                      className="model-center-action-btn model-center-action-btn--secondary"
+                      onClick={() => void onDeleteProvider(selectedProvider)}
+                      data-testid={`provider-detail-delete-${selectedProvider.id}`}
+                    >
+                      删除
+                    </button>
+                  </div>
+                </header>
+
+                <div className="provider-detail__metrics">
+                  <div className="provider-detail__metric">
+                    <small>已管理</small>
+                    <strong>{selectedInsight.managedCount}</strong>
+                    <em>启用 {selectedInsight.enabledCount}</em>
+                  </div>
+                  <div className="provider-detail__metric">
+                    <small>24h 健康</small>
+                    <strong>{selectedInsight.failures24h}/{selectedInsight.healthCalls24h || 0}</strong>
+                    <em>{selectedInsight.healthCalls24h > 0 ? '失败/调用' : '暂无流量'}</em>
+                  </div>
+                  <div className="provider-detail__metric">
+                    <small>月度花费</small>
+                    <strong>{formatUsd(selectedInsight.monthlyCostUsd)}</strong>
+                    <em>{formatMetricMs(selectedInsight.avgFirstTokenMs)} 首字</em>
+                  </div>
+                  <div className="provider-detail__metric">
+                    <small>价格同步</small>
+                    <strong>{selectedInsight.freshSyncedCount}/{selectedInsight.syncedCount}</strong>
+                    <em>
+                      {selectedInsight.lastSyncedAt
+                        ? `${formatAgo(selectedInsight.lastSyncedAt)} 更新`
+                        : '未同步'}
+                    </em>
+                  </div>
                 </div>
-                {testResult && testResult.providerId === p.id && (
-                  <span
-                    className={`provider-chip__test-result ${testResult.ok ? 'ok' : 'err'}`}
-                    data-testid={`provider-chip-test-result-${p.id}`}
+
+                {selectedProviderKeyMissing ? (
+                  <div className="provider-detail__callout is-warning" data-testid="provider-detail-key-callout">
+                    <strong>先补 API Key，再查询模型清单。</strong>
+                    <p>
+                      这个 Provider 当前{selectedInsight.keyStateLabel}。补齐 Key 后即可测试连接、刷新模型库，并选择要启用的模型。
+                    </p>
+                  </div>
+                ) : selectedInsight.managedCount === 0 ? (
+                  <div className="provider-detail__callout" data-testid="provider-detail-empty-callout">
+                    <strong>这个 Provider 还没有已管理模型。</strong>
+                    <p>先点击“查询模型清单”，再从候选模型里选择需要启用的模型即可。</p>
+                  </div>
+                ) : null}
+
+                <div className="provider-detail__capabilities" data-testid="provider-detail-capabilities">
+                  {selectedProviderModelGroups.length > 0 ? selectedProviderModelGroups.map((group) => (
+                    <span key={group.id}>
+                      {group.label} {group.enabled}/{group.total}
+                    </span>
+                  )) : <span>尚未导入模型</span>}
+                </div>
+
+                <details
+                  className="provider-detail__fold"
+                  data-testid={`provider-detail-insights-${selectedProvider.id}`}
+                >
+                  <summary>展开运营洞察</summary>
+                  <dl className="provider-detail__fold-grid">
+                    <div>
+                      <dt>错误语义</dt>
+                      <dd>{selectedInsight.latestFailureLabel}；{selectedInsight.profile.errorHint}</dd>
+                    </div>
+                    <div>
+                      <dt>价格提示</dt>
+                      <dd>{selectedInsight.profile.pricingHint}</dd>
+                    </div>
+                    <div className="provider-detail__fold-span">
+                      <dt>默认 fallback</dt>
+                      <dd>{selectedInsight.fallbackLabel}</dd>
+                    </div>
+                  </dl>
+                </details>
+
+                {testResult && testResult.providerId === selectedProvider.id && (
+                  <p
+                    className={`provider-detail__test-result ${testResult.ok ? 'ok' : 'err'}`}
+                    data-testid={`provider-detail-test-result-${selectedProvider.id}`}
                   >
                     {testResult.ok ? '✓' : '✗'}
                     {testResult.note ? ` ${testResult.note}` : ''}
                     {testResult.classification ? ` (${testResult.classification})` : ''}
-                  </span>
+                  </p>
                 )}
-              </li>
-              );
-            })}
-          </ul>
+              </section>
+            )}
+          </div>
         )}
       </section>
 
       <nav className="model-center__tabs" role="tablist">
         {CAPABILITY_TABS.map((t) => {
-          const count = (modelsByCap.get(t.id) ?? []).length;
+          const count = (modelsByCap.get(t.id) ?? []).filter((model) =>
+            !selectedProviderId || model.provider_id === selectedProviderId,
+          ).length;
           return (
             <button
               key={t.id}
@@ -806,7 +1286,9 @@ export function ModelCenter({
           <div>
             <h3>{tab.label}</h3>
             <p className="hint">
-              {tab.hint} · 已管理 {activeTabModels.length} 个，启用 {activeEnabledCount} 个，停用 {activeDisabledCount} 个
+              {selectedProvider
+                ? `${selectedProvider.name} · ${tab.hint} · 已管理 ${scopedTabModels.length} 个，启用 ${activeEnabledCount} 个，停用 ${activeDisabledCount} 个`
+                : `${tab.hint} · 已管理 ${scopedTabModels.length} 个，启用 ${activeEnabledCount} 个，停用 ${activeDisabledCount} 个`}
             </p>
           </div>
           <button
@@ -815,12 +1297,18 @@ export function ModelCenter({
             onClick={() =>
               setImportDrawer({
                 capability: activeTab,
-                providerId: providers[0]?.id ?? null,
+                providerId: selectedProviderId ?? providers[0]?.id ?? null,
               })
             }
-            disabled={providers.length === 0}
+            disabled={providers.length === 0 || !selectedProviderReady}
             data-testid="model-center-import"
-            title={providers.length === 0 ? '请先添加 Provider' : '从 Provider 导入模型'}
+            title={
+              providers.length === 0
+                ? '请先添加 Provider'
+                : !selectedProviderReady
+                  ? '请先补齐并确认当前 Provider 的 API Key'
+                  : '从当前 Provider 导入模型'
+            }
           >
             + 导入模型
           </button>
@@ -832,24 +1320,9 @@ export function ModelCenter({
               type="search"
               value={modelQuery}
               onChange={(e) => setModelQuery(e.target.value)}
-              placeholder="模型名、别名、Provider…"
+              placeholder="模型名、别名…"
               data-testid="model-center-search"
             />
-          </label>
-          <label>
-            Provider
-            <select
-              value={providerFilter}
-              onChange={(e) => setProviderFilter(e.target.value)}
-              data-testid="model-center-provider-filter"
-            >
-              <option value="all">全部 Provider</option>
-              {providers.map((p) => (
-                <option key={p.id} value={p.id}>
-                  {p.name}
-                </option>
-              ))}
-            </select>
           </label>
           <label>
             状态
@@ -913,9 +1386,13 @@ export function ModelCenter({
         </div>
         {loading ? (
           <p className="hint">加载中…</p>
+        ) : scopedTabModels.length === 0 ? (
+          <p className="hint">
+            当前 Provider 下还没有 <strong>{tab.label}</strong> 模型。可以点击右上“+ 导入模型”刷新该 Provider 的模型库。
+          </p>
         ) : visibleModels.length === 0 ? (
           <p className="hint">
-            当前筛选下没有 <strong>{tab.label}</strong> 模型。可以调整筛选，或点击右上“+ 导入模型”刷新供应商模型库。
+            当前筛选下没有 <strong>{tab.label}</strong> 模型。请调整搜索或状态筛选。
           </p>
         ) : (
           <div className="model-matrix-scroll">
@@ -977,7 +1454,8 @@ export function ModelCenter({
                               title="该模型被自动降级（连续失败）"
                               data-testid={`model-demoted-${m.id}`}
                             >
-                              ⚠️ 降级
+                              <span className="badge__icon" aria-hidden="true">⚠</span>
+                              <span>降级</span>
                             </span>
                           )}
                         </div>
@@ -986,7 +1464,7 @@ export function ModelCenter({
                       <td>
                         {prov ? (
                           <span className="model-cell-provider">
-                            {prov.name} · <em>{prov.type}</em>
+                            {prov.name} · <em>{providerTypeDisplay(prov)}</em>
                           </span>
                         ) : (
                           '—'
@@ -1167,11 +1645,14 @@ function ModelHealthPanel({
     avg_duration_ms: null,
     last_failure_at: null,
     last_failure_classification: null,
+    failure_distribution_24h: [],
+    failure_trend_24h: [],
   };
 
   const lastFailureText = row.last_failure_classification
     ? `${FAILURE_LABELS[row.last_failure_classification] ?? row.last_failure_classification} · ${formatAgo(row.last_failure_at)}`
     : '—';
+  const topDistribution = row.failure_distribution_24h.slice(0, 4);
 
   return (
     <div className="model-health-panel">
@@ -1192,6 +1673,32 @@ function ModelHealthPanel({
           <span className="model-health-card__label">平均总耗时</span>
           <strong>{formatMetricMs(row.avg_duration_ms)}</strong>
         </article>
+      </div>
+      <div className="model-health-trend" data-testid="model-health-trend">
+        <div className="model-health-trend__head">
+          <span className="model-health-panel__footer-label">最近 24h 失败趋势</span>
+          <strong>{row.failures_24h > 0 ? `${row.failures_24h} 次失败` : '暂无失败'}</strong>
+        </div>
+        <FailureTrendSparkline trend={row.failure_trend_24h} />
+        <div className="model-health-trend__labels">
+          <span>{row.failure_trend_24h[0]?.label ?? '—'}</span>
+          <span>{row.failure_trend_24h.at(-1)?.label ?? '现在'}</span>
+        </div>
+      </div>
+      <div className="model-health-distribution" data-testid="model-health-distribution">
+        <span className="model-health-panel__footer-label">失败分类分布</span>
+        <div className="model-health-distribution__chips">
+          {topDistribution.length > 0 ? topDistribution.map((item) => (
+            <span
+              key={item.classification}
+              className="model-health-distribution__chip"
+            >
+              {FAILURE_LABELS[item.classification] ?? item.classification} {item.failures}
+            </span>
+          )) : (
+            <span className="model-health-distribution__empty">最近 24h 没有失败记录</span>
+          )}
+        </div>
       </div>
       <div className="model-health-panel__footer">
         <span className="model-health-panel__footer-label">最近失败分类</span>
@@ -1728,7 +2235,7 @@ function EditProviderDialog({
             <p className="hint">
               {keyMissing
                 ? '系统钥匙串中找不到该 Provider 的 API Key，保存新 Key 后会重新写入钥匙串。'
-                : provider.type}
+                : providerTypeDisplay(provider)}
             </p>
           </div>
           <button type="button" onClick={onCancel} aria-label="关闭">
@@ -1822,6 +2329,9 @@ function EditModelDialog(props: {
   );
   const [supportsVision, setSupportsVision] = useState(model.supports_vision);
   const [supportsTools, setSupportsTools] = useState(model.supports_tools);
+  const [thinkingMode, setThinkingMode] = useState<'inherit' | 'enabled' | 'disabled'>(
+    model.thinking_enabled == null ? 'inherit' : model.thinking_enabled ? 'enabled' : 'disabled',
+  );
   const [pIn, setPIn] = useState<string>(model.price_input_per_1m?.toString() ?? '');
   const [pOut, setPOut] = useState<string>(model.price_output_per_1m?.toString() ?? '');
   const [pImage, setPImage] = useState<string>(model.price_per_image?.toString() ?? '');
@@ -1889,6 +2399,10 @@ function EditModelDialog(props: {
       price_per_call: parseNum(pCall),
       price_currency: currency.trim() || 'USD',
       pricing_meta: pricingMeta,
+      thinking_enabled:
+        capability === 'chat' || capability === 'multimodal'
+          ? (thinkingMode === 'inherit' ? null : thinkingMode === 'enabled')
+          : null,
     };
     if (capability !== model.capability && model.is_default_for) {
       patch.is_default_for = null;
@@ -1899,6 +2413,7 @@ function EditModelDialog(props: {
   const isToken = capability === 'chat' || capability === 'multimodal' || capability === 'embedding';
   const isImage = capability === 'image';
   const isVideo = capability === 'video';
+  const isChatLike = capability === 'chat' || capability === 'multimodal';
 
   return (
     <div className="modal-backdrop" onClick={onCancel} data-testid="model-editor-backdrop">
@@ -1975,6 +2490,24 @@ function EditModelDialog(props: {
               <span>支持工具调用</span>
             </label>
           </div>
+          <label className="field">
+            <span>思考 / 推理</span>
+            <select
+              value={isChatLike ? thinkingMode : 'inherit'}
+              onChange={(e) => setThinkingMode(e.target.value as 'inherit' | 'enabled' | 'disabled')}
+              disabled={!isChatLike}
+              data-testid="model-editor-thinking"
+            >
+              <option value="inherit">跟随全局</option>
+              <option value="enabled">总是开启</option>
+              <option value="disabled">总是关闭</option>
+            </select>
+          </label>
+          <p className="hint">
+            {isChatLike
+              ? '单模型设置会覆盖全局默认；不同 provider 的 thinking 控制方式可能不同，系统会自动选择兼容方式。'
+              : '当前仅聊天 / 多模态模型支持 thinking 配置；切换到其他能力时会自动改为跟随全局。'}
+          </p>
 
           <fieldset className="pricing">
             <legend>价格（留空表示未知，将不计入成本估算）</legend>

@@ -4,6 +4,8 @@ import { fileURLToPath } from 'node:url';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const TEST_ENV_FILE = path.join(HERE, '.test-env');
+const DEFAULT_HERMETIC_E2E_URL = 'http://127.0.0.1:17900';
+const DEFAULT_HERMETIC_E2E_BEARER = 'test_bearer_playwright_e2e_isolated';
 
 export interface SidecarEnv {
   url: string;
@@ -19,10 +21,13 @@ export function readSidecarEnv(): SidecarEnv {
       const devEnvPath = path.resolve(HERE, '..', '.env.local');
       return readEnvFile(devEnvPath);
     }
-    throw new Error(
-      `missing isolated e2e env file: ${TEST_ENV_FILE}. ` +
-      'Run through Playwright globalSetup, or set ALLOW_E2E_DEV_SIDECAR=1 explicitly.',
-    );
+    // Some specs read the env at module scope, but Playwright may import test
+    // files before globalSetup has written .test-env. Fall back to the fixed
+    // hermetic defaults used by global-setup so those imports stay isolated.
+    return {
+      url: process.env.VITE_SIDECAR_URL ?? DEFAULT_HERMETIC_E2E_URL,
+      bearer: process.env.VITE_SIDECAR_BEARER ?? DEFAULT_HERMETIC_E2E_BEARER,
+    };
   }
   return readEnvFile(TEST_ENV_FILE);
 }
@@ -85,14 +90,19 @@ export async function resetSidecar(env: SidecarEnv): Promise<void> {
   // otherwise a previous spec can leak global budget / confirm gates into
   // the next one even though chat/model state was reset.
   const globalMemoryKeys = [
+    'daily_budget_usd',
+    'daily_budget_alert_state',
     'monthly_budget_usd',
     'monthly_budget_alert_state',
+    'daily_budget_hard_limit',
+    'monthly_budget_hard_limit',
     'cost_confirm_threshold_usd',
     'cost_confirm_image_always',
     'cost_confirm_disabled_models',
     'cost_confirm_disabled_conversations',
     'active_chat_model_id',
     'image_model_default',
+    'thinking_enabled',
   ];
   for (const key of globalMemoryKeys) {
     await authedFetch(

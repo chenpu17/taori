@@ -1,6 +1,6 @@
 import type { FastifyReply } from 'fastify';
 import { PassThrough } from 'node:stream';
-import type { Provider } from '@taori/shared';
+import type { Model, Provider } from '@taori/shared';
 import type { BuildServerArgs } from '../server.js';
 import type {
   CostsRepo,
@@ -16,7 +16,8 @@ import {
   produceMockStream,
   produceUpstreamStream,
 } from './stream-producers.js';
-import { normalizeOllamaOpenAiBaseUrl } from '../providers/ollama.js';
+import { produceDeepSeekUpstreamStream } from './deepseek-tools-loop.js';
+import { shouldUseDeepSeekToolLoop } from './deepseek-tool-loop-policy.js';
 
 export function prepareDataStreamReply(origin: unknown, reply: FastifyReply): void {
   if (
@@ -75,6 +76,7 @@ export async function dispatchChatProducer(args: {
   abortSignal: AbortSignal;
   isAborted: () => boolean;
   ctx: ProduceCtx;
+  model: Model | null;
   provider: Provider | null;
   modelName: string;
   keystore: BuildServerArgs['keystore'];
@@ -105,18 +107,18 @@ export async function dispatchChatProducer(args: {
   if (args.onFinish) args.stream.on('finish', args.onFinish);
 
   if (args.provider?.type === 'ollama') {
-    void produceUpstreamStream(
-      args.stream,
-      args.abortSignal,
-      args.ctx,
-      {
-        baseURL: normalizeOllamaOpenAiBaseUrl(args.provider.base_url),
-        apiKey: 'ollama-local',
-        modelName: args.modelName,
-      },
-      args.modelsRepo,
-      args.memoriesRepo,
-    ).catch((e) => args.ctx.log.error({ err: e }, args.unhandledLogName));
+      void produceUpstreamStream(
+        args.stream,
+        args.abortSignal,
+        args.ctx,
+        {
+          apiKey: 'ollama-local',
+        },
+        args.provider,
+        args.model!,
+        args.modelsRepo,
+        args.memoriesRepo,
+      ).catch((e) => args.ctx.log.error({ err: e }, args.unhandledLogName));
     return;
   }
 
@@ -128,15 +130,19 @@ export async function dispatchChatProducer(args: {
       args.ctx.log.warn({ err: e }, args.keyReadFailedLogName);
     }
     if (apiKey) {
-      void produceUpstreamStream(
+      const producer =
+        shouldUseDeepSeekToolLoop(args.provider, args.modelName, args.ctx.supportsTools)
+          ? produceDeepSeekUpstreamStream
+          : produceUpstreamStream;
+      void producer(
         args.stream,
         args.abortSignal,
         args.ctx,
         {
-          baseURL: args.provider.base_url,
           apiKey,
-          modelName: args.modelName,
         },
+        args.provider,
+        args.model!,
         args.modelsRepo,
         args.memoriesRepo,
       ).catch((e) => args.ctx.log.error({ err: e }, args.unhandledLogName));

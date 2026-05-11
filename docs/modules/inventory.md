@@ -1,24 +1,24 @@
 # 模块清单
 
-Status: draft（M0 前）
+Status: active（代码已启动，随模块合同持续维护）
 Owner: Chenpu
-Date: 2026-04-27
+Date: 2026-05-08
 Scope: Taori 全系统
 
 ## 1. 系统总览
 
 - **系统目标**：BYOK 多模型重度用户的桌面工作编排助手；三条主线：失败兜底 / 成本透明 / 多模型圆桌。
 - **核心路径**：用户在 Renderer 输入 → Sidecar 编排 LLM 调用 → 结果流式回 Renderer，全程记录成本与状态到 SQLite。
-- **当前阶段**：M0 前（设计完成，代码未启动）。下一步是 M0 骨架。
+- **当前阶段**：M0 骨架已落地，核心模块已进入功能迭代；当前真实状态以本文件最近变化、各模块 `MODULE.md`、任务相关 product / architecture spec 与 proposal 为准。
 
 ## 2. 模块目录
 
 | 模块 | 一句话定位 | 层级 | 是否独立部署 | 主要接口 | 主要依赖 | 拥有状态 | 邻接模块 | 合同文档 |
 |---|---|---|---|---|---|---|---|---|
-| `apps/desktop` | Tauri 外壳，承担 OS 能力与 Sidecar 进程托管 | entry | 是（最终安装包入口） | Tauri 命令（`sidecar_endpoint` / `read_file_for_upload` 等）；监听 OS 事件 | `apps/sidecar`（spawn）；OS Keychain；OS 文件系统 | Sidecar 进程句柄；Bearer Token（内存）；窗口状态 | `apps/sidecar`（启动/守护）；`apps/web`（命令通道） | `apps/desktop/MODULE.md`（M0 建立） |
-| `apps/web` | React Renderer，UI 与流式渲染 | entry | 否（嵌在 Tauri 中） | 用户交互；通过 `invoke` 取 Sidecar endpoint | `apps/desktop`（Tauri 命令）；`apps/sidecar`（HTTP+SSE）；`@taori/shared` | UI 状态（Zustand）；会话临时缓存 | `apps/desktop`；`apps/sidecar` | `apps/web/MODULE.md`（M0 建立） |
-| `apps/sidecar` | 业务编排进程，LLM 调用 / 圆桌 / 数据持久化 | orchestrator | 是（独立 Node 进程，崩可重启） | HTTP REST + SSE on `127.0.0.1:port`（详见架构 03） | LLM Providers（远程）；SQLite（本地文件）；`@taori/shared`；`@taori/prompts` | 全部业务状态：会话、消息、圆桌实例、成本记录、记忆、模型异常计数 | `apps/web`（HTTP 服务方）；`apps/desktop`（被托管） | `apps/sidecar/MODULE.md`（M0 建立） |
-| `packages/shared` | 前后端共享类型与 Zod schema | infra | 否（library） | 导出类型、schema、常量 | 无运行时依赖 | 无 | `apps/web`；`apps/sidecar` | `packages/shared/MODULE.md`（M1 建立） |
+| `apps/desktop` | Tauri 外壳，承担 OS 能力与 Sidecar 进程托管 | entry | 是（最终安装包入口） | Tauri 命令（`sidecar_endpoint` / `import_clipboard`）；托盘 / 全局快捷键；监听 OS 事件 | `apps/sidecar`（spawn）；OS Keychain；OS 文件系统；系统剪贴板 | Sidecar 进程句柄；Bearer Token（内存）；窗口状态；托盘与快捷键注册；剪贴板导入事件 | `apps/sidecar`（启动/守护）；`apps/web`（命令通道） | `apps/desktop/MODULE.md` |
+| `apps/web` | React Renderer，UI 与流式渲染 | entry | 否（嵌在 Tauri 中） | 用户交互；通过 `invoke` 取 Sidecar endpoint | `apps/desktop`（Tauri 命令）；`apps/sidecar`（HTTP+SSE）；`@taori/shared` | UI 状态（Zustand）；会话临时缓存 | `apps/desktop`；`apps/sidecar` | `apps/web/MODULE.md` |
+| `apps/sidecar` | 业务编排进程，LLM 调用 / 圆桌 / 数据持久化 | orchestrator | 是（独立 Node 进程，崩可重启） | HTTP REST + SSE on 可配置 `host:port`（desktop 默认 `127.0.0.1`；standalone npm 可显式设 `0.0.0.0`，详见架构 03 与提案 31） | LLM Providers（远程）；SQLite（本地文件）；`@taori/shared`；`@taori/prompts` | 全部业务状态：会话、消息、圆桌实例、成本记录、记忆、模型异常计数 | `apps/web`（HTTP 服务方）；`apps/desktop`（被托管） | `apps/sidecar/MODULE.md` |
+| `packages/shared` | 前后端共享类型与 Zod schema | infra | 否（library） | 导出类型、schema、常量 | 无运行时依赖 | 无 | `apps/web`；`apps/sidecar` | `packages/shared/MODULE.md` |
 | `packages/prompts` | 元 Prompt 模板（圆桌角色/总结/意图识别） | infra | 否（library） | 导出 prompt 函数 | 无运行时依赖 | 无 | `apps/sidecar` | `packages/prompts/MODULE.md`（M3 建立） |
 | `apps/sidecar/capability-bus` 🔮 | Sidecar 内子模块：工具注册/调度/计费/兜底，承接 Builtin 与 MCP；M2 引入 | orchestrator-internal | 否（Sidecar 内） | `register/list/getToolsFor/invoke` | Vercel AI SDK；MCP SDK（M3） | 工具注册表；MCP 子进程句柄；健康状态 | `apps/sidecar`（宿主）；`packages/shared`（Tool schema） | M2 建立合同（设计见 [架构 09](../architecture/09-agent-and-tools.md)） |
 
@@ -26,7 +26,9 @@ Scope: Taori 全系统
 
 - `apps/desktop` → `apps/sidecar`：Tauri 启动时 spawn Node 进程，通过 stdout 接收 `READY {port} {token}`，崩溃时重启
 - `apps/desktop` ↔ `apps/web`：Tauri 命令通道，仅传递控制元信息（endpoint、文件 base64）；**绝不传 LLM 流**
+- `apps/desktop` → `apps/web`：托盘菜单 / 全局快捷键通过 `taori:desktop-action` 事件桥接到 Renderer，驱动“新对话 / 打开设置 / 使用帮助 / 导入剪贴板”等 UI 动作
 - `apps/web` → `apps/sidecar`：本地 HTTP + SSE，Bearer Token 鉴权；所有 LLM 流式数据走这条
+- standalone npm CLI → `apps/sidecar`：支持前台启动与单用户单实例 daemon 生命周期（state/log 文件位于 `~/.taori/`）；远程 browser-first 部署可显式监听 `0.0.0.0`
 - `apps/sidecar` → LLM Providers：通过 Vercel AI SDK 出站，带用户的 API Key（运行时从 Keychain 经 Tauri 命令拉取）
 - `apps/sidecar` → SQLite：进程内同步访问（better-sqlite3）
 
@@ -34,12 +36,16 @@ Scope: Taori 全系统
 
 | 模块 | 风险点 |
 |---|---|
-| `apps/sidecar` | 拥有几乎全部业务状态；任何合同变化都会扩散到 web/desktop。M0 后必须最先建立 MODULE.md |
+| `apps/sidecar` | 拥有几乎全部业务状态；任何合同变化都会扩散到 web/desktop。公共 API、数据归属或运行语义变化必须同步更新 `apps/sidecar/MODULE.md` 与本清单 |
 | `apps/desktop` | Sidecar 生命周期管理、Keychain 操作、CSP 配置；安全攻击面集中在此 |
 | `packages/prompts` | 元 Prompt 改动直接影响圆桌质量与成本；变更应有版本记录 |
 
 ## 5. 最近变化
 
+- 2026-05-10 [thinking 配置]：新增“全局默认 + 单模型覆盖”的模型 thinking 开关：
+  - `packages/shared`：`Model*` / backup contract 新增 `thinking_enabled: boolean | null`
+  - `apps/sidecar`：`models.thinking_enabled` 落库，并在聊天、Quick Compare、Roundtable、自动记忆抽取与模型探测中统一解析；当前按 provider 差异适配 OpenRouter `reasoning`、DeepSeek `thinking`、GPT-5/o 系列 `reasoning_effort`
+  - `apps/web`：Settings 新增全局 thinking 开关；ModelCenter 编辑器新增“跟随全局 / 总是开启 / 总是关闭”
 - 2026-04-27 [全系统]：完成 v0.5 产品设计 + 技术架构定稿；文档拆分为 `docs/product/` 与 `docs/architecture/`；引入 my-spec 灰盒治理框架
 - 2026-04-27 [产品规则]：失败兜底从"24h 失败 3 次禁用"改为"渐进式降权（≥3 降权 / ≥5 禁用 / content_filter 不计入）"
 - 2026-04-27 [合同修订]：根据外部评审修复 10 项一致性问题，开发团队可据此进入 M0：
@@ -70,6 +76,10 @@ Scope: Taori 全系统
   - `/v1/chat` 扩展可选 `persona_id`，并在 sidecar 上游请求中注入 system prompt
   - SQLite 新增 `prompt_templates`、`personas` 两张表；会话绑定复用 `memories(scope='session', key='active_persona_id')`
   - Renderer 设置页新增模板/Persona 管理；聊天头部新增模板套用与 Persona 绑定入口
+- 2026-05-08 [standalone]：npm standalone sidecar 新增 daemon 生命周期与可配置 bind host：
+  - CLI 新增 `taori daemon start|status|stop`
+  - standalone 仍默认监听 `127.0.0.1`，但远程 / browser-first 部署可显式传 `--host 0.0.0.0`
+  - daemon 状态文件 / 日志位于 `~/.taori/taori-daemon.json`、`~/.taori/taori-daemon.log`
 - 2026-04-27 [评审 R3 微调]：通过第三轮评审，进入 M0 前的最后一批文字一致性修复：
   - `01-overview.md` 关键设计原则 1：Keychain 转写改为"通过 Sidecar↔Rust 控制通道"（不再写 Tauri 命令）
   - `02-tech-stack.md` 为什么业务跑在 Sidecar：去掉"API Key 不进入渲染进程"，改成与 05-security 一致的"短暂持有 / 不持久化 / 不日志 / 不外发"
@@ -88,10 +98,9 @@ Scope: Taori 全系统
 
 ## 6. 待补充
 
-M0 完成时需补充：
-
-- [ ] 各模块的 `MODULE.md`（按 my-spec 最小 5 字段起步）
-- [ ] `apps/sidecar` 详细的内部子模块（providers / orchestration / cost / db / memory）—— 灰盒不下钻
+- [x] 核心模块 `MODULE.md` 已建立：`apps/desktop` / `apps/web` / `apps/sidecar` / `packages/shared`
+- [ ] `apps/sidecar` 详细的内部子模块（providers / orchestration / cost / db / memory / capability-bus / mcp / roundtable）—— 按任务需要灰盒下钻
+- [ ] `packages/prompts` 合同（当 prompt 模板或圆桌 prompt 作为独立包落地时建立）
 - [ ] 部署语义（自动更新机制激活后再补）
 
 ## 7. M2 完工记录
@@ -208,6 +217,40 @@ C3（Prompt 模板 & Persona 预设）已实现：
 - `apps/sidecar`：MCP server 返回的基础 JSON Schema 会转换为 Zod schema，用于 Capability Bus 调用前校验；MCP 超时归类为 `tool_timeout`，进程退出/启动失败归类为 `mcp_crashed`。
 - 验证：`pnpm --filter @taori/sidecar typecheck` 通过；`pnpm test:sidecar` 27 文件 / 186 测试通过。
 
+## 10.16 托管搜索工具与默认搜索（v1.0）
+
+- `apps/sidecar`
+  - 新增托管远程搜索桥接语义：`mcp_servers` 中可保存“搏查搜索”这类受控配置，运行时由 sidecar 解析成内部 proxy 命令，不再要求 Renderer 暴露 `npx mcp-remote`。
+  - 新增全局记忆键 `default_search_tool`；普通聊天、Quick Compare 与 Roundtable 在构建工具目录时只保留一个首选搜索工具，首选不可用时自动回退到 `builtin.web_search` 或当前首个可用搜索工具。
+- `apps/web`
+  - 控制中心工具页重构为“搜索工具 / 其他内置工具 / 高级 MCP Bridge”三段；搏查搜索改成产品化接入卡片，自定义 stdio/bridge 收敛到高级区。
+  - 新增“默认搜索工具”设置，用户可显式指定当前会话体系优先暴露的联网搜索入口。
+- 架构提案
+  - 详见 `docs/architecture/32-managed-search-tools-proposal.md`
+- 验证
+  - Sidecar：`managed-mcp.test.ts`、`upstream-tools.test.ts`
+  - Web：`p2-mcp-management.spec.ts`
+
+## 10.16 P3 桌面壳入口（v0.10）
+
+- `apps/desktop/src-tauri`：新增托盘菜单、托盘点击切换窗口可见性、主窗口关闭时隐藏到托盘而非直接退出。
+- `apps/desktop/src-tauri`：新增全局快捷键 `CmdOrCtrl+Shift+Space`（显示/隐藏 Taori）与 `CmdOrCtrl+Shift+N`（新对话）。
+- `apps/web/src/App.tsx`：监听 `tauri:desktop-action`，把桌面动作转换为 Renderer 内的“新对话 / 打开设置 / 使用帮助”操作。
+- `scripts/verify-desktop-ui.mjs`：通过 debug automation channel 触发 desktop action，验证桌面壳到 WebView 的事件桥接。
+
+## 10.17 P3 剪贴板 / 截图入口（v0.10）
+
+- `apps/desktop/src-tauri`：新增托盘菜单项与全局快捷键 `CmdOrCtrl+Shift+V`，读取系统剪贴板后通过 `taori:desktop-action` 把文本 / 图片载荷下发给 Renderer；同时暴露 `import_clipboard` Tauri command 供 WebView 主动触发。
+- `apps/web/src/App.tsx`：聊天输入区新增“📋 剪贴板”入口；收到桌面事件后把文本追加到 composer，把截图 / 图片追加到附件栏，并沿用现有视觉模型自动切换逻辑。
+- `apps/desktop/src-tauri/src/automation.rs`：debug automation channel 新增剪贴板写入能力，供桌面 UI smoke 在真实 WebView 中验证剪贴板导入链路。
+- `scripts/verify-desktop-ui.mjs`：新增剪贴板导入校验，确认 desktop automation 写入的文本能通过桌面动作进入当前输入框。
+
+## 10.18 P3 本地模板市场（v0.10）
+
+- `apps/web/src/App.tsx`：聊天头部“模板”升级为“模板市场”，把内置工作流、已启用 Workflow Recipe、用户自定义 Prompt 模板聚合成统一发现入口；支持搜索、按来源筛选、右侧预览和一键套用。
+- `apps/web/src/App.tsx`：保留既有变量填空 / Recipe preview → prompt 注入链路，因此模板市场只负责“发现与选择”，不引入新的状态真相。
+- `apps/web/e2e/p3-template-market.spec.ts`：覆盖搜索、预览和通过市场入口套用本地 Recipe。
+
 ## 10.16 停止 / 续写闭环
 
 - `apps/sidecar`：新增 `POST /v1/runs/:id/continue`。Sidecar 根据原 run event 找到 `assistant_message_id` 和上一条 user message，仅允许续写状态为 `incomplete` 的助手消息；新 run 使用 `kind='continue'`，通过 `parent_run_id` 指向原 run，并通过 `continued_from_message_id` 记录原助手消息。
@@ -223,7 +266,7 @@ C3（Prompt 模板 & Persona 预设）已实现：
 ## 10.18 DeepSeek 官方供应商
 
 - `packages/shared`：`ProviderTypeSchema` 新增 `deepseek`，共享常量新增 `DEFAULT_DEEPSEEK_BASE_URL=https://api.deepseek.com`。
-- `apps/sidecar`：Provider registry 新增 DeepSeek 官方 adapter，通过 OpenAI-compatible `/models` 测试与发现 `deepseek-v4-flash` / `deepseek-v4-pro`，并导入为支持 tools 的 chat 模型。
+- `apps/sidecar`：Provider registry 新增 DeepSeek 官方 adapter，通过 OpenAI-compatible `/models` 测试与发现 `deepseek-v4-flash` / `deepseek-v4-pro`；普通文本继续走通用 OpenAI-compatible chat path，但当 DeepSeek 官方聊天模型启用 tools 时，Sidecar 改走 provider-specific 的 Chat Completions tool loop，并在 tool roundtrip 中显式回传 `assistant.reasoning_content`，以兼容官方 thinking mode 协议。
 - `apps/web`：Onboarding / 模型管理供应商预设新增“DeepSeek 官方”，默认 Base URL 来自 shared 常量。
 - `apps/sidecar`：新增 `POST /v1/runs/:id/recover`。Sidecar 根据原 run event 找到源 user message、原 assistant message 和模型，创建新的 assistant message 与 `kind='retry'` 子 run；恢复链写入 `recovery.started -> turn.started -> ... -> recovery.completed/failed`，`parent_run_id` 指向原 run。
 - `apps/sidecar`：`compact_context` 使用确定性摘要压缩源用户消息之前的较早历史，不插入新 user message，并在 recovery event payload 中记录压缩消息数和摘要长度。

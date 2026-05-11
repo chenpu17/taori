@@ -1,4 +1,3 @@
-import { createOpenAI } from '@ai-sdk/openai';
 import { generateText } from 'ai';
 import { z } from 'zod';
 import type { Model, Provider } from '@taori/shared';
@@ -11,7 +10,7 @@ import type {
   StructuredMemoriesRepo,
   StructuredMemoryType,
 } from '../db/repos/index.js';
-import { normalizeOllamaOpenAiBaseUrl } from '../providers/ollama.js';
+import { createChatModel } from '../providers/chat-model.js';
 
 const AutoMemorySchema = z.array(z.object({
   type: z.enum(['preference', 'project_fact', 'profile', 'other']),
@@ -205,14 +204,15 @@ async function runMemoryExtraction(input: ScheduleMemoryExtractionInput): Promis
   }
   if (!apiKey) return;
 
-  const aiProvider = createOpenAI({
-    baseURL: provider.type === 'ollama'
-      ? normalizeOllamaOpenAiBaseUrl(provider.base_url)
-      : provider.base_url.replace(/\/$/, ''),
+  const { model: chatModel } = createChatModel({
+    provider,
+    model,
     apiKey,
+    memoriesRepo: input.memoriesRepo,
+    conversationId: input.conversationId,
   });
   const result = await generateText({
-    model: aiProvider.chat(model.model_name),
+    model: chatModel,
     prompt: buildExtractionPrompt({
       userText: input.userText,
       assistantText: input.assistantText,

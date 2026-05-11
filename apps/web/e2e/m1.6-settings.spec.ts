@@ -74,6 +74,24 @@ test('settings: stream auto-resume toggle persists globally', async ({ page }) =
   await expect(page.getByTestId('stream-auto-resume-toggle')).toBeChecked();
 });
 
+test('settings: thinking toggle persists globally', async ({ page }) => {
+  const env = readSidecarEnv();
+  await resetSidecar(env);
+  await seedDefaultModel(env);
+  await page.goto('/');
+  await expect(page.getByTestId('chat-panel')).toBeVisible();
+
+  await page.getByTestId('open-settings').click();
+  const toggle = page.getByTestId('thinking-toggle');
+  await expect(toggle).not.toBeChecked();
+  await toggle.check();
+  await expect(toggle).toBeChecked();
+  await page.getByTestId('settings-close').click();
+
+  await page.getByTestId('open-settings').click();
+  await expect(page.getByTestId('thinking-toggle')).toBeChecked();
+});
+
 test('settings: Escape key closes the modal (a11y)', async ({ page }) => {
   const env = readSidecarEnv();
   await resetSidecar(env);
@@ -139,9 +157,8 @@ test('model-center: opens, lists provider chip + chat model row, can disable + d
   await page.getByTestId('open-model-center').click();
   await expect(page.getByTestId('model-center')).toBeVisible();
 
-  // One Provider chip and one chat model row.
-  await expect(page.getByTestId('model-center-providers').locator('.provider-chip'))
-    .toHaveCount(1);
+  // One provider in nav and one chat model row.
+  await expect(page.locator('[data-testid^="provider-nav-item-"]')).toHaveCount(1);
   const rows = page.locator('.model-matrix tbody > tr:not(.model-health-row)');
   await expect(rows).toHaveCount(1);
 
@@ -158,7 +175,7 @@ test('model-center: opens, lists provider chip + chat model row, can disable + d
   await expect(rows).toHaveCount(0);
 });
 
-test('model-center: provider chip "测试" reports key_missing for keyless provider', async ({
+test('model-center: provider detail "测试" reports key_missing for keyless provider', async ({
   page,
 }) => {
   const env = readSidecarEnv();
@@ -166,12 +183,15 @@ test('model-center: provider chip "测试" reports key_missing for keyless provi
   await seedDefaultModel(env); // no api key → /test reports key_missing
   await page.goto('/');
   await page.getByTestId('open-model-center').click();
-  const providerChip = page.locator('[data-testid^="provider-chip-"]').first();
-  const providerId = (await providerChip.getAttribute('data-testid'))?.replace('provider-chip-', '');
+  const providerNavItem = page.locator('[data-testid^="provider-nav-item-"]').first();
+  const providerId = (await providerNavItem.getAttribute('data-testid'))?.replace(
+    'provider-nav-item-',
+    '',
+  );
   expect(providerId).toBeTruthy();
-  await page.getByTestId(`provider-chip-more-${providerId}`).click();
-  await page.getByTestId(`provider-menu-test-${providerId}`).click();
-  const result = page.locator('[data-testid^="provider-chip-test-result-"]').first();
+  await providerNavItem.click();
+  await page.getByTestId(`provider-detail-test-${providerId}`).click();
+  const result = page.getByTestId(`provider-detail-test-result-${providerId}`);
   await expect(result).toBeVisible();
   await expect(result).toContainText('✗');
   await expect(result).toContainText('no_api_key_configured');

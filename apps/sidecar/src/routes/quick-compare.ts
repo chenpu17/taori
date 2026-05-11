@@ -1,6 +1,5 @@
 import type { FastifyInstance } from 'fastify';
 import type { PassThrough } from 'node:stream';
-import { createOpenAI } from '@ai-sdk/openai';
 import { streamText } from 'ai';
 import {
   QuickCompareRequestSchema,
@@ -28,14 +27,21 @@ import {
   RunEventsRepo,
 } from '../db/repos/index.js';
 import { classifyProviderError, isToolPayloadUnsupportedError } from '../providers/registry.js';
-import { normalizeOllamaOpenAiBaseUrl } from '../providers/ollama.js';
 import { throwIfBudgetBlockedOrNeedsConfirmation } from '../cost/budget-guard.js';
 import { openDataStream } from '../chat/stream-dispatch.js';
 import { appendRunEvent } from '../chat/run-stream.js';
+import { shouldUseDeepSeekToolLoop } from '../chat/deepseek-tool-loop-policy.js';
 import { buildConversationToolPolicy } from '../chat/tool-policy.js';
-import { buildUpstreamTools, withCapabilityToolInstruction, type ToolTracePayload } from '../chat/upstream-tools.js';
+import {
+  buildUpstreamToolCatalog,
+  buildUpstreamTools,
+  withCapabilityToolInstruction,
+  type ToolTracePayload,
+} from '../chat/upstream-tools.js';
+import { executeDeepSeekToolLoop } from '../chat/deepseek-tools-loop.js';
 import { pickQuickCompareModels } from '../quick-compare/model-picker.js';
 import type { CapabilityBus } from '../bus/index.js';
+import { createChatModel, resolveThinkingConfig } from '../providers/chat-model.js';
 
 function writeAnnotation(stream: PassThrough, annotations: QuickCompareAnnotation[]): void {
   stream.write(`8:${JSON.stringify(annotations)}\n`);
@@ -92,6 +98,43 @@ function estimateCompareCostUsd(models: Model[], inputText: string): number {
   }, 0);
 }
 
+function enabledToolNames(toolPolicy: Record<string, boolean>): string[] {
+  return Object.entries(toolPolicy)
+    .filter(([, enabled]) => enabled)
+    .map(([name]) => name);
+}
+
+function restrictToolPolicy(
+  toolPolicy: Record<string, boolean>,
+  allowedToolNames: string[],
+): Record<string, boolean> {
+  const allowed = new Set(allowedToolNames);
+  return Object.fromEntries(
+    Object.entries(toolPolicy).map(([name, enabled]) => [name, enabled && allowed.has(name)]),
+  );
+}
+
+function resolveParticipantToolNames(args: {
+  selectedModels: Model[];
+  requestedConfigs?: Array<{ model_id: string; tool_names?: string[] }>;
+  baseToolPolicy: Record<string, boolean>;
+}): Map<string, string[]> {
+  const defaultToolNames = enabledToolNames(args.baseToolPolicy);
+  const allowedToolNames = new Set(defaultToolNames);
+  const requestedByModelId = new Map(
+    (args.requestedConfigs ?? []).map((item) => [item.model_id, item.tool_names]),
+  );
+  return new Map(args.selectedModels.map((model) => {
+    if (!model.supports_tools) return [model.id, []];
+    const requested = requestedByModelId.get(model.id);
+    if (requested == null) return [model.id, defaultToolNames];
+    return [
+      model.id,
+      [...new Set(requested.filter((name) => allowedToolNames.has(name)))],
+    ];
+  }));
+}
+
 async function runCompareParticipant(args: {
   stream: PassThrough;
   signal: AbortSignal;
@@ -107,9 +150,12 @@ async function runCompareParticipant(args: {
   sourceUserMessageId: string | null;
   bus: CapabilityBus | null | undefined;
   toolPolicy: Record<string, boolean>;
+  defaultSearchToolName?: string | null;
+  toolNames: string[];
   qcRepo: QuickCompareRepo;
   costsRepo: CostsRepo;
   modelsRepo: ModelsRepo;
+  memoriesRepo: MemoriesRepo;
   runEventsRepo: RunEventsRepo;
   log: { info: (...a: unknown[]) => void; warn: (...a: unknown[]) => void; error: (...a: unknown[]) => void };
 }): Promise<{ outputId: string; ok: boolean }> {
@@ -138,15 +184,146 @@ async function runCompareParticipant(args: {
     output_id: args.outputId,
     index: args.index,
     model_id: args.model.id,
+    tool_names: args.toolNames,
   }]);
 
   try {
     if (args.provider && args.apiKey) {
-      const provider = createOpenAI({
-        baseURL: args.provider.type === 'ollama'
-          ? normalizeOllamaOpenAiBaseUrl(args.provider.base_url)
-          : args.provider.base_url.replace(/\/$/, ''),
+      if (shouldUseDeepSeekToolLoop(args.provider, args.model.model_name, args.model.supports_tools)) {
+        const emitToolTrace = (payload: ToolTracePayload): void => {
+          writeAnnotation(args.stream, [{
+            type: 'qc.tool_trace',
+            output_id: args.outputId,
+            index: args.index,
+            model_id: args.model.id,
+            ...payload,
+          }]);
+        };
+        const toolCatalog = buildUpstreamToolCatalog(
+          {
+            messageId: args.outputId,
+            conversationId: args.conversationId,
+            sourceUserMessageId: args.sourceUserMessageId,
+            supportsTools: args.model.supports_tools,
+            toolPolicy: args.toolPolicy,
+            bus: args.bus ?? null,
+            imageModelId: null,
+            filesRepo: null,
+            log: args.log,
+            defaultSearchToolName: args.defaultSearchToolName,
+          },
+          () => true,
+          emitToolTrace,
+        );
+        toolsWereSent = toolCatalog.definitions.length > 0;
+        const initialMessages = toolsWereSent
+          ? withCapabilityToolInstruction(args.messages, toolCatalog.flags)
+          : args.messages;
+        const loopResult = await executeDeepSeekToolLoop({
+          signal: args.signal,
+          cfg: {
+            baseURL: args.provider.base_url.replace(/\/$/, ''),
+            apiKey: args.apiKey,
+            modelName: args.model.model_name,
+          },
+          initialMessages,
+          toolCatalog,
+          thinking: resolveThinkingConfig({
+            model: args.model,
+            provider: args.provider,
+            memoriesRepo: args.memoriesRepo,
+            conversationId: args.conversationId,
+          }),
+        });
+        const promptTokens = loopResult.promptTokens;
+        const completionTokens = loopResult.completionTokens;
+        if (typeof loopResult.text === 'string' && loopResult.text.length > 0) {
+          if (firstTokenMs == null) firstTokenMs = Date.now() - startedAt;
+          accumulated = loopResult.text;
+          writeAnnotation(args.stream, [{
+            type: 'qc.participant_delta',
+            output_id: args.outputId,
+            index: args.index,
+            model_id: args.model.id,
+            text_chunk: loopResult.text,
+          }]);
+        }
+        if (!accumulated.trim()) {
+          throw new TaoriError({
+            code: 'provider_error',
+            message: '模型本次调用已完成，但没有返回任何可显示文本。',
+          });
+        }
+        const actualCost = calculateCostUsd({
+          inputTokens: promptTokens ?? 0,
+          outputTokens: completionTokens ?? 0,
+          priceInputPer1m: args.model.price_input_per_1m,
+          priceOutputPer1m: args.model.price_output_per_1m,
+          pricePerCall: args.model.price_per_call,
+        });
+        const cost = args.costsRepo.insert({
+          conversation_id: args.conversationId,
+          source_type: 'quick_compare_output',
+          source_id: args.outputId,
+          feature: 'quick_compare',
+          model_id: args.model.id,
+          model_name_snapshot: args.model.model_name,
+          input_tokens: promptTokens,
+          output_tokens: completionTokens,
+          call_count: 1,
+          price_input_per_1m_snapshot: args.model.price_input_per_1m,
+          price_output_per_1m_snapshot: args.model.price_output_per_1m,
+          price_per_call_snapshot: args.model.price_per_call,
+          estimated_cost_usd: null,
+          actual_cost_usd: actualCost ?? null,
+          success: true,
+          duration_ms: Date.now() - startedAt,
+        });
+        args.qcRepo.patchOutput(args.outputId, {
+          content: accumulated,
+          status: 'complete',
+          cost_record_id: cost.id,
+          first_token_ms: firstTokenMs,
+          duration_ms: Date.now() - startedAt,
+        });
+        args.modelsRepo.recordSuccess(args.model.id);
+        appendRunEvent(args.log, args.runEventsRepo, {
+          run_id: args.runId,
+          conversation_id: args.conversationId,
+          message_id: null,
+          kind: 'quick_compare.participant_completed',
+          status: 'completed',
+          label: `对比候选 ${args.index + 1} 完成`,
+          summary: actualCost == null ? null : `$${actualCost.toFixed(6)}`,
+          payload: {
+            compare_id: args.compareId,
+            output_id: args.outputId,
+            participant_index: args.index,
+            model_id: args.model.id,
+            cost_record_id: cost.id,
+            first_token_ms: firstTokenMs,
+            duration_ms: Date.now() - startedAt,
+          },
+        });
+        writeAnnotation(args.stream, [{
+          type: 'qc.participant_done',
+          output_id: args.outputId,
+          index: args.index,
+          model_id: args.model.id,
+          content: accumulated,
+          cost_record_id: cost.id,
+          first_token_ms: firstTokenMs,
+          duration_ms: Date.now() - startedAt,
+        }]);
+        return { outputId: args.outputId, ok: true };
+      }
+
+      const { model: chatModel } = createChatModel({
+        provider: args.provider,
+        model: args.model,
         apiKey: args.apiKey,
+        memoriesRepo: args.memoriesRepo,
+        conversationId: args.conversationId,
       });
       const emitToolTrace = (payload: ToolTracePayload): void => {
         writeAnnotation(args.stream, [{
@@ -174,7 +351,7 @@ async function runCompareParticipant(args: {
       );
       toolsWereSent = upstreamTools.tools != null;
       const result = await streamText({
-        model: provider.chat(args.model.model_name),
+        model: chatModel,
         messages: upstreamTools.tools
           ? withCapabilityToolInstruction(args.messages, upstreamTools.flags)
           : args.messages,
@@ -199,6 +376,12 @@ async function runCompareParticipant(args: {
       const usage = await result.usage.catch(() => undefined);
       const promptTokens = usage?.promptTokens ?? null;
       const completionTokens = usage?.completionTokens ?? null;
+      if (!accumulated.trim()) {
+        throw new TaoriError({
+          code: 'provider_error',
+          message: '模型本次调用已完成，但没有返回任何可显示文本。',
+        });
+      }
       const actualCost = calculateCostUsd({
         inputTokens: promptTokens ?? 0,
         outputTokens: completionTokens ?? 0,
@@ -370,8 +553,8 @@ export function registerQuickCompareRoute(app: FastifyInstance, deps: BuildServe
     });
     const selected = pickQuickCompareModels({
       models: modelsRepo.list(),
-      currentModelId: body.model_ids?.[0] ?? null,
-      requestedModelIds: body.model_ids,
+      currentModelId: body.participant_configs?.[0]?.model_id ?? body.model_ids?.[0] ?? null,
+      requestedModelIds: body.participant_configs?.map((item) => item.model_id) ?? body.model_ids,
     });
     const selectedModels = selected.map((item) => item.model);
     const estimatedCostUsd = estimateCompareCostUsd(
@@ -406,12 +589,20 @@ export function registerQuickCompareRoute(app: FastifyInstance, deps: BuildServe
       run_id: runId,
       model_ids: selectedModels.map((model) => model.id),
     });
+    const toolPolicy = buildConversationToolPolicy(deps.bus ?? null, memoriesRepo, conversation.id);
+    const defaultSearchToolName = memoriesRepo.getEffective(conversation.id, 'default_search_tool');
+    const participantToolNames = resolveParticipantToolNames({
+      selectedModels,
+      requestedConfigs: body.participant_configs,
+      baseToolPolicy: toolPolicy,
+    });
     const outputs = selectedModels.map((model, index) =>
       qcRepo.createOutput({
         compare_id: compare.id,
         participant_index: index,
         model_id: model.id,
         provider_id: model.provider_id,
+        tool_names: participantToolNames.get(model.id) ?? [],
       }),
     );
     appendRunEvent(req.log, runEventsRepo, {
@@ -461,7 +652,6 @@ export function registerQuickCompareRoute(app: FastifyInstance, deps: BuildServe
       personaPrompt,
       attachments: body.attachments,
     });
-    const toolPolicy = buildConversationToolPolicy(deps.bus ?? null, memoriesRepo, conversation.id);
 
     void (async () => {
       const providers = selectedModels.map((model) =>
@@ -493,10 +683,16 @@ export function registerQuickCompareRoute(app: FastifyInstance, deps: BuildServe
           messages,
           sourceUserMessageId: sourceUserMessage.id,
           bus: deps.bus,
-          toolPolicy,
+          toolPolicy: restrictToolPolicy(
+            toolPolicy,
+            participantToolNames.get(selectedModels[index]!.id) ?? [],
+          ),
+          defaultSearchToolName,
+          toolNames: participantToolNames.get(selectedModels[index]!.id) ?? [],
           qcRepo,
           costsRepo,
           modelsRepo,
+          memoriesRepo,
           runEventsRepo,
           log: req.log,
         }),
@@ -655,6 +851,7 @@ export function registerQuickCompareRoute(app: FastifyInstance, deps: BuildServe
       defaultThresholdUsd: 0.20,
     });
     qcRepo.patchOutput(target.id, {
+      tool_names: target.tool_names,
       content: '',
       status: 'pending',
       error_classification: null,
@@ -665,6 +862,8 @@ export function registerQuickCompareRoute(app: FastifyInstance, deps: BuildServe
     });
     qcRepo.updateRunStatus(compare.id, 'running');
     const toolPolicy = buildConversationToolPolicy(deps.bus ?? null, memoriesRepo, compare.conversation_id);
+    const defaultSearchToolName = memoriesRepo.getEffective(compare.conversation_id, 'default_search_tool');
+    const participantToolPolicy = restrictToolPolicy(toolPolicy, target.tool_names);
     const dataStream = openDataStream(req.headers.origin, reply);
     writeAnnotation(dataStream.stream, [{
       type: 'qc.meta',
@@ -699,10 +898,13 @@ export function registerQuickCompareRoute(app: FastifyInstance, deps: BuildServe
         messages: [{ role: 'user', content: prompt }],
         sourceUserMessageId: compare.source_user_message_id,
         bus: deps.bus,
-        toolPolicy,
+        toolPolicy: participantToolPolicy,
+        defaultSearchToolName,
+        toolNames: target.tool_names,
         qcRepo,
         costsRepo,
         modelsRepo,
+        memoriesRepo,
         runEventsRepo,
         log: req.log,
       });
