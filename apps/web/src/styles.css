@@ -2679,8 +2679,6 @@ header h1::before {
 }
 @media (max-width: 640px) {
   .research-center__action-row {
-    flex-wrap: nowrap;
-    overflow-x: auto;
     padding-bottom: 4px;
     -webkit-overflow-scrolling: touch;
   }
@@ -2823,8 +2821,15 @@ header h1::before {
 .research-center__status-group,
 .research-center__action-row {
   display: flex;
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
   gap: var(--sp-2);
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+.research-center__action-row::-webkit-scrollbar { display: none; }
+.research-center__action-row > button {
+  flex-shrink: 0;
+  white-space: nowrap;
 }
 .research-center__pill {
   padding: 4px 10px;
