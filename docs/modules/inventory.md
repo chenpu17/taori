@@ -28,7 +28,7 @@ Scope: Taori 全系统
 - `apps/desktop` ↔ `apps/web`：Tauri 命令通道，仅传递控制元信息（endpoint、文件 base64）；**绝不传 LLM 流**
 - `apps/desktop` → `apps/web`：托盘菜单 / 全局快捷键通过 `taori:desktop-action` 事件桥接到 Renderer，驱动“新对话 / 打开设置 / 使用帮助 / 导入剪贴板”等 UI 动作
 - `apps/web` → `apps/sidecar`：本地 HTTP + SSE，Bearer Token 鉴权；所有 LLM 流式数据走这条
-- standalone npm CLI → `apps/sidecar`：支持前台启动与单用户单实例 daemon 生命周期（state/log 文件位于 `~/.taori/`）；远程 browser-first 部署可显式监听 `0.0.0.0`
+- standalone npm CLI → `apps/sidecar`：支持前台启动与单用户单实例 daemon 生命周期（state/log 文件位于 `~/.taori/`）；远程 browser-first 部署可显式监听 `0.0.0.0`，并在 npm 包内直接同源托管登录页 + Web UI，浏览器侧通过访问密码换取 HttpOnly cookie 会话
 - `apps/sidecar` → LLM Providers：通过 Vercel AI SDK 出站，带用户的 API Key（运行时从 Keychain 经 Tauri 命令拉取）
 - `apps/sidecar` → SQLite：进程内同步访问（better-sqlite3）
 
@@ -80,6 +80,10 @@ Scope: Taori 全系统
   - CLI 新增 `taori daemon start|status|stop`
   - standalone 仍默认监听 `127.0.0.1`，但远程 / browser-first 部署可显式传 `--host 0.0.0.0`
   - daemon 状态文件 / 日志位于 `~/.taori/taori-daemon.json`、`~/.taori/taori-daemon.log`
+- 2026-05-11 [standalone browser]：npm standalone 新增浏览器登录页与同源 Web UI：
+  - CLI 新增 `--password`，用于设置浏览器访问密码
+  - Sidecar 在 standalone + `dist-web` 存在时直接提供 `/` 登录页与 `/app` Web UI
+  - 浏览器登录成功后由 Sidecar 下发 HttpOnly cookie；脚本调用仍可继续使用 Bearer Token
 - 2026-04-27 [评审 R3 微调]：通过第三轮评审，进入 M0 前的最后一批文字一致性修复：
   - `01-overview.md` 关键设计原则 1：Keychain 转写改为"通过 Sidecar↔Rust 控制通道"（不再写 Tauri 命令）
   - `02-tech-stack.md` 为什么业务跑在 Sidecar：去掉"API Key 不进入渲染进程"，改成与 05-security 一致的"短暂持有 / 不持久化 / 不日志 / 不外发"

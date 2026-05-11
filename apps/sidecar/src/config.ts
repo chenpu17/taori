@@ -24,6 +24,10 @@ function devToken(): string {
   return `dev_${randomBytes(32).toString('hex')}`;
 }
 
+function cleanVersion(value: string | undefined): string {
+  return (value ?? '0.0.2').replace(/^['"]+|['"]+$/g, '');
+}
+
 export interface SidecarConfig {
   host: string;
   port: number;
@@ -33,6 +37,7 @@ export interface SidecarConfig {
   controlBearer: string | null;
   isDev: boolean;
   standalone: boolean;
+  standaloneAccessPassword: string | null;
   version: string;
 }
 
@@ -66,6 +71,7 @@ export function loadConfig(): SidecarConfig {
 
   const controlUrl = process.env.CONTROL_URL ?? null;
   const controlBearer = process.env.CONTROL_BEARER ?? null;
+  const standaloneAccessPassword = process.env.TAORI_STANDALONE_ACCESS_PASSWORD?.trim() || null;
 
   return {
     host,
@@ -76,6 +82,7 @@ export function loadConfig(): SidecarConfig {
     controlBearer,
     isDev,
     standalone,
-    version: process.env.npm_package_version ?? '0.0.2',
+    standaloneAccessPassword,
+    version: cleanVersion(process.env.TAORI_CLI_VERSION ?? process.env.npm_package_version ?? '0.0.2'),
   };
 }

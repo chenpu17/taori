@@ -10,11 +10,17 @@
 export interface SidecarEndpoint {
   url: string;
   bearer: string;
+  authMode?: 'bearer' | 'cookie';
 }
 
 declare global {
   interface Window {
     __TAURI_INTERNALS__?: unknown;
+    __TAORI_BROWSER_BOOTSTRAP__?: {
+      url: string;
+      authMode: 'bearer' | 'cookie';
+      bearer?: string;
+    };
   }
 }
 
@@ -32,6 +38,14 @@ export async function getSidecarEndpoint(): Promise<SidecarEndpoint> {
       return ep;
     }
   }
+  if (typeof window !== 'undefined' && window.__TAORI_BROWSER_BOOTSTRAP__) {
+    cached = {
+      url: window.__TAORI_BROWSER_BOOTSTRAP__.url,
+      bearer: window.__TAORI_BROWSER_BOOTSTRAP__.bearer ?? '',
+      authMode: window.__TAORI_BROWSER_BOOTSTRAP__.authMode,
+    };
+    return cached;
+  }
   const url = (import.meta as ImportMeta & { env: Record<string, string> }).env
     .VITE_SIDECAR_URL;
   const bearer = (import.meta as ImportMeta & { env: Record<string, string> })
@@ -41,7 +55,7 @@ export async function getSidecarEndpoint(): Promise<SidecarEndpoint> {
       'Sidecar endpoint not available. In dev set VITE_SIDECAR_URL & VITE_SIDECAR_BEARER.',
     );
   }
-  cached = { url, bearer };
+  cached = { url, bearer, authMode: 'bearer' };
   return cached;
 }
 
@@ -52,9 +66,10 @@ export async function authedFetch(
   const ep = await getSidecarEndpoint();
   return fetch(`${ep.url}${path}`, {
     ...init,
+    credentials: 'include',
     headers: {
       ...(init.headers ?? {}),
-      Authorization: `Bearer ${ep.bearer}`,
+      ...(ep.bearer ? { Authorization: `Bearer ${ep.bearer}` } : {}),
     },
   });
 }

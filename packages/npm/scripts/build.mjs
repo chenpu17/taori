@@ -7,8 +7,11 @@ import { build } from 'esbuild';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const outdir = path.resolve(__dirname, '..', 'dist');
+const webOutdir = path.resolve(__dirname, '..', 'dist-web');
 const pkgJsonPath = path.resolve(__dirname, '..', 'package.json');
 const entry = path.resolve(__dirname, '..', '..', '..', 'apps', 'sidecar', 'src', 'cli.ts');
+const webRoot = path.resolve(__dirname, '..', '..', '..', 'apps', 'web');
+const webDist = path.resolve(webRoot, 'dist');
 const outfile = path.join(outdir, 'cli.cjs');
 const requestedEngine = process.env.TAORI_BUNDLE_ENGINE?.trim().toLowerCase() ?? '';
 const packageJson = JSON.parse(fs.readFileSync(pkgJsonPath, 'utf8'));
@@ -16,6 +19,7 @@ const cliVersion = String(packageJson.version ?? '0.0.0');
 
 fs.rmSync(outdir, { recursive: true, force: true });
 fs.mkdirSync(outdir, { recursive: true });
+fs.rmSync(webOutdir, { recursive: true, force: true });
 
 function buildWithEsbuild() {
   return build({
@@ -78,3 +82,10 @@ if (requestedEngine === 'bun') {
 }
 
 fs.chmodSync(outfile, 0o755);
+
+spawnSync('pnpm', ['--filter', '@taori/web', 'build'], {
+  stdio: 'inherit',
+  env: process.env,
+});
+
+fs.cpSync(webDist, webOutdir, { recursive: true });

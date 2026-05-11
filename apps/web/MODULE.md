@@ -41,3 +41,4 @@ Taori React Renderer，负责聊天、控制中心、模型中心、工具配置
 - Onboarding 供应商预设新增 DeepSeek 官方；默认 Base URL 来自 `packages/shared` 的 `DEFAULT_DEEPSEEK_BASE_URL`，前端只采集用户输入的 API Key，不持久化或日志输出明文。
 - 聊天头部的“模板市场”把内置工作流、已启用 Workflow Recipe 与用户自定义 Prompt 模板统一收敛为本地模板发现入口；支持搜索、预览、按来源筛选，并保持一键套用 / 填写变量后套用闭环。
 - Settings 新增全局 thinking 开关（`thinking_enabled`）；ModelCenter 的模型编辑器新增“跟随全局 / 总是开启 / 总是关闭”三态覆盖，并通过 `PATCH /v1/models/:id` 持久化到单模型 `thinking_enabled`。
+- standalone 浏览器模式下，Renderer 不再要求预先注入 Bearer 才能工作：`sidecar.ts` 可读取同源 bootstrap，所有普通 REST 与聊天流请求默认携带 `credentials: include`，由 Sidecar 的 HttpOnly cookie 会话完成鉴权；Tauri 与开发环境仍兼容 Bearer 模式。

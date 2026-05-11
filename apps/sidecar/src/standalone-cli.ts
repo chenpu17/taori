@@ -6,6 +6,7 @@ export interface ServeOptions {
   port?: number;
   dbPath?: string;
   host?: string;
+  accessPassword?: string;
 }
 
 export interface DaemonStartOptions extends ServeOptions {
@@ -37,6 +38,7 @@ export interface StandaloneDaemonState {
   bearer: string;
   dbPath: string;
   logFile: string;
+  loginUrl?: string;
 }
 
 const DEFAULT_STATE_FILE = 'taori-daemon.json';
@@ -70,6 +72,7 @@ export function printHelp(): void {
       `  --host <addr>    Bind host (default: ${DEFAULT_HOST}; use 0.0.0.0 for remote/web deployment)`,
       `  --port, -p <n>   Bind port (default: ${DEFAULT_PORT})`,
       `  --db-path <path> SQLite path (default: ~/.taori/${DEFAULT_DB_FILE})`,
+      '  --password <pwd> Browser login password for standalone Web UI',
       '  --help, -h       Show this help',
       '  --version, -v    Show CLI version',
       '',
@@ -77,11 +80,13 @@ export function printHelp(): void {
       `  taori`,
       `  taori serve --port ${DEFAULT_PORT}`,
       '  taori --host 0.0.0.0 --port 18901',
+      '  taori --host 0.0.0.0 --port 4101 --password my-secret',
       '  taori --db-path ~/.taori/my-taori.db',
       '',
       'Daemon examples:',
       '  taori daemon status',
       `  taori daemon start --host 0.0.0.0 --port ${DEFAULT_PORT}`,
+      '  taori daemon start --host 0.0.0.0 --port 4101 --password my-secret',
       '  taori daemon start --db-path ~/.taori/my-taori.db --log-file /var/log/taori.log',
       '  taori daemon stop',
       '',
@@ -93,6 +98,7 @@ export function printHelp(): void {
       'Notes:',
       '  - Foreground mode keeps the current terminal attached.',
       '  - Daemon mode writes pid/state/log files under ~/.taori by default.',
+      '  - Standalone mode can serve a browser login page and Web UI when npm package assets are present.',
       '  - Host 0.0.0.0 is suitable for servers, but should be protected by network policy or a reverse proxy.',
       '  - On startup/status the CLI prints the bearer token required by the HTTP API.',
       '',
@@ -106,7 +112,7 @@ export function printDaemonHelp(): void {
       'Taori daemon commands',
       '',
       'Usage:',
-      '  taori daemon start [--host <address>] [--port <number>] [--db-path <path>] [--log-file <path>]',
+      '  taori daemon start [--host <address>] [--port <number>] [--db-path <path>] [--password <value>] [--log-file <path>]',
       '  taori daemon status',
       '  taori daemon stop',
       '',
@@ -114,11 +120,13 @@ export function printDaemonHelp(): void {
       `  --host <addr>    Bind host (default: ${DEFAULT_HOST})`,
       `  --port, -p <n>   Bind port (default: ${DEFAULT_PORT})`,
       `  --db-path <path> SQLite path (default: ~/.taori/${DEFAULT_DB_FILE})`,
+      '  --password <pwd> Browser login password for standalone Web UI',
       `  --log-file <p>   Daemon log path (default: ~/.taori/${DEFAULT_LOG_FILE})`,
       '',
       'Examples:',
       `  taori daemon start --port ${DEFAULT_PORT}`,
       '  taori daemon start --host 0.0.0.0 --port 18901',
+      '  taori daemon start --host 0.0.0.0 --port 4101 --password my-secret',
       '  taori daemon status',
       '  taori daemon stop',
       '',
@@ -178,6 +186,7 @@ export function applyCliEnv(options: ServeOptions): void {
   delete process.env.SIDECAR_PORT;
   delete process.env.DB_PATH;
   delete process.env.SIDECAR_HOST;
+  delete process.env.TAORI_STANDALONE_ACCESS_PASSWORD;
 
   if (options.port != null) {
     process.env.SIDECAR_PORT = String(options.port);
@@ -187,6 +196,9 @@ export function applyCliEnv(options: ServeOptions): void {
   }
   if (options.host) {
     process.env.SIDECAR_HOST = options.host;
+  }
+  if (options.accessPassword) {
+    process.env.TAORI_STANDALONE_ACCESS_PASSWORD = options.accessPassword;
   }
 }
 
@@ -338,6 +350,11 @@ function parseOptions(
         throw new Error('--log-file is only supported with `taori daemon start`');
       }
       options.logFile = path.resolve(readArgValue(argv, i, arg));
+      i += 1;
+      continue;
+    }
+    if (arg === '--password') {
+      options.accessPassword = readArgValue(argv, i, arg);
       i += 1;
       continue;
     }

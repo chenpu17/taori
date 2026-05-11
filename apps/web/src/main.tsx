@@ -8,4 +8,11 @@ import './styles/markdown.css';
 // palette on hard reload. The attribute drives the CSS variables in styles.css.
 applyTheme(readStoredTheme());
 
+if (typeof window !== 'undefined' && !window.__TAURI_INTERNALS__) {
+  window.__TAORI_BROWSER_BOOTSTRAP__ = {
+    url: window.location.origin,
+    authMode: 'cookie',
+  };
+}
+
 ReactDOM.createRoot(document.getElementById('root')!).render(<App />);

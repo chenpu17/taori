@@ -56,8 +56,17 @@ async function main(): Promise<void> {
     [
       `Taori sidecar is running at ${started.url}`,
       `Bind: ${started.bindUrl}`,
+      ...(started.config.standaloneAccessPassword
+        ? [`Browser: ${started.bindUrl}/`]
+        : ['Browser: disabled (set --password to enable standalone Web UI login)']),
       `Port: ${started.port}`,
       `Host: ${started.config.host ?? '127.0.0.1'}`,
+      ...(started.config.standaloneAccessPassword
+        ? [
+            `Login password: ${started.config.standaloneAccessPassword}`,
+            'Browser auth: open the Browser URL above and enter the password',
+          ]
+        : []),
       `Bearer: ${started.bearer}`,
       `DB: ${started.config.dbPath}`,
       '',
@@ -69,6 +78,7 @@ async function startDaemon(options: {
   port?: number;
   dbPath?: string;
   host?: string;
+  accessPassword?: string;
   logFile?: string;
 }): Promise<void> {
   const paths = resolveDaemonPaths(options.logFile);
@@ -114,6 +124,7 @@ async function startDaemon(options: {
       'Taori daemon started',
       `PID: ${state.pid}`,
       `Bind: ${state.bindUrl}`,
+      ...(state.loginUrl ? [`Browser: ${state.loginUrl}`] : ['Browser: disabled (restart with --password to enable Web UI login)']),
       `Local: ${state.localUrl}`,
       `Host: ${state.host}`,
       `Port: ${state.port}`,
@@ -140,6 +151,7 @@ async function printDaemonStatus(): Promise<void> {
       `Taori daemon is ${healthy ? 'running' : 'running (health probe failed)'}`,
       `PID: ${state.pid}`,
       `Bind: ${state.bindUrl}`,
+      ...(state.loginUrl ? [`Browser: ${state.loginUrl}`] : ['Browser: disabled (restart with --password to enable Web UI login)']),
       `Local: ${state.localUrl}`,
       `Host: ${state.host}`,
       `Port: ${state.port}`,
@@ -192,10 +204,11 @@ function persistDaemonStateIfNeeded(started: Awaited<ReturnType<typeof startSide
     bearer: started.bearer,
     dbPath: started.config.dbPath,
     logFile: process.env.TAORI_DAEMON_LOG_FILE ?? resolveDaemonPaths().logFile,
+    loginUrl: started.config.standaloneAccessPassword ? `${started.bindUrl}/` : undefined,
   });
 }
 
-function buildChildArgs(options: { port?: number; dbPath?: string; host?: string }): string[] {
+function buildChildArgs(options: { port?: number; dbPath?: string; host?: string; accessPassword?: string }): string[] {
   const entry = process.argv[1];
   if (!entry) {
     throw new Error('Cannot determine Taori CLI entry path');
@@ -209,6 +222,9 @@ function buildChildArgs(options: { port?: number; dbPath?: string; host?: string
   }
   if (options.dbPath) {
     args.push('--db-path', options.dbPath);
+  }
+  if (options.accessPassword) {
+    args.push('--password', options.accessPassword);
   }
   return args;
 }

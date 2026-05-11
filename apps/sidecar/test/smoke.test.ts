@@ -88,4 +88,72 @@ describe('sidecar smoke', () => {
     expect(res.statusCode).toBe(400);
     expect(res.json().code).toBe('validation_error');
   });
+
+  it('standalone browser mode serves login HTML at / when password auth is enabled', async () => {
+    const standaloneDbPath = path.join(os.tmpdir(), `taori-standalone-${Date.now()}.db`);
+    const standaloneDb = openDb(standaloneDbPath);
+    const standaloneApp = buildServer({
+      config: {
+        host: '0.0.0.0',
+        port: 4101,
+        bearer,
+        dbPath: standaloneDbPath,
+        controlUrl: null,
+        controlBearer: null,
+        isDev: false,
+        standalone: true,
+        standaloneAccessPassword: 'secret-pass',
+        version: '0.0.0-test',
+      },
+      db: standaloneDb,
+      control: new ControlClient({ url: null, bearer: null }),
+      keystore: new MemoryStore(),
+      startedAt: Date.now(),
+    });
+    await standaloneApp.ready();
+    try {
+      const res = await standaloneApp.inject({ method: 'GET', url: '/' });
+      expect(res.statusCode).toBe(200);
+      expect(res.headers['content-type']).toMatch(/^text\/html/);
+      expect(res.body).toContain('Taori Browser Access');
+      expect(res.body).toContain('输入访问密码');
+    } finally {
+      await standaloneApp.close();
+      fs.rmSync(standaloneDbPath, { force: true });
+    }
+  });
+
+  it('standalone browser mode explains how to enable Web UI when password is missing', async () => {
+    const standaloneDbPath = path.join(os.tmpdir(), `taori-standalone-nopass-${Date.now()}.db`);
+    const standaloneDb = openDb(standaloneDbPath);
+    const standaloneApp = buildServer({
+      config: {
+        host: '0.0.0.0',
+        port: 4102,
+        bearer,
+        dbPath: standaloneDbPath,
+        controlUrl: null,
+        controlBearer: null,
+        isDev: false,
+        standalone: true,
+        standaloneAccessPassword: null,
+        version: '0.0.0-test',
+      },
+      db: standaloneDb,
+      control: new ControlClient({ url: null, bearer: null }),
+      keystore: new MemoryStore(),
+      startedAt: Date.now(),
+    });
+    await standaloneApp.ready();
+    try {
+      const res = await standaloneApp.inject({ method: 'GET', url: '/' });
+      expect(res.statusCode).toBe(200);
+      expect(res.headers['content-type']).toMatch(/^text\/html/);
+      expect(res.body).toContain('Taori 浏览器入口未启用');
+      expect(res.body).toContain('--password');
+    } finally {
+      await standaloneApp.close();
+      fs.rmSync(standaloneDbPath, { force: true });
+    }
+  });
 });

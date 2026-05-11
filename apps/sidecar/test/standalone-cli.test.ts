@@ -22,12 +22,13 @@ describe('standalone CLI helpers', () => {
   });
 
   it('parses foreground host/port/db flags', () => {
-    expect(parseCliArgs(['--host', '0.0.0.0', '--port', '18901', '--db-path', './tmp.db'])).toEqual({
+    expect(parseCliArgs(['--host', '0.0.0.0', '--port', '18901', '--db-path', './tmp.db', '--password', 'secret'])).toEqual({
       kind: 'serve',
       options: {
         host: '0.0.0.0',
         port: 18901,
         dbPath: path.resolve('./tmp.db'),
+        accessPassword: 'secret',
       },
     });
     expect(parseCliArgs(['serve', '--host', '127.0.0.1', '--port', '17890'])).toEqual({
@@ -40,11 +41,12 @@ describe('standalone CLI helpers', () => {
   });
 
   it('parses daemon lifecycle commands', () => {
-    expect(parseCliArgs(['daemon', 'start', '--host', '0.0.0.0', '--log-file', './daemon.log'])).toEqual({
+    expect(parseCliArgs(['daemon', 'start', '--host', '0.0.0.0', '--log-file', './daemon.log', '--password', 'secret'])).toEqual({
       kind: 'daemon-start',
       options: {
         host: '0.0.0.0',
         logFile: path.resolve('./daemon.log'),
+        accessPassword: 'secret',
       },
     });
     expect(parseCliArgs(['daemon', 'status'])).toEqual({ kind: 'daemon-status' });
@@ -78,12 +80,14 @@ describe('standalone CLI helpers', () => {
       bearer: 'dev_test',
       dbPath: '/tmp/taori.db',
       logFile: '/tmp/taori.log',
+      loginUrl: 'http://0.0.0.0:17890/',
     });
     expect(readDaemonState(stateFile)).toMatchObject({
       pid: process.pid,
       host: '0.0.0.0',
       bindUrl: 'http://0.0.0.0:17890',
       localUrl: 'http://127.0.0.1:17890',
+      loginUrl: 'http://0.0.0.0:17890/',
     });
   });
 
