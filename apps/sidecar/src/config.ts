@@ -25,6 +25,7 @@ function devToken(): string {
 }
 
 export interface SidecarConfig {
+  host: string;
   port: number;
   bearer: string;
   dbPath: string;
@@ -45,6 +46,7 @@ function runtimeDir(): string {
 export function loadConfig(): SidecarConfig {
   const standalone = process.env.TAORI_STANDALONE === '1';
   const isDev = !standalone && process.env.NODE_ENV !== 'production';
+  const host = process.env.SIDECAR_HOST?.trim() || '127.0.0.1';
 
   const port = process.env.SIDECAR_PORT
     ? Number(process.env.SIDECAR_PORT)
@@ -66,6 +68,7 @@ export function loadConfig(): SidecarConfig {
   const controlBearer = process.env.CONTROL_BEARER ?? null;
 
   return {
+    host,
     port,
     bearer,
     dbPath,

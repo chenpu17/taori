@@ -5,9 +5,11 @@ import { openDb } from './db/index.js';
 import { ControlClient } from './control/client.js';
 import { buildKeyStore } from './keystore.js';
 import { buildServer } from './server.js';
+import { formatHttpUrl, normalizeLocalConnectUrl } from './standalone-cli.js';
 
 export interface StartedSidecar {
   config: SidecarConfig;
+  bindUrl: string;
   port: number;
   bearer: string;
   url: string;
@@ -35,10 +37,12 @@ export async function startSidecar(args?: {
   const startedAt = Date.now();
 
   const app = buildServer({ config, db, control, keystore, startedAt });
-  const address = await app.listen({ host: '127.0.0.1', port: config.port });
+  const address = await app.listen({ host: config.host ?? '127.0.0.1', port: config.port });
   const url = new URL(address);
   const port = Number(url.port);
-  const href = `http://127.0.0.1:${port}`;
+  const bindHost = config.host ?? '127.0.0.1';
+  const bindUrl = formatHttpUrl(bindHost, port);
+  const href = normalizeLocalConnectUrl(bindHost, port);
 
   const { ProvidersRepo, ModelsRepo } = await import('./db/repos/index.js');
   const { scheduleCatalogSync } = await import('./catalog/index.js');
@@ -54,11 +58,11 @@ export async function startSidecar(args?: {
 
   if (config.isDev) {
     process.stderr.write(
-      `[sidecar] dev mode listening on ${href} (control=${config.controlUrl ? 'configured' : 'none'})\n`,
+      `[sidecar] dev mode listening on ${bindUrl} (local=${href}, control=${config.controlUrl ? 'configured' : 'none'})\n`,
     );
   }
   if (config.standalone) {
-    process.stderr.write(`[sidecar] standalone mode listening on ${href}\n`);
+    process.stderr.write(`[sidecar] standalone mode listening on ${bindUrl} (local=${href})\n`);
   }
 
   let shuttingDown = false;
@@ -86,6 +90,7 @@ export async function startSidecar(args?: {
 
   return {
     config,
+    bindUrl,
     port,
     bearer: config.bearer,
     url: href,
