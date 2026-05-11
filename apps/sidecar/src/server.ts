@@ -634,6 +634,8 @@ function resolveStandaloneWebAssets(config: SidecarConfig): string | null {
   if (!config.standalone) return null;
   const currentDir = path.dirname(fileURLToPath(import.meta.url));
   const candidates = [
+    // npm global install: <prefix>/lib/node_modules/@chenpu17/taori/dist/cli.cjs → ../dist-web
+    path.resolve(currentDir, '..', 'dist-web'),
     path.resolve(currentDir, '..', '..', '..', 'packages', 'npm', 'dist-web'),
     path.resolve(process.cwd(), 'packages', 'npm', 'dist-web'),
     path.resolve(process.cwd(), 'dist-web'),
