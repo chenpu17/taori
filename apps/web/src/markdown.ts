@@ -18,9 +18,19 @@ marked.setOptions({
   breaks: true,
 });
 
+// DeepSeek uses <｜｜DSML｜｜tool_calls>…</｜｜DSML｜｜tool_calls> XML blocks
+// embedded in text content. These are tool call artifacts that should not
+// be shown to the user; strip them before rendering.
+const DSML_BLOCK_RE = /<\uFF5C\uFF5CDSML\uFF5C\uFF5C[\s\S]*?(?:<\/\uFF5C\uFF5CDSML\uFF5C\uFF5Ctool_calls>|$)/g;
+
+export function stripModelArtifacts(src: string): string {
+  return src.replace(DSML_BLOCK_RE, '').trim();
+}
+
 export function renderMarkdown(src: string): string {
   if (!src) return '';
-  const html = marked.parse(src, { async: false }) as string;
+  const cleaned = stripModelArtifacts(src);
+  const html = marked.parse(cleaned, { async: false }) as string;
   const sanitized = DOMPurify.sanitize(html, {
     ALLOWED_TAGS: [
       'p', 'br', 'strong', 'em', 'del', 'code', 'pre', 'blockquote',
