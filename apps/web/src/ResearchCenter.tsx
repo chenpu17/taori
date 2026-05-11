@@ -44,6 +44,12 @@ const STAGE_LABELS: Record<ResearchStage, string> = {
   finalized: '定稿',
 };
 
+function deriveTitle(objective: string): string {
+  const first = objective.trim().split(/[\n。.!?！？]/)[0].trim();
+  if (!first) return '未命名研究';
+  return first.length > 50 ? first.slice(0, 50) + '…' : first;
+}
+
 function formatAgo(ts: number): string {
   const diff = Math.max(0, Date.now() - ts);
   if (diff < 60_000) return '刚刚';
@@ -71,7 +77,6 @@ export function ResearchCenter(): JSX.Element {
   const [error, setError] = useState<string | null>(null);
   const [actionBusy, setActionBusy] = useState<string | null>(null);
 
-  const [title, setTitle] = useState('');
   const [objective, setObjective] = useState('');
   const [outputKind, setOutputKind] = useState<ResearchOutputKind>('report');
   const [budgetMode, setBudgetMode] = useState<ResearchBudgetMode>('balanced');
@@ -142,20 +147,20 @@ export function ResearchCenter(): JSX.Element {
     [selectedId, sessions],
   );
 
-  const createDisabled = title.trim().length === 0 || objective.trim().length === 0 || actionBusy === 'create';
+  const startDisabled = objective.trim().length === 0 || actionBusy === 'quick-start';
 
   const refreshCurrent = useCallback(async (next: ResearchSessionDetail) => {
     setDetail(next);
     await loadSessions(next.session.id);
   }, [loadSessions]);
 
-  const handleCreate = useCallback(async () => {
-    if (createDisabled) return;
-    setActionBusy('create');
+  const handleQuickStart = useCallback(async () => {
+    if (startDisabled) return;
+    setActionBusy('quick-start');
     setError(null);
     try {
       const created = await api.createResearchSession({
-        title: title.trim(),
+        title: deriveTitle(objective),
         objective: objective.trim(),
         output_kind: outputKind,
         budget_mode: budgetMode,
@@ -171,7 +176,6 @@ export function ResearchCenter(): JSX.Element {
           min_citations: minCitations.trim() ? Number(minCitations) : null,
         },
       });
-      setTitle('');
       setObjective('');
       setBudgetLimitUsd('');
       setTimeRange('');
@@ -179,7 +183,9 @@ export function ResearchCenter(): JSX.Element {
       setLanguage('');
       setMustCover('');
       setMinCitations('');
-      await loadSessions(created.id);
+      // Auto-start with plan + confirm in one shot
+      const started = await api.startResearchSession(created.id, { confirm: true });
+      await refreshCurrent(started);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
@@ -188,28 +194,25 @@ export function ResearchCenter(): JSX.Element {
   }, [
     budgetLimitUsd,
     budgetMode,
-    createDisabled,
     language,
-    loadSessions,
     minCitations,
     mustCover,
     objective,
     outputKind,
     region,
+    startDisabled,
     timeRange,
-    title,
+    refreshCurrent,
   ]);
 
   const runAction = useCallback(async (
-    action: 'preview' | 'confirm' | 'pause' | 'resume' | 'cancel' | 'export-json' | 'export-markdown',
+    action: 'confirm' | 'pause' | 'resume' | 'cancel' | 'export-json' | 'export-markdown',
   ) => {
     if (!selectedId) return;
     setActionBusy(action);
     setError(null);
     try {
-      if (action === 'preview') {
-        await refreshCurrent(await api.startResearchSession(selectedId, { confirm: false }));
-      } else if (action === 'confirm') {
+      if (action === 'confirm') {
         await refreshCurrent(await api.startResearchSession(selectedId, { confirm: true }));
       } else if (action === 'pause') {
         await refreshCurrent(await api.pauseResearchSession(selectedId));
@@ -250,62 +253,49 @@ export function ResearchCenter(): JSX.Element {
     <div className="research-center" data-testid="research-center">
       <div className="research-center__layout">
         <aside className="research-center__sidebar">
-          <section className="research-center__card">
+          <section className="research-center__card research-center__new-task">
             <div className="research-center__card-head">
               <div>
-                <h3>新建研究任务</h3>
-                <p className="hint">填写主题与目标，预览计划后即可启动自动检索。</p>
+                <h3>新建研究</h3>
               </div>
             </div>
             <div className="research-center__form">
-                <label>
-                  <span>标题</span>
-                  <input
-                    value={title}
-                    onChange={(e) => setTitle(e.target.value)}
-                    placeholder="如：2026 AI Coding 产品格局"
-                    data-testid="research-input-title"
-                  />
-                </label>
-                <label>
-                  <span>研究目标</span>
-                  <textarea
-                    value={objective}
-                    onChange={(e) => setObjective(e.target.value)}
-                    rows={3}
-                    placeholder="说明要解决的问题、期望产出和判断标准。"
-                    data-testid="research-input-objective"
-                  />
-                </label>
-                <div className="research-center__form-grid">
-                  <label>
-                    <span>产出</span>
-                    <select
-                      value={outputKind}
-                      onChange={(e) => setOutputKind(e.target.value as ResearchOutputKind)}
-                      data-testid="research-input-output-kind"
-                    >
-                      {Object.entries(OUTPUT_KIND_LABELS).map(([key, label]) => (
-                        <option key={key} value={key}>{label}</option>
-                      ))}
-                    </select>
-                  </label>
-                  <label>
-                    <span>预算模式</span>
-                    <select
-                      value={budgetMode}
-                      onChange={(e) => setBudgetMode(e.target.value as ResearchBudgetMode)}
-                      data-testid="research-input-budget-mode"
-                    >
-                      {Object.entries(BUDGET_MODE_LABELS).map(([key, label]) => (
-                        <option key={key} value={key}>{label}</option>
-                      ))}
-                    </select>
-                  </label>
-              </div>
+                <textarea
+                  value={objective}
+                  onChange={(e) => setObjective(e.target.value)}
+                  rows={4}
+                  placeholder="你想研究什么？如：2026年 AI Coding 工具的发展趋势与竞争格局"
+                  data-testid="research-input-objective"
+                />
                 <details className="research-center__advanced-opts">
                 <summary>高级选项</summary>
                 <div className="research-center__form research-center__advanced-grid">
+                  <div className="research-center__form-grid">
+                    <label>
+                      <span>产出</span>
+                      <select
+                        value={outputKind}
+                        onChange={(e) => setOutputKind(e.target.value as ResearchOutputKind)}
+                        data-testid="research-input-output-kind"
+                      >
+                        {Object.entries(OUTPUT_KIND_LABELS).map(([key, label]) => (
+                          <option key={key} value={key}>{label}</option>
+                        ))}
+                      </select>
+                    </label>
+                    <label>
+                      <span>预算模式</span>
+                      <select
+                        value={budgetMode}
+                        onChange={(e) => setBudgetMode(e.target.value as ResearchBudgetMode)}
+                        data-testid="research-input-budget-mode"
+                      >
+                        {Object.entries(BUDGET_MODE_LABELS).map(([key, label]) => (
+                          <option key={key} value={key}>{label}</option>
+                        ))}
+                      </select>
+                    </label>
+                  </div>
                   <div className="research-center__form-grid">
                     <label>
                       <span>预算上限 USD</span>
@@ -371,11 +361,11 @@ export function ResearchCenter(): JSX.Element {
               <button
                 type="button"
                 className="research-center__primary-btn"
-                disabled={createDisabled}
-                onClick={() => void handleCreate()}
-                data-testid="research-create"
+                disabled={startDisabled}
+                onClick={() => void handleQuickStart()}
+                data-testid="research-quick-start"
               >
-                {actionBusy === 'create' ? '创建中…' : '创建研究任务'}
+                {actionBusy === 'quick-start' ? '启动中…' : '开始深度研究'}
               </button>
             </div>
           </section>
@@ -412,7 +402,7 @@ export function ResearchCenter(): JSX.Element {
             ) : (
               <EmptyState
                 title="还没有深度研究任务"
-                hint="先创建一个研究主题，再生成计划预览。"
+                hint="输入研究目标，点击「开始深度研究」即可。"
                 icon="🔎"
                 compact
                 tone="muted"
@@ -455,28 +445,17 @@ export function ResearchCenter(): JSX.Element {
                   <span><small>引用目标</small><strong>{detail.session.constraints.min_citations ?? '未设'}</strong></span>
                 </div>
                 <div className="research-center__action-row">
-                  <button
-                    type="button"
-                    className="research-center__primary-btn"
-                    disabled={actionBusy != null}
-                    onClick={() => void runAction('preview')}
-                    data-testid="research-action-preview"
-                  >
-                    {actionBusy === 'preview' ? '生成中…' : '生成计划预览'}
-                  </button>
-                  <button
-                    type="button"
-                    className="research-center__confirm-btn"
-                    disabled={
-                      actionBusy != null ||
-                      !detail.session.plan ||
-                      (detail.session.status !== 'draft' && detail.session.status !== 'reviewing')
-                    }
-                    onClick={() => void runAction('confirm')}
-                    data-testid="research-action-confirm"
-                  >
-                    {actionBusy === 'confirm' ? '启动中…' : '确认开始'}
-                  </button>
+                  {(detail.session.status === 'draft' || detail.session.status === 'reviewing') && (
+                    <button
+                      type="button"
+                      className="research-center__primary-btn"
+                      disabled={actionBusy != null}
+                      onClick={() => void runAction('confirm')}
+                      data-testid="research-action-confirm"
+                    >
+                      {actionBusy === 'confirm' ? '启动中…' : '立即开始'}
+                    </button>
+                  )}
                   <button
                     type="button"
                     className="research-center__ghost-btn"
@@ -611,7 +590,7 @@ export function ResearchCenter(): JSX.Element {
                       ))}
                     </div>
                   ) : (
-                    <p className="hint">确认开始后会生成研究任务清单。</p>
+                    <p className="hint">开始后将自动生成研究任务清单。</p>
                   )}
                   <div className="research-center__subsection">
                     <h4>来源 <span className="research-center__count">{detail.sources.length}</span></h4>
@@ -642,7 +621,7 @@ export function ResearchCenter(): JSX.Element {
                     ) : detail.session.status === 'running' ? (
                       <p className="hint">正在检索证据，稍候即可看到来源…</p>
                     ) : (
-                      <p className="hint">确认开始后，自动检索会在这里写入证据。</p>
+                      <p className="hint">开始后自动检索会在这里写入证据。</p>
                     )}
                   </div>
                   <div className="research-center__subsection">
@@ -681,7 +660,7 @@ export function ResearchCenter(): JSX.Element {
                 <div className="research-center__card-head">
                   <div>
                     <h3>当前草稿</h3>
-                    <p className="hint">确认开始后会生成一个可继续补充的研究骨架。</p>
+                    <p className="hint">开始后将生成可继续补充的研究骨架。</p>
                   </div>
                 </div>
                 <pre className="research-center__markdown" data-testid="research-draft">

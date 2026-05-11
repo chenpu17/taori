@@ -7,11 +7,10 @@ test.beforeEach(async () => {
   await seedDefaultModel(env);
 });
 
-test('research center supports create, preview, start, lifecycle actions, and export', async ({
+test('research center supports quick start, lifecycle actions, and export', async ({
   page,
 }) => {
   test.setTimeout(60_000);
-  const title = `AI Coding 格局 ${Date.now()}`;
 
   await page.goto('/');
   await expect(page.getByTestId('chat-panel')).toBeVisible({ timeout: 15_000 });
@@ -19,10 +18,13 @@ test('research center supports create, preview, start, lifecycle actions, and ex
   await page.getByTestId('workspace-tab-research').click();
   await expect(page.getByTestId('research-center')).toBeVisible();
 
-  await page.getByTestId('research-input-title').fill(title);
+  // Fill goal — title auto-derived from this text
   await page.getByTestId('research-input-objective').fill(
     '梳理 2026 年 AI Coding 产品的定位、价格、速度与风险差异。',
   );
+
+  // Open advanced options and configure
+  await page.locator('.research-center__advanced-opts summary').click();
   await page.getByTestId('research-input-output-kind').selectOption('comparison');
   await page.getByTestId('research-input-budget-mode').selectOption('deep');
   await page.getByTestId('research-input-budget-limit').fill('15');
@@ -31,23 +33,15 @@ test('research center supports create, preview, start, lifecycle actions, and ex
   await page.getByTestId('research-input-region').fill('全球');
   await page.getByTestId('research-input-language').fill('中文 + 英文');
   await page.getByTestId('research-input-must-cover').fill('价格, 速度, 风险');
-  await page.getByTestId('research-create').click();
 
+  // One-click start: creates session, generates plan, and confirms in one shot
+  await page.getByTestId('research-quick-start').click();
+
+  // Should go directly to running state
   await expect(page.getByTestId('research-session-list')).toBeVisible();
-  await expect(page.getByTestId('research-center')).toContainText(title);
-  await expect(page.getByTestId('research-plan-empty')).toBeVisible();
-  await expect(page.getByTestId('research-action-confirm')).toBeDisabled();
-
-  await page.getByTestId('research-action-preview').click();
-  await expect(page.getByTestId('research-plan')).toBeVisible();
-  await expect(page.getByTestId('research-plan')).toContainText('关键问题');
-  await expect(page.getByTestId('research-center')).toContainText('待确认');
-  await expect(page.getByTestId('research-action-confirm')).toBeEnabled();
-
-  await page.getByTestId('research-action-confirm').click();
-  await expect(page.getByTestId('research-task-list')).toBeVisible();
-  await expect(page.getByTestId('research-draft')).toContainText(`# ${title}`);
+  await expect(page.getByTestId('research-task-list')).toBeVisible({ timeout: 10_000 });
   await expect(page.getByTestId('research-center')).toContainText('进行中');
+  await expect(page.getByTestId('research-draft')).not.toContainText('（尚未生成草稿）');
 
   await page.getByTestId('research-action-pause').click();
   await expect(page.getByTestId('research-center')).toContainText('已暂停');
