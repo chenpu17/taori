@@ -1165,9 +1165,10 @@ export function ModelCenter({
                     </button>
                     <button
                       type="button"
-                      className="model-center-action-btn model-center-action-btn--secondary"
+                      className="model-center-action-btn model-center-action-btn--danger"
                       onClick={() => void onDeleteProvider(selectedProvider)}
                       data-testid={`provider-detail-delete-${selectedProvider.id}`}
+                      title="删除该 Provider 及其所有已管理模型，操作不可恢复"
                     >
                       删除
                     </button>
