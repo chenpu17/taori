@@ -272,7 +272,7 @@ export function ResearchCenter(): JSX.Element {
                   <textarea
                     value={objective}
                     onChange={(e) => setObjective(e.target.value)}
-                    rows={5}
+                    rows={3}
                     placeholder="说明要解决的问题、期望产出和判断标准。"
                     data-testid="research-input-objective"
                   />
@@ -303,66 +303,71 @@ export function ResearchCenter(): JSX.Element {
                     </select>
                   </label>
               </div>
-                <div className="research-center__form-grid">
-                  <label>
-                    <span>预算上限 USD</span>
-                    <input
-                      value={budgetLimitUsd}
-                      onChange={(e) => setBudgetLimitUsd(e.target.value)}
-                      placeholder="可留空"
-                      data-testid="research-input-budget-limit"
-                    />
-                  </label>
-                  <label>
-                    <span>最低引用数</span>
-                    <input
-                      value={minCitations}
-                      onChange={(e) => setMinCitations(e.target.value)}
-                      placeholder="可留空"
-                      data-testid="research-input-min-citations"
-                    />
-                  </label>
+                <details className="research-center__advanced-opts">
+                <summary>高级选项</summary>
+                <div className="research-center__form research-center__advanced-grid">
+                  <div className="research-center__form-grid">
+                    <label>
+                      <span>预算上限 USD</span>
+                      <input
+                        value={budgetLimitUsd}
+                        onChange={(e) => setBudgetLimitUsd(e.target.value)}
+                        placeholder="可留空"
+                        data-testid="research-input-budget-limit"
+                      />
+                    </label>
+                    <label>
+                      <span>最低引用数</span>
+                      <input
+                        value={minCitations}
+                        onChange={(e) => setMinCitations(e.target.value)}
+                        placeholder="可留空"
+                        data-testid="research-input-min-citations"
+                      />
+                    </label>
+                  </div>
+                  <div className="research-center__form-grid">
+                    <label>
+                      <span>时间范围</span>
+                      <input
+                        value={timeRange}
+                        onChange={(e) => setTimeRange(e.target.value)}
+                        placeholder="如：近 12 个月"
+                        data-testid="research-input-time-range"
+                      />
+                    </label>
+                    <label>
+                      <span>区域</span>
+                      <input
+                        value={region}
+                        onChange={(e) => setRegion(e.target.value)}
+                        placeholder="如：中国 / 全球"
+                        data-testid="research-input-region"
+                      />
+                    </label>
+                  </div>
+                  <div className="research-center__form-grid">
+                    <label>
+                      <span>语言</span>
+                      <input
+                        value={language}
+                        onChange={(e) => setLanguage(e.target.value)}
+                        placeholder="如：中文 + 英文"
+                        data-testid="research-input-language"
+                      />
+                    </label>
+                    <label>
+                      <span>必须覆盖</span>
+                      <input
+                        value={mustCover}
+                        onChange={(e) => setMustCover(e.target.value)}
+                        placeholder="逗号分隔，如价格、速度、风险"
+                        data-testid="research-input-must-cover"
+                      />
+                    </label>
+                  </div>
                 </div>
-                <div className="research-center__form-grid">
-                  <label>
-                    <span>时间范围</span>
-                    <input
-                      value={timeRange}
-                      onChange={(e) => setTimeRange(e.target.value)}
-                      placeholder="如：近 12 个月"
-                      data-testid="research-input-time-range"
-                    />
-                  </label>
-                  <label>
-                    <span>区域</span>
-                    <input
-                      value={region}
-                      onChange={(e) => setRegion(e.target.value)}
-                      placeholder="如：中国 / 全球"
-                      data-testid="research-input-region"
-                    />
-                  </label>
-                </div>
-                <div className="research-center__form-grid">
-                  <label>
-                    <span>语言</span>
-                    <input
-                      value={language}
-                      onChange={(e) => setLanguage(e.target.value)}
-                      placeholder="如：中文 + 英文"
-                      data-testid="research-input-language"
-                    />
-                  </label>
-                  <label>
-                    <span>必须覆盖</span>
-                    <input
-                      value={mustCover}
-                      onChange={(e) => setMustCover(e.target.value)}
-                      placeholder="逗号分隔，如价格、速度、风险"
-                      data-testid="research-input-must-cover"
-                    />
-                  </label>
-                </div>
+              </details>
               <button
                 type="button"
                 className="research-center__primary-btn"
