@@ -190,6 +190,19 @@ async function sendAndWait(page: Page, text: string): Promise<void> {
   });
 }
 
+async function sendCurrentComposerAndWait(page: Page): Promise<void> {
+  const before = await page.locator('.msg.assistant').count();
+  await page.getByTestId('composer-send').click();
+  await expect
+    .poll(async () => await page.locator('.msg.assistant').count(), {
+      timeout: 30_000,
+    })
+    .toBeGreaterThan(before);
+  await expect(page.locator('.msg.assistant').last()).toContainText('混合协作回复', {
+    timeout: 20_000,
+  });
+}
+
 async function dropTinyImage(page: Page): Promise<void> {
   await page.getByTestId('composer-form').evaluate((el, b64) => {
     const bin = atob(b64);
@@ -211,6 +224,35 @@ async function continueCostConfirmIfVisible(page: Page): Promise<void> {
   if (visible) {
     await dialog.getByTestId('cost-confirm-continue').click();
   }
+}
+
+async function runQuickCompare(
+  page: Page,
+  prompt: string,
+  options?: { selectedCount?: 2 | 3 },
+): Promise<void> {
+  const selectedCount = options?.selectedCount ?? 3;
+  await page.getByTestId('composer-input').fill(prompt);
+  await page.getByTestId('composer-quick-compare').click();
+  const picker = page.getByTestId('quick-compare-picker');
+  await expect(picker).toBeVisible({ timeout: 10_000 });
+  await expect(picker.getByTestId('quick-compare-picker-count')).toContainText('已选 3/3');
+  if (selectedCount === 2) {
+    await picker.locator('[data-testid^="quick-compare-model-check-"]').nth(2).uncheck();
+    await expect(picker.getByTestId('quick-compare-picker-count')).toContainText('已选 2/3');
+  }
+  await picker.getByTestId('quick-compare-picker-submit').click();
+  await expect(page.getByTestId('quick-compare-card')).toBeVisible({ timeout: 20_000 });
+  await expect(page.getByTestId('quick-compare-output')).toHaveCount(selectedCount, {
+    timeout: 20_000,
+  });
+  await expect(page.getByTestId('quick-compare-decision-report')).toBeVisible();
+}
+
+async function expectActiveConversationId(page: Page): Promise<string> {
+  const convId = await page.getByTestId('chat-panel').getAttribute('data-active-conv');
+  expect(convId).toBeTruthy();
+  return convId!;
 }
 
 type CostCallLogRow = {
@@ -589,4 +631,380 @@ test('generated image can be re-attached for vision review, then summarized by a
   await expect(page.locator('.msg.assistant')).toHaveCount(4);
   await costLogShouldContain((row) => row.model_name_snapshot === 'mock-image-maker' && row.success);
   await costLogShouldContain((row) => row.model_name_snapshot === 'mock-vision-reviewer' && row.success);
+});
+
+test('quick compare adoption can hand off to tool fetch in the same conversation', async ({
+  page,
+}) => {
+  test.setTimeout(150_000);
+  const { toolId } = await seedStack();
+  await suppressTips(page);
+
+  await page.goto('/');
+  await expect(page.getByTestId('chat-panel')).toBeVisible({ timeout: 10_000 });
+
+  await runQuickCompare(page, '给我三个适合发布复盘的行动方向');
+  await page.getByTestId('quick-compare-adopt-recommended').click();
+  await expect(page.getByTestId('quick-compare-card')).toHaveCount(0, { timeout: 20_000 });
+  const convId = await expectActiveConversationId(page);
+
+  const before = mockRequests.length;
+  const fetchReq = page.waitForRequest((req) => req.url().endsWith('/v1/chat') && req.method() === 'POST');
+  await page.getByTestId('active-model').selectOption(toolId);
+  await sendAndWait(page, '抓取网页 https://example.com/ ，并沿用刚才的推荐方案展开执行建议');
+  const fetchBody = JSON.parse((await fetchReq).postData() ?? '{}') as {
+    model_id?: string;
+    conversation_id?: string;
+  };
+  expect(fetchBody.model_id).toBe(toolId);
+  expect(fetchBody.conversation_id).toBe(convId);
+  await expect
+    .poll(() => mockRequests.slice(before).some((req) => req.toolNames.includes('web_fetch')), {
+      timeout: 15_000,
+    })
+    .toBe(true);
+  await expect(page.locator('[data-testid="tool-trace-step"][data-tool="builtin.web_fetch"]').last()).toBeVisible();
+});
+
+test('quick compare follow-up draft can be sent by the fast model in the same conversation', async ({
+  page,
+}) => {
+  test.setTimeout(150_000);
+  const { fastId } = await seedStack();
+  await suppressTips(page);
+
+  await page.goto('/');
+  await expect(page.getByTestId('chat-panel')).toBeVisible({ timeout: 10_000 });
+  await sendAndWait(page, '先建立一条用于比较发布方案的会话');
+  const convId = await expectActiveConversationId(page);
+
+  await runQuickCompare(page, '并行比较一下同一发布方案的三个表达版本');
+  await page.getByTestId('quick-compare-draft-follow-up').click();
+  await expect(page.getByTestId('composer-input')).toContainText('最终推荐方案');
+
+  const followReq = page.waitForRequest((req) => req.url().endsWith('/v1/chat') && req.method() === 'POST');
+  await page.getByTestId('active-model').selectOption(fastId);
+  await sendCurrentComposerAndWait(page);
+  const followBody = JSON.parse((await followReq).postData() ?? '{}') as {
+    model_id?: string;
+    conversation_id?: string;
+  };
+  expect(followBody.model_id).toBe(fastId);
+  expect(followBody.conversation_id).toBe(convId);
+  await expect(page.getByTestId('chat-panel')).toHaveAttribute('data-active-conv', convId);
+});
+
+test('quick compare minority review can switch to a tool model and trigger web search in one thread', async ({
+  page,
+}) => {
+  test.setTimeout(150_000);
+  const { toolId } = await seedStack();
+  await suppressTips(page);
+
+  await page.goto('/');
+  await expect(page.getByTestId('chat-panel')).toBeVisible({ timeout: 10_000 });
+  await sendAndWait(page, '先建立一条需要挑战推荐结论的讨论会话');
+  const convId = await expectActiveConversationId(page);
+
+  await runQuickCompare(page, '并行比较一下这次方案里最可能被忽略的风险');
+  await page.getByTestId('quick-compare-draft-minority-review').click();
+  await expect(page.getByTestId('composer-input')).toContainText('少数意见最强论据');
+  const drafted = await page.getByTestId('composer-input').inputValue();
+  await page
+    .getByTestId('composer-input')
+    .fill(`${drafted}\n\n请搜索 Taori 多模型助手相关资料，再用少数意见反驳推荐结论。`);
+
+  const before = mockRequests.length;
+  const searchReq = page.waitForRequest((req) => req.url().endsWith('/v1/chat') && req.method() === 'POST');
+  await page.getByTestId('active-model').selectOption(toolId);
+  await sendCurrentComposerAndWait(page);
+  const searchBody = JSON.parse((await searchReq).postData() ?? '{}') as {
+    model_id?: string;
+    conversation_id?: string;
+  };
+  expect(searchBody.model_id).toBe(toolId);
+  expect(searchBody.conversation_id).toBe(convId);
+  await expect
+    .poll(() => mockRequests.slice(before).some((req) => req.toolNames.includes('web_search')), {
+      timeout: 15_000,
+    })
+    .toBe(true);
+});
+
+test('quick compare recommended cost focus opens the cost dashboard and highlights the suggested record', async ({
+  page,
+}) => {
+  test.setTimeout(120_000);
+  await seedStack();
+  await suppressTips(page);
+
+  await page.goto('/');
+  await expect(page.getByTestId('chat-panel')).toBeVisible({ timeout: 10_000 });
+
+  await runQuickCompare(page, '比较三个适合用在产品评审里的结论模板');
+  await expect(page.getByTestId('quick-compare-open-cost-focus')).toBeVisible();
+  await page.getByTestId('quick-compare-open-cost-focus').click();
+
+  await expect(page.getByTestId('cost-dashboard-panel')).toBeVisible();
+  await visibleCostDashboardShouldLoad(page);
+  const focusedCall = page.locator('[data-testid="cost-call-log-row"][data-focused="1"]').first();
+  await expect(focusedCall).toBeVisible();
+  await expect(focusedCall.getByTestId('cost-call-source-id')).toContainText('Cost');
+});
+
+test('image session memory survives quick compare adoption and skips the picker on the next image turn', async ({
+  page,
+}) => {
+  test.setTimeout(150_000);
+  const { imageId } = await seedStack();
+  await suppressTips(page);
+  await page.route('**/v1/tools/invoke', async (route) => {
+    await route.continue({
+      headers: {
+        ...route.request().headers(),
+        'x-test-force-image-result': 'success',
+      },
+    });
+  });
+
+  await page.goto('/');
+  await expect(page.getByTestId('chat-panel')).toBeVisible({ timeout: 10_000 });
+
+  await page.getByTestId('composer-input').fill('/image 先生成第一张发布路线图');
+  await page.getByTestId('composer-send').click();
+  const firstPicker = page.getByTestId('image-picker-dialog');
+  await expect(firstPicker).toBeVisible({ timeout: 10_000 });
+  await expect(firstPicker.getByTestId(`image-model-radio-${imageId}`)).toBeChecked();
+  await firstPicker.getByTestId('image-memory-session').check();
+  await firstPicker.getByTestId('image-picker-submit').click();
+  await continueCostConfirmIfVisible(page);
+  await expect(page.getByTestId('msg-tool-images')).toHaveCount(1, { timeout: 30_000 });
+  const convId = await expectActiveConversationId(page);
+
+  await runQuickCompare(page, '基于刚才的路线图，比较三个不同的复盘摘要版本');
+  await page.getByTestId('quick-compare-adopt-recommended').click();
+  await expect(page.getByTestId('quick-compare-card')).toHaveCount(0, { timeout: 20_000 });
+  await expect(page.getByTestId('chat-panel')).toHaveAttribute('data-active-conv', convId);
+
+  await page.getByTestId('composer-input').fill('/image 再生成一张第二阶段路线图');
+  await page.getByTestId('composer-send').click();
+  await expect(page.getByTestId('image-picker-dialog')).toHaveCount(0);
+  await continueCostConfirmIfVisible(page);
+  await expect(page.getByTestId('msg-tool-images')).toHaveCount(2, { timeout: 30_000 });
+});
+
+test('fast to vision to tool to quick compare adoption stays on one conversation', async ({
+  page,
+}) => {
+  test.setTimeout(180_000);
+  const { toolId, visionId } = await seedStack();
+  await suppressTips(page);
+
+  await page.goto('/');
+  await expect(page.getByTestId('chat-panel')).toBeVisible({ timeout: 10_000 });
+  await sendAndWait(page, '先建立一条跨模型协作的视觉交付会话');
+  const convId = await expectActiveConversationId(page);
+
+  await dropTinyImage(page);
+  await expect(page.getByTestId('attachment-thumb')).toHaveAttribute('data-kind', 'image');
+  await expect(page.getByTestId('active-model')).toHaveValue(visionId, { timeout: 10_000 });
+  const visionReq = page.waitForRequest((req) => req.url().endsWith('/v1/chat') && req.method() === 'POST');
+  await sendAndWait(page, '先理解这张图，再给出适合发布页的三个视觉元素');
+  const visionBody = JSON.parse((await visionReq).postData() ?? '{}') as {
+    model_id?: string;
+    conversation_id?: string;
+    attachments?: unknown[];
+  };
+  expect(visionBody.model_id).toBe(visionId);
+  expect(visionBody.conversation_id).toBe(convId);
+  expect(visionBody.attachments?.length).toBeGreaterThan(0);
+
+  const before = mockRequests.length;
+  const toolReq = page.waitForRequest((req) => req.url().endsWith('/v1/chat') && req.method() === 'POST');
+  await page.getByTestId('active-model').selectOption(toolId);
+  await sendAndWait(page, '抓取网页 https://example.com/ ，并结合图片元素给出落地建议');
+  const toolBody = JSON.parse((await toolReq).postData() ?? '{}') as {
+    model_id?: string;
+    conversation_id?: string;
+  };
+  expect(toolBody.model_id).toBe(toolId);
+  expect(toolBody.conversation_id).toBe(convId);
+  await expect
+    .poll(() => mockRequests.slice(before).some((req) => req.toolNames.includes('web_fetch')), {
+      timeout: 15_000,
+    })
+    .toBe(true);
+
+  await runQuickCompare(page, '把刚才的图片理解和网页建议再做一次多模型对比');
+  await page.getByTestId('quick-compare-adopt-recommended').click();
+  await expect(page.getByTestId('quick-compare-card')).toHaveCount(0, { timeout: 20_000 });
+  await expect(page.getByTestId('chat-panel')).toHaveAttribute('data-active-conv', convId);
+});
+
+test('two conversations keep quick compare adoptions isolated and restorable from the sidebar', async ({
+  page,
+}) => {
+  test.setTimeout(150_000);
+  await seedStack();
+  await suppressTips(page);
+
+  await page.goto('/');
+  await expect(page.getByTestId('chat-panel')).toBeVisible({ timeout: 10_000 });
+
+  await runQuickCompare(page, '会话 A：比较三种适合给管理层汇报的表达方式');
+  await page.getByTestId('quick-compare-adopt-recommended').click();
+  await expect(page.getByTestId('quick-compare-card')).toHaveCount(0, { timeout: 20_000 });
+  const convA = await expectActiveConversationId(page);
+  await expect(page.locator('.msg.user').last()).toContainText('会话 A：比较三种适合给管理层汇报的表达方式');
+
+  await page.getByTestId('sidebar-new').click();
+  await expect(page.getByTestId('chat-panel')).toHaveAttribute('data-active-conv', '');
+
+  await runQuickCompare(page, '会话 B：比较三种适合给执行团队同步的表达方式');
+  await page.getByTestId('quick-compare-adopt-recommended').click();
+  await expect(page.getByTestId('quick-compare-card')).toHaveCount(0, { timeout: 20_000 });
+  const convB = await expectActiveConversationId(page);
+  expect(convB).not.toBe(convA);
+  await expect(page.locator('.msg.user').last()).toContainText('会话 B：比较三种适合给执行团队同步的表达方式');
+
+  await page.locator(`[data-testid="conv-item"][data-conv-id="${convA}"]`).click();
+  await expect(page.getByTestId('chat-panel')).toHaveAttribute('data-active-conv', convA);
+  await expect(page.locator('.msg.user').last()).toContainText('会话 A：比较三种适合给管理层汇报的表达方式');
+
+  await page.locator(`[data-testid="conv-item"][data-conv-id="${convB}"]`).click();
+  await expect(page.getByTestId('chat-panel')).toHaveAttribute('data-active-conv', convB);
+  await expect(page.locator('.msg.user').last()).toContainText('会话 B：比较三种适合给执行团队同步的表达方式');
+});
+
+test('quick compare adoption can be followed by image generation, image understanding, and fast summary', async ({
+  page,
+}) => {
+  test.setTimeout(180_000);
+  const { fastId, toolId, visionId, imageId } = await seedStack();
+  await suppressTips(page);
+  await page.route('**/v1/tools/invoke', async (route) => {
+    await route.continue({
+      headers: {
+        ...route.request().headers(),
+        'x-test-force-image-result': 'success',
+      },
+    });
+  });
+
+  await page.goto('/');
+  await expect(page.getByTestId('chat-panel')).toBeVisible({ timeout: 10_000 });
+
+  await runQuickCompare(page, '先比较三种适合活动海报的创意方向');
+  await page.getByTestId('quick-compare-adopt-recommended').click();
+  await expect(page.getByTestId('quick-compare-card')).toHaveCount(0, { timeout: 20_000 });
+  const convId = await expectActiveConversationId(page);
+
+  await page.getByTestId('active-model').selectOption(toolId);
+  await page.getByTestId('composer-input').fill('/image 根据刚才推荐方向生成一张活动海报');
+  await page.getByTestId('composer-send').click();
+  const picker = page.getByTestId('image-picker-dialog');
+  await expect(picker).toBeVisible({ timeout: 10_000 });
+  await expect(picker.getByTestId(`image-model-radio-${imageId}`)).toBeChecked();
+  await picker.getByTestId('image-picker-submit').click();
+  await continueCostConfirmIfVisible(page);
+  await expect(page.getByTestId('msg-tool-images')).toHaveCount(1, { timeout: 30_000 });
+  await expect(page.getByTestId('chat-panel')).toHaveAttribute('data-active-conv', convId);
+
+  await page.getByTestId('tool-image-understand').last().click();
+  await expect(page.getByTestId('active-model')).toHaveValue(visionId, { timeout: 10_000 });
+  const visionReq = page.waitForRequest((req) => req.url().endsWith('/v1/chat') && req.method() === 'POST');
+  await sendAndWait(page, '理解这张图片，并指出一个最值得强化的细节');
+  const visionBody = JSON.parse((await visionReq).postData() ?? '{}') as {
+    model_id?: string;
+    conversation_id?: string;
+    attachments?: unknown[];
+  };
+  expect(visionBody.model_id).toBe(visionId);
+  expect(visionBody.conversation_id).toBe(convId);
+  expect(visionBody.attachments?.length).toBeGreaterThan(0);
+
+  const finalReq = page.waitForRequest((req) => req.url().endsWith('/v1/chat') && req.method() === 'POST');
+  await page.getByTestId('active-model').selectOption(fastId);
+  await sendAndWait(page, '最后用快速模型压缩成给设计师的三条修改建议');
+  const finalBody = JSON.parse((await finalReq).postData() ?? '{}') as {
+    model_id?: string;
+    conversation_id?: string;
+  };
+  expect(finalBody.model_id).toBe(fastId);
+  expect(finalBody.conversation_id).toBe(convId);
+});
+
+test('research thread can switch from search and fetch to quick compare adoption and back to fast synthesis', async ({
+  page,
+}) => {
+  test.setTimeout(180_000);
+  const { fastId, toolId } = await seedStack();
+  await suppressTips(page);
+
+  await page.goto('/');
+  await expect(page.getByTestId('chat-panel')).toBeVisible({ timeout: 10_000 });
+  await page.getByTestId('active-model').selectOption(toolId);
+
+  let before = mockRequests.length;
+  await sendAndWait(page, '请搜索 Taori 多模型助手相关资料，给我两个调研方向');
+  await expect
+    .poll(() => mockRequests.slice(before).some((req) => req.toolNames.includes('web_search')), {
+      timeout: 15_000,
+    })
+    .toBe(true);
+  const convId = await expectActiveConversationId(page);
+
+  before = mockRequests.length;
+  await sendAndWait(page, '继续抓取网页 https://example.com/ ，把它和上一步搜索结果合并');
+  await expect
+    .poll(() => mockRequests.slice(before).some((req) => req.toolNames.includes('web_fetch')), {
+      timeout: 15_000,
+    })
+    .toBe(true);
+
+  await runQuickCompare(page, '把刚才的调研资料整理成两个可执行方案进行比较');
+  await page.getByTestId('quick-compare-adopt-recommended').click();
+  await expect(page.getByTestId('quick-compare-card')).toHaveCount(0, { timeout: 20_000 });
+  await expect(page.getByTestId('chat-panel')).toHaveAttribute('data-active-conv', convId);
+
+  const summaryReq = page.waitForRequest((req) => req.url().endsWith('/v1/chat') && req.method() === 'POST');
+  await page.getByTestId('active-model').selectOption(fastId);
+  await sendAndWait(page, '回到快速模型，输出一段适合团队同步的结论');
+  const summaryBody = JSON.parse((await summaryReq).postData() ?? '{}') as {
+    model_id?: string;
+    conversation_id?: string;
+  };
+  expect(summaryBody.model_id).toBe(fastId);
+  expect(summaryBody.conversation_id).toBe(convId);
+});
+
+test('one conversation can run quick compare twice, first with two models and then with three', async ({
+  page,
+}) => {
+  test.setTimeout(180_000);
+  const { fastId } = await seedStack();
+  await suppressTips(page);
+
+  await page.goto('/');
+  await expect(page.getByTestId('chat-panel')).toBeVisible({ timeout: 10_000 });
+  await sendAndWait(page, '先建立一条会连续做多轮模型对比的工作线');
+  const convId = await expectActiveConversationId(page);
+
+  await runQuickCompare(page, '第一轮先只比较两个模型的结论', { selectedCount: 2 });
+  await page.getByTestId('quick-compare-draft-follow-up').click();
+  await expect(page.getByTestId('composer-input')).toContainText('最终推荐方案');
+  const followReq = page.waitForRequest((req) => req.url().endsWith('/v1/chat') && req.method() === 'POST');
+  await page.getByTestId('active-model').selectOption(fastId);
+  await sendCurrentComposerAndWait(page);
+  const followBody = JSON.parse((await followReq).postData() ?? '{}') as {
+    model_id?: string;
+    conversation_id?: string;
+  };
+  expect(followBody.model_id).toBe(fastId);
+  expect(followBody.conversation_id).toBe(convId);
+
+  await runQuickCompare(page, '第二轮再用三个模型做完整对比');
+  await page.getByTestId('quick-compare-adopt-recommended').click();
+  await expect(page.getByTestId('quick-compare-card')).toHaveCount(0, { timeout: 20_000 });
+  await expect(page.getByTestId('chat-panel')).toHaveAttribute('data-active-conv', convId);
 });

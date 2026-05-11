@@ -23,6 +23,11 @@ export interface WebSearchDeps {
   fetch?: typeof fetch;
 }
 
+const SEARCH_ENDPOINTS = [
+  'https://html.duckduckgo.com/html/?q=',
+  'https://duckduckgo.com/html/?q=',
+] as const;
+
 export function createWebSearchTool(): ToolDescriptor<
   z.infer<typeof InputSchema>,
   WebSearchOutput
@@ -45,24 +50,42 @@ export function createWebSearchToolWithDeps(
     inputSchema: InputSchema,
     async execute(input) {
       const numResults = input.num_results ?? 5;
-      const url = `https://html.duckduckgo.com/html/?q=${encodeURIComponent(input.query)}`;
-      const res = await fetchWithTimeout(fetchImpl, url, 15_000, {
+      const headers = {
         'user-agent':
           'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36',
         accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
         'accept-language': 'zh-CN,zh;q=0.9,en;q=0.8',
-      });
-      if (!res.ok) {
-        throw networkError(`DuckDuckGo search failed: ${res.status} ${res.statusText}`);
-      }
-      const html = await res.text();
-      return {
-        output: {
-          query: input.query,
-          engine: 'duckduckgo',
-          results: parseDuckDuckGo(html, numResults),
-        },
       };
+      let lastError: unknown = null;
+      for (const [index, endpoint] of SEARCH_ENDPOINTS.entries()) {
+        try {
+          const res = await fetchWithTimeout(
+            fetchImpl,
+            `${endpoint}${encodeURIComponent(input.query)}`,
+            10_000,
+            headers,
+          );
+          if (!res.ok) {
+            lastError = networkError(`DuckDuckGo search failed: ${res.status} ${res.statusText}`);
+            continue;
+          }
+          const html = await res.text();
+          const results = parseDuckDuckGo(html, numResults);
+          if (results.length > 0 || index === SEARCH_ENDPOINTS.length - 1) {
+            return {
+              output: {
+                query: input.query,
+                engine: 'duckduckgo',
+                results,
+              },
+            };
+          }
+          lastError = networkError('DuckDuckGo search returned no parsable results');
+        } catch (error) {
+          lastError = error;
+        }
+      }
+      throw lastError instanceof Error ? lastError : networkError('DuckDuckGo search failed');
     },
   };
 }

@@ -79,6 +79,7 @@ describe('POST /v1/files/search', () => {
     expect(body.data.results).toHaveLength(1);
     expect(body.data.results[0]).toMatchObject({
       file_id: file.id,
+      file_name: 'notes.md',
       content: null,
     });
     expect(body.data.results[0]?.snippet).toContain('sqlite bm25');

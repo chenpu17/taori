@@ -313,10 +313,11 @@ function shouldMockImageTool(body: ChatRequest): boolean {
   if (!Array.isArray(body.tools) || body.tools.length === 0 || hasToolResult(body.messages)) {
     return false;
   }
+  if (hasImageInput(body.messages)) return false;
   const lastUser = [...body.messages].reverse().find((m) => m.role === 'user');
   const text = lastUser ? textOf(lastUser).toLowerCase() : '';
   const negative =
-    /不要|别|无需|不用|不要生成|不要画|do not|don't|dont|without generating|no image/.test(text);
+    /不要|别|无需|不用|不要生成|不要画|理解这张图片|描述这张图片|分析这张图片|do not|don't|dont|without generating|no image/.test(text);
   if (negative) return false;
   return (
     /生成|画|绘制|图片|图像|照片|海报|generate|draw|create|make|image|picture|photo|illustration|poster/.test(
@@ -396,6 +397,12 @@ export function startMockOpenAI(
     failAfterToolResult?: boolean;
     models?: MockModelListItem[];
     onChatRequest?: (body: ChatRequest) => void;
+    streamPlanByModel?: Record<string, {
+      mode?: 'chunked' | 'buffered';
+      initialDelayMs?: number;
+      chunkDelayMs?: number;
+      stepChars?: number;
+    }>;
   } = {},
 ): http.Server {
   const server = http.createServer((req, res) => {
@@ -640,10 +647,22 @@ export function startMockOpenAI(
         'cache-control': 'no-cache',
         connection: 'keep-alive',
       });
-      // Allow specs to slow the stream down for abort/race tests via the
-      // factory option. Defaults to 5ms to preserve existing fast-path tests.
-      const delayMs = opts.streamDelayMs ?? 5;
-      const step = Math.max(8, Math.ceil(text.length / 6));
+      // Allow specs to emulate provider-specific chunking differences. This is
+      // important for Quick Compare: some upstreams send true incremental
+      // chunks, while others hold the whole answer and flush once near the end.
+      const streamPlan = opts.streamPlanByModel?.[body.model];
+      const initialDelayMs = Math.max(0, streamPlan?.initialDelayMs ?? 0);
+      const delayMs = Math.max(0, streamPlan?.chunkDelayMs ?? opts.streamDelayMs ?? 5);
+      const step = Math.max(8, streamPlan?.stepChars ?? Math.ceil(text.length / 6));
+      if (streamPlan?.mode === 'buffered') {
+        setTimeout(() => {
+          res.write(sseChunk(text, body.model));
+          res.write(sseFinal(body.model, 50, text.length));
+          res.write('data: [DONE]\n\n');
+          res.end();
+        }, initialDelayMs);
+        return;
+      }
       let i = 0;
       function tick(): void {
         if (i >= text.length) {
@@ -657,7 +676,11 @@ export function startMockOpenAI(
         res.write(sseChunk(slice, body.model));
         setTimeout(tick, delayMs);
       }
-      tick();
+      if (initialDelayMs > 0) {
+        setTimeout(tick, initialDelayMs);
+      } else {
+        tick();
+      }
     });
   });
   server.listen(port, '127.0.0.1');

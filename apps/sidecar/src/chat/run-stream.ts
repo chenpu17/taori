@@ -333,12 +333,14 @@ export function finalizeOnEnd(
   let lineBuffer = '';
   let usage: {
     input: number;
+    cacheInput: number | null;
     output: number;
     durationMs: number;
     firstTokenMs: number | null;
     calls: number;
   } = {
     input: 0,
+    cacheInput: null,
     output: 0,
     durationMs: 0,
     firstTokenMs: null,
@@ -368,6 +370,10 @@ export function finalizeOnEnd(
         for (const ann of arr) {
           if (ann?.type === 'cost') {
             usage.input = (ann.input_tokens as number) ?? usage.input;
+            usage.cacheInput =
+              typeof ann.cache_input_tokens === 'number'
+                ? ann.cache_input_tokens as number
+                : usage.cacheInput;
             usage.output = (ann.output_tokens as number) ?? usage.output;
             usage.durationMs = (ann.duration_ms as number) ?? usage.durationMs;
             usage.firstTokenMs = (ann.first_token_ms as number | null) ?? usage.firstTokenMs;
@@ -421,6 +427,7 @@ export function finalizeOnEnd(
         model_id: ctx.modelDbId,
         model_name_snapshot: ctx.modelNameSnapshot,
         input_tokens: usage.input || null,
+        cache_input_tokens: usage.cacheInput,
         output_tokens: usage.output || null,
         call_count: 1,
         price_input_per_1m_snapshot: ctx.priceInputPer1m,
@@ -442,6 +449,7 @@ export function finalizeOnEnd(
           success,
           cost_record_id: costRow.id,
           input_tokens: usage.input || null,
+          cache_input_tokens: usage.cacheInput,
           output_tokens: usage.output || null,
           actual_usd: actual,
           actual_cost_usd: actual,

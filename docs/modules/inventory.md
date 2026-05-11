@@ -42,6 +42,11 @@ Scope: Taori 全系统
 
 ## 5. 最近变化
 
+- 2026-05-11 [聊天成本 / ModelCenter / 深度研究]：
+  - `apps/sidecar`：聊天成本链路新增 `cache_input_tokens`，`cost_records`、`cost.recorded` 与 `/v1/costs/calls` 可透出输入 / cache / 输出 token 明细
+  - `apps/web`：聊天消息把 token 指标直接显示在 `$` 附近；ModelCenter 模型矩阵操作区做紧凑化整理，缩短高频按钮文案并收敛编辑/删除为 icon button；Control Center 新增“深度研究”工作台入口
+  - `apps/sidecar` / `packages/shared`：深度研究第一切片已落地，新增 `research_sessions / tasks / sources / claims` contract、SQLite 持久化、确定性 planner 与 `/v1/research/sessions*` 资源路由
+  - `docs/product` / `docs/architecture`：新增深度研究方案，并完成首批实现收口，明确其与普通聊天 / Workflow Recipe / Roundtable / 轻量 RAG 的边界，以及状态机、持久化、预算与引用校验设计
 - 2026-05-10 [thinking 配置]：新增“全局默认 + 单模型覆盖”的模型 thinking 开关：
   - `packages/shared`：`Model*` / backup contract 新增 `thinking_enabled: boolean | null`
   - `apps/sidecar`：`models.thinking_enabled` 落库，并在聊天、Quick Compare、Roundtable、自动记忆抽取与模型探测中统一解析；当前按 provider 差异适配 OpenRouter `reasoning`、DeepSeek `thinking`、GPT-5/o 系列 `reasoning_effort`

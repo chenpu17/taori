@@ -27,9 +27,12 @@ interface ControlCenterProps {
 }
 
 interface CostCallFocusTarget {
-  costRecordId: string;
+  costRecordId: string | null;
   runId: string | null;
   runEventId: string | null;
+  providerKey?: string | null;
+  modelId?: string | null;
+  preferredScope?: 'today' | 'week' | 'month';
 }
 
 const NAV_ITEMS: Array<{
@@ -44,28 +47,28 @@ const NAV_ITEMS: Array<{
     id: 'overview',
     label: '概览',
     description: '系统状态、最近调用、关键入口',
-    icon: '⌁',
+    icon: '◐',
     keywords: ['总览', 'overview', '系统', '健康', '调用'],
   },
   {
     id: 'monitor',
     label: '后端监控',
     description: 'Sidecar 进程 CPU、内存、运行态',
-    icon: '📈',
+    icon: '◫',
     keywords: ['监控', '资源', 'cpu', 'memory', '进程', 'sidecar'],
   },
   {
     id: 'models',
     label: '模型与供应商',
     description: 'Provider、模型、价格、健康',
-    icon: '🧬',
+    icon: '◈',
     keywords: ['provider', '供应商', '模型', '价格', '健康'],
   },
   {
     id: 'tools',
     label: '工具能力',
     description: '内置工具开关与能力说明',
-    icon: '🛠',
+    icon: '◇',
     legacyTestId: 'settings-tab-tools',
     keywords: ['工具', 'mcp', '能力', 'tool'],
   },
@@ -73,14 +76,14 @@ const NAV_ITEMS: Array<{
     id: 'costs',
     label: '成本与调用',
     description: '预算、看板、真实出口日志',
-    icon: '💸',
+    icon: '$',
     keywords: ['成本', '预算', '费用', '日志', '调用'],
   },
   {
     id: 'prompts',
     label: '模板与 Persona',
     description: 'Prompt 模板、角色预设',
-    icon: '✍',
+    icon: '¶',
     legacyTestId: 'settings-tab-prompts',
     keywords: ['prompt', 'template', 'persona', '模板', '角色'],
   },
@@ -158,6 +161,49 @@ function formatDuration(ms: number | null | undefined): string {
   return `${totalSeconds}s`;
 }
 
+function formatCount(value: number): string {
+  return Number.isInteger(value) ? String(value) : value.toFixed(1);
+}
+
+function parseMemoryNumber(raw: string | null): number | null {
+  if (!raw) return null;
+  const value = Number(raw);
+  return Number.isFinite(value) ? value : null;
+}
+
+function parseMemoryBoolean(raw: string | null): boolean {
+  return /^(1|true|yes|on)$/i.test(raw?.trim() ?? '');
+}
+
+function budgetUsageTone(spent: number | null, budget: number | null): 'healthy' | 'watch' | 'over' | 'idle' {
+  if (spent == null || budget == null || budget <= 0) return 'idle';
+  const ratio = spent / budget;
+  if (ratio >= 1) return 'over';
+  if (ratio >= 0.75) return 'watch';
+  return 'healthy';
+}
+
+interface BudgetAlertItem {
+  id: string;
+  tone: 'watch' | 'over';
+  title: string;
+  detail: string;
+  chips: string[];
+}
+
+interface ProviderRiskItem {
+  id: string;
+  providerKey: string;
+  tone: 'watch' | 'over';
+  title: string;
+  detail: string;
+  chips: string[];
+  primaryLabel: string;
+  primaryAction: 'models' | 'costs' | 'onboarding';
+  secondaryLabel?: string;
+  secondaryAction?: 'models' | 'costs' | 'onboarding';
+}
+
 export function ControlCenter({
   initialSection,
   costCallFocus = null,
@@ -169,6 +215,7 @@ export function ControlCenter({
 }: ControlCenterProps): JSX.Element {
   const [activeSection, setActiveSection] = useState<ControlCenterSection>(initialSection);
   const [searchQuery, setSearchQuery] = useState('');
+  const [localCostFocus, setLocalCostFocus] = useState<CostCallFocusTarget | null>(null);
 
   useEffect(() => {
     setActiveSection(initialSection);
@@ -183,6 +230,7 @@ export function ControlCenter({
   }, [onClose]);
 
   const activeItem = NAV_ITEMS.find((item) => item.id === activeSection) ?? NAV_ITEMS[0]!;
+  const effectiveCostFocus = localCostFocus ?? costCallFocus ?? null;
   const filteredItems = useMemo(() => {
     const q = searchQuery.trim().toLocaleLowerCase();
     if (!q) return NAV_ITEMS;
@@ -323,7 +371,11 @@ export function ControlCenter({
                 onOpenMonitor={() => setActiveSection('monitor')}
                 onOpenModels={() => setActiveSection('models')}
                 onOpenTools={() => setActiveSection('tools')}
-                onOpenCosts={() => setActiveSection('costs')}
+                onOpenCosts={(focus) => {
+                  setLocalCostFocus(focus ?? null);
+                  setActiveSection('costs');
+                }}
+                onReopenOnboarding={reopenOnboarding}
               />
             )}
             {activeSection === 'monitor' && <RuntimeMonitorSection />}
@@ -345,9 +397,16 @@ export function ControlCenter({
             {activeSection === 'costs' && (
               <CostDashboard
                 embedded
-                focusTarget={costCallFocus}
-                onFocusConsumed={onCostCallFocusConsumed}
+                focusTarget={effectiveCostFocus}
+                onFocusConsumed={() => {
+                  if (localCostFocus) {
+                    setLocalCostFocus(null);
+                    return;
+                  }
+                  onCostCallFocusConsumed?.();
+                }}
                 onClose={onClose}
+                onOpenModels={() => setActiveSection('models')}
               />
             )}
             {activeSection === 'prompts' && (
@@ -376,18 +435,28 @@ function OverviewSection({
   onOpenModels,
   onOpenTools,
   onOpenCosts,
+  onReopenOnboarding,
 }: {
   onOpenMonitor: () => void;
   onOpenModels: () => void;
   onOpenTools: () => void;
-  onOpenCosts: () => void;
+  onOpenCosts: (focus?: CostCallFocusTarget | null) => void;
+  onReopenOnboarding: () => void;
 }): JSX.Element {
   const [providers, setProviders] = useState<Provider[] | null>(null);
   const [models, setModels] = useState<Model[] | null>(null);
   const [tools, setTools] = useState<Tool[] | null>(null);
+  const [providerKeyStatus, setProviderKeyStatus] = useState<Map<string, boolean> | null>(null);
   const [modelHealthRows, setModelHealthRows] = useState<ModelHealthRow[] | null>(null);
   const [toolHealthRows, setToolHealthRows] = useState<ToolHealthRow[] | null>(null);
+  const [todayUsd, setTodayUsd] = useState<number | null>(null);
   const [monthUsd, setMonthUsd] = useState<number | null>(null);
+  const [dailyBudgetUsd, setDailyBudgetUsd] = useState<number | null>(null);
+  const [monthlyBudgetUsd, setMonthlyBudgetUsd] = useState<number | null>(null);
+  const [thresholdUsd, setThresholdUsd] = useState<number | null>(null);
+  const [dailyHardLimit, setDailyHardLimit] = useState(false);
+  const [monthlyHardLimit, setMonthlyHardLimit] = useState(false);
+  const [topTagRows, setTopTagRows] = useState<Array<{ label: string; sum_usd: number; count: number }>>([]);
   const [runtime, setRuntime] = useState<RuntimeResourceSnapshot | null>(null);
   const [lastCalls, setLastCalls] = useState<
     Array<{
@@ -416,24 +485,56 @@ function OverviewSection({
           realtimeRes,
           callsRes,
           runtimeRes,
+          tagBreakdownRes,
+          providerKeyStatusRes,
+          thresholdRes,
+          monthlyBudgetRes,
+          dailyBudgetRes,
+          monthlyHardLimitRes,
+          dailyHardLimitRes,
         ] = await Promise.all([
           api.listProviders(),
           api.listModels(),
           api.listTools(),
           api.modelsHealth().catch(() => ({ rows: [] })),
           api.toolsHealth().catch(() => ({ rows: [] })),
-          api.costsRealtime().catch(() => ({ data: { month_usd: null } })),
+          api.costsRealtime().catch(() => ({ data: { today_usd: null, month_usd: null } })),
           api.costsCallLogs(5).catch(() => ({ data: { rows: [] } })),
           api.runtimeDiagnostics().catch(() => ({ ok: false, data: null as RuntimeResourceSnapshot | null })),
+          api.costsDashboardBreakdown('month', 'tag').catch(() => ({ data: { rows: [] } })),
+          api.providerKeyStatus().catch(() => ({ statuses: [] as { provider_id: string; key_available: boolean }[] })),
+          api.getMemoryEffective('cost_confirm_threshold_usd').catch(() => ({ data: { value: null as string | null } })),
+          api.getMemoryEffective('monthly_budget_usd').catch(() => ({ data: { value: null as string | null } })),
+          api.getMemoryEffective('daily_budget_usd').catch(() => ({ data: { value: null as string | null } })),
+          api.getMemoryEffective('monthly_budget_hard_limit').catch(() => ({ data: { value: null as string | null } })),
+          api.getMemoryEffective('daily_budget_hard_limit').catch(() => ({ data: { value: null as string | null } })),
         ]);
         if (cancelled) return;
         setProviders(providerRes.providers);
         setModels(modelRes.models);
         setTools(toolRes.data);
+        setProviderKeyStatus(new Map(providerKeyStatusRes.statuses.map((item) => [item.provider_id, item.key_available])));
         setModelHealthRows(modelHealthRes.rows);
         setToolHealthRows(toolHealthRes.rows);
+        setTodayUsd(
+          typeof realtimeRes.data.today_usd === 'number' ? realtimeRes.data.today_usd : null,
+        );
         setMonthUsd(
           typeof realtimeRes.data.month_usd === 'number' ? realtimeRes.data.month_usd : null,
+        );
+        setThresholdUsd(parseMemoryNumber(thresholdRes.data.value));
+        setMonthlyBudgetUsd(parseMemoryNumber(monthlyBudgetRes.data.value));
+        setDailyBudgetUsd(parseMemoryNumber(dailyBudgetRes.data.value));
+        setMonthlyHardLimit(parseMemoryBoolean(monthlyHardLimitRes.data.value));
+        setDailyHardLimit(parseMemoryBoolean(dailyHardLimitRes.data.value));
+        setTopTagRows(
+          (tagBreakdownRes.data.rows ?? [])
+            .slice(0, 4)
+            .map((row) => ({
+              label: row.label ?? '未打标签',
+              sum_usd: typeof row.sum_usd === 'number' ? row.sum_usd : 0,
+              count: typeof row.count === 'number' ? row.count : 0,
+            })),
         );
         setLastCalls(callsRes.data.rows ?? []);
         setRuntime(runtimeRes.data);
@@ -493,6 +594,210 @@ function OverviewSection({
     runtime && runtime.system_memory_bytes > 0
       ? Math.min(100, Math.round((runtime.rss_bytes / runtime.system_memory_bytes) * 1000) / 10)
       : null;
+  const dailyBudgetTone = budgetUsageTone(todayUsd, dailyBudgetUsd);
+  const monthlyBudgetTone = budgetUsageTone(monthUsd, monthlyBudgetUsd);
+  const budgetAlerts = useMemo(() => {
+    const items: BudgetAlertItem[] = [];
+    const pushAlert = (
+      id: string,
+      periodLabel: string,
+      spent: number | null,
+      budget: number | null,
+      hardLimit: boolean,
+      extraChip?: string,
+    ): void => {
+      if (spent == null || budget == null || budget <= 0) return;
+      const ratio = spent / budget;
+      if (ratio < 0.8) return;
+      const tone: BudgetAlertItem['tone'] = ratio >= 1 ? 'over' : 'watch';
+      items.push({
+        id,
+        tone,
+        title: tone === 'over' ? `${periodLabel}预算已超出` : `${periodLabel}预算接近上限`,
+        detail:
+          tone === 'over'
+            ? `${periodLabel}已使用 ${Math.round(ratio * 100)}%。${hardLimit ? '后续高成本操作会直接阻断，建议先停用昂贵模型或改走低成本草稿流。' : '后续发送会继续触发确认，建议先用成本建议和模型中心检查可替代模型。'}`
+            : `${periodLabel}已使用 ${Math.round(ratio * 100)}%。建议把探索型任务先切到低成本模型，再把高成本模型留给最终定稿或复核。`,
+        chips: [
+          `${formatUsd(spent)} / ${formatUsd(budget)}`,
+          hardLimit ? '硬上限' : '软提醒',
+          ...(extraChip ? [extraChip] : []),
+        ],
+      });
+    };
+    pushAlert(
+      'day',
+      '今日',
+      todayUsd,
+      dailyBudgetUsd,
+      dailyHardLimit,
+      thresholdUsd == null ? '单次阈值未设' : `单次阈值 ${formatUsd(thresholdUsd)}`,
+    );
+    pushAlert(
+      'month',
+      '本月',
+      monthUsd,
+      monthlyBudgetUsd,
+      monthlyHardLimit,
+      topTagRows[0] ? `最高项目 ${topTagRows[0].label}` : undefined,
+    );
+    return items;
+  }, [
+    dailyBudgetUsd,
+    dailyHardLimit,
+    monthUsd,
+    monthlyBudgetUsd,
+    monthlyHardLimit,
+    thresholdUsd,
+    todayUsd,
+    topTagRows,
+  ]);
+  const providerRiskQueue = useMemo(() => {
+    if (!providers || providers.length === 0) return [] as ProviderRiskItem[];
+    const providerModels = new Map<string, Model[]>();
+    for (const model of models ?? []) {
+      if (!model.provider_id) continue;
+      const list = providerModels.get(model.provider_id) ?? [];
+      list.push(model);
+      providerModels.set(model.provider_id, list);
+    }
+    const healthByModelId = new Map<string, ModelHealthRow>();
+    for (const row of modelHealthRows ?? []) {
+      healthByModelId.set(row.model_id, row);
+    }
+    const ranked: Array<{ priority: number; item: ProviderRiskItem }> = [];
+    for (const provider of providers) {
+      const relatedModels = providerModels.get(provider.id) ?? [];
+      const healthRows = relatedModels
+        .map((model) => healthByModelId.get(model.id))
+        .filter((row): row is ModelHealthRow => row != null);
+      const calls24h = healthRows.reduce((sum, row) => sum + row.calls_24h, 0);
+      const failures24h = relatedModels.reduce((sum, model) => sum + model.failure_count_24h, 0);
+      const failureRate = calls24h > 0 ? failures24h / calls24h : 0;
+      const hasCooldown = relatedModels.some((model) => model.disabled_until != null && model.disabled_until > Date.now());
+      const hasDemotion = relatedModels.some((model) => model.demoted);
+      const keyAvailable = provider.type === 'ollama'
+        ? true
+        : (providerKeyStatus?.get(provider.id) ?? Boolean(provider.api_key_ref));
+      const latestUpdateAt = Math.max(provider.updated_at, ...relatedModels.map((model) =>
+        model.price_synced_at ?? model.pricing_meta?.updated_at ?? provider.updated_at,
+      ));
+      const hoursSinceUpdate = Math.round((Date.now() - latestUpdateAt) / 36e5);
+      if (!keyAvailable) {
+        ranked.push({
+          priority: 0,
+          item: {
+            id: `${provider.id}-key-missing`,
+            providerKey: provider.id,
+            tone: 'over',
+            title: `${provider.name} 缺少可用 Key`,
+            detail: '该 Provider 当前没有可用 Key，后续测试、导入和自动选择都容易直接失败，建议先补 Key 再继续使用。',
+            chips: [
+              provider.type,
+              provider.enabled ? '已启用' : '已停用',
+              relatedModels.length > 0 ? `${relatedModels.length} 个模型` : '未导入模型',
+            ],
+            primaryLabel: '补 Provider Key',
+            primaryAction: 'onboarding',
+            secondaryLabel: '看成本影响',
+            secondaryAction: 'costs',
+          },
+        });
+      }
+      if (!provider.enabled) {
+        ranked.push({
+          priority: 2,
+          item: {
+            id: `${provider.id}-disabled`,
+            providerKey: provider.id,
+            tone: 'watch',
+            title: `${provider.name} 当前已停用`,
+            detail: '该 Provider 处于停用状态，相关模型不会参与正常选择。若这是主力出口，建议检查是否为临时关闭。',
+            chips: [
+              provider.type,
+              relatedModels.length > 0 ? `${relatedModels.length} 个模型已挂载` : '未导入模型',
+            ],
+            primaryLabel: '重新启用 / 编辑',
+            primaryAction: 'models',
+            secondaryLabel: '看成本影响',
+            secondaryAction: 'costs',
+          },
+        });
+      }
+      if (relatedModels.length === 0) {
+        ranked.push({
+          priority: 3,
+          item: {
+            id: `${provider.id}-empty`,
+            providerKey: provider.id,
+            tone: 'watch',
+            title: `${provider.name} 还没有模型`,
+            detail: 'Provider 已接入但尚未导入模型，当前还不能承担真实聊天、图像或 fallback 出口。',
+            chips: [provider.type, keyAvailable ? 'Key 可用' : 'Key 待补'],
+            primaryLabel: '导入模型',
+            primaryAction: 'models',
+            secondaryLabel: keyAvailable ? '看成本影响' : '补 Provider Key',
+            secondaryAction: keyAvailable ? 'costs' : 'onboarding',
+          },
+        });
+      }
+      if (failures24h > 0 && (failureRate >= 0.2 || hasCooldown || hasDemotion)) {
+        ranked.push({
+          priority: 1,
+          item: {
+            id: `${provider.id}-health`,
+            providerKey: provider.id,
+            tone: hasCooldown ? 'over' : 'watch',
+            title: `${provider.name} 近期不稳定`,
+            detail:
+              hasCooldown
+                ? '该 Provider 关联模型里已有冷却中的模型，建议尽快检查失败分类并准备 fallback。'
+                : '该 Provider 关联模型最近 24h 失败偏多，建议先核对出口状态，再决定是否继续承接主任务。',
+            chips: [
+              `${failures24h} / ${calls24h} 失败`,
+              hasCooldown ? '含冷却模型' : hasDemotion ? '含降级模型' : '失败率偏高',
+            ],
+            primaryLabel: hasCooldown ? '检查 fallback / 模型' : '检查 Provider / 模型',
+            primaryAction: 'models',
+            secondaryLabel: '看成本影响',
+            secondaryAction: 'costs',
+          },
+        });
+      }
+      if (relatedModels.length > 0 && hoursSinceUpdate >= 72) {
+        ranked.push({
+          priority: 4,
+          item: {
+            id: `${provider.id}-stale`,
+            providerKey: provider.id,
+            tone: 'watch',
+            title: `${provider.name} 最近较久未更新`,
+            detail: '模型或 Provider 配置已经一段时间没动过。若它承担高频调用，建议顺手同步价格并确认模型集仍然可用。',
+            chips: [`${hoursSinceUpdate}h 未更新`, provider.type],
+            primaryLabel: '同步 / 检查模型',
+            primaryAction: 'models',
+            secondaryLabel: '看成本影响',
+            secondaryAction: 'costs',
+          },
+        });
+      }
+    }
+    return ranked
+      .sort((left, right) => left.priority - right.priority)
+      .slice(0, 4)
+      .map((entry) => entry.item);
+  }, [modelHealthRows, models, providerKeyStatus, providers]);
+  const runOverviewAction = (action: 'models' | 'costs' | 'onboarding'): void => {
+    if (action === 'models') {
+      onOpenModels();
+      return;
+    }
+    if (action === 'costs') {
+      onOpenCosts();
+      return;
+    }
+    onReopenOnboarding();
+  };
 
   return (
     <div className="control-overview" data-testid="control-center-overview">
@@ -530,10 +835,159 @@ function OverviewSection({
         <button type="button" onClick={onOpenTools} data-testid="control-center-open-tools">
           管理工具能力
         </button>
-        <button type="button" onClick={onOpenCosts} data-testid="control-center-open-costs">
+        <button type="button" onClick={() => onOpenCosts()} data-testid="control-center-open-costs">
           查看成本与调用日志
         </button>
       </div>
+
+      {budgetAlerts.length > 0 && (
+        <section className="control-budget-alerts" data-testid="control-budget-alerts">
+          {budgetAlerts.map((alert) => (
+            <article
+              key={alert.id}
+              className={`control-budget-alert control-budget-alert--${alert.tone}`}
+            >
+              <div className="control-budget-alert__content">
+                <strong>{alert.title}</strong>
+                <p>{alert.detail}</p>
+                <div className="control-budget-alert__chips">
+                  {alert.chips.map((chip) => (
+                    <span key={chip}>{chip}</span>
+                  ))}
+                </div>
+              </div>
+              <div className="control-budget-alert__actions">
+                <button type="button" onClick={() => onOpenCosts()}>看成本建议</button>
+                <button type="button" onClick={onOpenModels}>看模型配置</button>
+              </div>
+            </article>
+          ))}
+        </section>
+      )}
+
+      {providerRiskQueue.length > 0 && (
+        <section className="control-provider-risk-queue" data-testid="control-provider-risk-queue">
+          <div className="control-overview__section-head">
+            <div>
+              <h3>Provider 风险队列</h3>
+              <p className="hint">先看出口层问题，再决定是去模型中心修配置还是去成本看板看真实影响。</p>
+            </div>
+            <button type="button" onClick={onOpenModels} data-testid="control-provider-risk-open-models">
+              去模型中心
+            </button>
+          </div>
+          <div className="control-provider-risk-list">
+            {providerRiskQueue.map((item) => (
+              <article
+                key={item.id}
+                className={`control-provider-risk control-provider-risk--${item.tone}`}
+              >
+                <div className="control-provider-risk__content">
+                  <strong>{item.title}</strong>
+                  <p>{item.detail}</p>
+                  <div className="control-provider-risk__chips">
+                    {item.chips.map((chip) => (
+                      <span key={chip}>{chip}</span>
+                    ))}
+                  </div>
+                </div>
+                <div className="control-provider-risk__actions">
+                  <button type="button" onClick={() => runOverviewAction(item.primaryAction)}>
+                    {item.primaryLabel}
+                  </button>
+                  {item.secondaryAction && item.secondaryLabel ? (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        if (!item.secondaryAction) return;
+                        if (item.secondaryAction === 'costs') {
+                          onOpenCosts({
+                            costRecordId: null,
+                            runId: null,
+                            runEventId: null,
+                            providerKey: item.providerKey,
+                            preferredScope: 'month',
+                          });
+                          return;
+                        }
+                        runOverviewAction(item.secondaryAction);
+                      }}
+                    >
+                      {item.secondaryLabel}
+                    </button>
+                  ) : null}
+                </div>
+              </article>
+            ))}
+          </div>
+        </section>
+      )}
+
+      <section className="control-overview__budget-grid" data-testid="control-budget-overview">
+        <article className={`control-budget-card control-budget-card--${dailyBudgetTone}`}>
+          <div className="control-budget-card__head">
+            <div>
+              <h3>今日预算</h3>
+              <p className="hint">把预算告警提前到概览，方便快速判断今天还能不能继续跑。</p>
+            </div>
+            <button type="button" onClick={() => onOpenCosts()}>进入成本</button>
+          </div>
+          <div className="control-budget-card__metrics">
+            <span>
+              <small>已花费</small>
+              <strong>{todayUsd == null ? '—' : formatUsd(todayUsd)}</strong>
+            </span>
+            <span>
+              <small>预算</small>
+              <strong>{dailyBudgetUsd == null ? '未设置' : formatUsd(dailyBudgetUsd)}</strong>
+            </span>
+            <span>
+              <small>模式</small>
+              <strong>{dailyHardLimit ? '硬上限' : '软提醒'}</strong>
+            </span>
+          </div>
+          <div className="control-budget-card__footer">
+            <span>超出日预算时 {dailyHardLimit ? '将直接阻断' : '会触发确认弹窗'}</span>
+            <strong>{thresholdUsd == null ? '阈值未设置' : `单次阈值 ${formatUsd(thresholdUsd)}`}</strong>
+          </div>
+        </article>
+
+        <article className={`control-budget-card control-budget-card--${monthlyBudgetTone}`}>
+          <div className="control-budget-card__head">
+            <div>
+              <h3>本月预算</h3>
+              <p className="hint">结合模型健康看预算，更接近“该不该继续用这个模型”的真实判断。</p>
+            </div>
+            <button type="button" onClick={onOpenModels}>看模型</button>
+          </div>
+          <div className="control-budget-card__metrics">
+            <span>
+              <small>已花费</small>
+              <strong>{monthUsd == null ? '—' : formatUsd(monthUsd)}</strong>
+            </span>
+            <span>
+              <small>预算</small>
+              <strong>{monthlyBudgetUsd == null ? '未设置' : formatUsd(monthlyBudgetUsd)}</strong>
+            </span>
+            <span>
+              <small>状态</small>
+              <strong>
+                {monthlyBudgetTone === 'over'
+                  ? '超预算'
+                  : monthlyBudgetTone === 'watch'
+                    ? '接近上限'
+                    : monthlyBudgetTone === 'healthy'
+                      ? '安全'
+                      : '待配置'}
+              </strong>
+            </span>
+          </div>
+          <div className="control-budget-card__footer">
+            <span>超出月预算时 {monthlyHardLimit ? '将直接阻断' : '会触发确认弹窗'}</span>
+            <strong>{topTagRows[0] ? `当前最高项目：${topTagRows[0].label}` : '暂无项目归因'}</strong>
+          </div>
+        </article>
+      </section>
 
       <section className="control-overview__health" data-testid="control-health-overview">
         <article className="control-health-card" data-testid="control-model-health-summary">
@@ -642,7 +1096,33 @@ function OverviewSection({
         models={models}
         rows={modelHealthRows}
         onOpenModels={onOpenModels}
+        onOpenCosts={onOpenCosts}
       />
+
+      <section className="control-overview__calls control-overview__attribution" data-testid="control-cost-attribution-overview">
+        <div className="control-overview__section-head">
+          <div>
+            <h3>项目 / 标签成本归因</h3>
+            <p className="hint">帮助你快速判断最近成本主要消耗在哪些任务流上。</p>
+          </div>
+          <button type="button" onClick={() => onOpenCosts()}>打开成本看板</button>
+        </div>
+        {topTagRows.length === 0 ? (
+          <p className="hint">给会话打标签后，这里会显示月度成本最高的项目。</p>
+        ) : (
+          <div className="control-attribution-list">
+            {topTagRows.map((row) => (
+              <article key={row.label} className="control-attribution-row">
+                <div>
+                  <strong>{row.label}</strong>
+                  <small>{formatCount(row.count)} 折算调用</small>
+                </div>
+                <span>{formatUsd(row.sum_usd)}</span>
+              </article>
+            ))}
+          </div>
+        )}
+      </section>
 
       <section className="control-overview__calls">
         <h3>最近外部调用</h3>
@@ -685,14 +1165,25 @@ interface ModelHealthWallEntry {
   lastFailureClassification: string | null;
 }
 
+interface ModelHealthAction {
+  id: string;
+  tone: 'watch' | 'over';
+  title: string;
+  detail: string;
+  chips: string[];
+  modelId: string | null;
+}
+
 function ModelHealthWall({
   models,
   rows,
   onOpenModels,
+  onOpenCosts,
 }: {
   models: Model[] | null;
   rows: ModelHealthRow[] | null;
   onOpenModels: () => void;
+  onOpenCosts: (focus?: CostCallFocusTarget | null) => void;
 }): JSX.Element {
   const entries = useMemo<ModelHealthWallEntry[]>(() => {
     if (!models) return [];
@@ -749,6 +1240,58 @@ function ModelHealthWall({
     }
     return { cooldown, demoted, healthy };
   }, [entries]);
+  const actions = useMemo<ModelHealthAction[]>(() => {
+    const list: ModelHealthAction[] = [];
+    const cooldownModels = entries.filter((entry) => entry.state === 'cooldown');
+    if (cooldownModels.length > 0) {
+      const first = cooldownModels[0]!;
+      list.push({
+        id: 'cooldown',
+        tone: 'over',
+        title: `有 ${cooldownModels.length} 个模型正在冷却`,
+        detail: `${first.modelName}${cooldownModels.length > 1 ? ' 等模型' : ''} 已被自动禁用。建议先把默认任务切到健康模型，再去模型中心检查 fallback 顺序。`,
+        chips: [
+          `${first.modelName}`,
+          first.disabledUntil ? `恢复 ${formatCountdown(first.disabledUntil)}` : '恢复时间待定',
+        ],
+        modelId: first.modelId,
+      });
+    }
+    const demotedModels = entries.filter((entry) => entry.state === 'demoted');
+    if (demotedModels.length > 0) {
+      const first = demotedModels[0]!;
+      list.push({
+        id: 'demoted',
+        tone: 'watch',
+        title: `有 ${demotedModels.length} 个模型已被降级`,
+        detail: `${first.modelName}${demotedModels.length > 1 ? ' 等模型' : ''} 仍可手动选用，但已退出自动优先链。建议结合成本和错误类型决定是否恢复。`,
+        chips: [
+          `${first.modelName}`,
+          first.lastFailureClassification
+            ? MODEL_FAILURE_LABELS[first.lastFailureClassification] ?? first.lastFailureClassification
+            : '错误待复核',
+        ],
+        modelId: first.modelId,
+      });
+    }
+    const risky = entries
+      .filter((entry) => entry.calls24h >= 2 && entry.failureRate >= 0.3)
+      .sort((a, b) => b.failureRate - a.failureRate)[0] ?? null;
+    if (risky) {
+      list.push({
+        id: 'risky',
+        tone: 'watch',
+        title: `${risky.modelName} 近期失败率偏高`,
+        detail: `近 24h 失败率约 ${Math.round(risky.failureRate * 100)}%。如果它还承担高频任务，建议先去成本看板看支出，再决定是否降权或更换默认模型。`,
+        chips: [
+          `${risky.failures24h}/${risky.calls24h} 失败`,
+          risky.avgFirstTokenMs == null ? '首字待采样' : `首字 ${Math.round(risky.avgFirstTokenMs)}ms`,
+        ],
+        modelId: risky.modelId,
+      });
+    }
+    return list.slice(0, 3);
+  }, [entries]);
 
   if (!models || models.length === 0) return <></>;
 
@@ -776,6 +1319,48 @@ function ModelHealthWall({
           </button>
         </div>
       </header>
+      {actions.length > 0 && (
+        <div className="control-health-wall-actions" data-testid="control-health-wall-actions">
+          {actions.map((action) => (
+            <article
+              key={action.id}
+              className={`control-health-wall-action control-health-wall-action--${action.tone}`}
+              data-testid={`control-health-wall-action-${action.id}`}
+            >
+              <div className="control-health-wall-action__content">
+                <strong>{action.title}</strong>
+                <p>{action.detail}</p>
+                <div className="control-health-wall-action__chips">
+                  {action.chips.map((chip) => (
+                    <span key={chip}>{chip}</span>
+                  ))}
+                </div>
+              </div>
+              <div className="control-health-wall-action__buttons">
+                <button type="button" onClick={onOpenModels}>去模型中心</button>
+                <button
+                  type="button"
+                  onClick={() =>
+                    onOpenCosts(
+                      action.modelId
+                        ? {
+                            costRecordId: null,
+                            runId: null,
+                            runEventId: null,
+                            modelId: action.modelId,
+                            preferredScope: 'month',
+                          }
+                        : null,
+                    )}
+                  data-testid={`control-health-wall-action-cost-${action.id}`}
+                >
+                  看该模型成本
+                </button>
+              </div>
+            </article>
+          ))}
+        </div>
+      )}
       <ul className="control-overview__health-wall-grid">
         {entries.map((entry) => {
           const tone = entry.state;

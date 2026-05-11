@@ -181,6 +181,30 @@ async function sendAndWait(page: Page, text: string): Promise<void> {
   });
 }
 
+async function runQuickCompare(page: Page, prompt: string, expectedOutputs = 2): Promise<void> {
+  await page.getByTestId('composer-input').fill(prompt);
+  await page.getByTestId('composer-quick-compare').click();
+  const picker = page.getByTestId('quick-compare-picker');
+  await expect(picker).toBeVisible({ timeout: 10_000 });
+  await picker.getByTestId('quick-compare-picker-submit').click();
+  await expect(page.getByTestId('quick-compare-card')).toBeVisible({ timeout: 20_000 });
+  await expect(page.getByTestId('quick-compare-output')).toHaveCount(expectedOutputs, {
+    timeout: 20_000,
+  });
+}
+
+async function launchDeepRoundtable(page: Page, topic: string): Promise<void> {
+  await page.getByTestId('composer-roundtable').click();
+  const dialog = page.getByTestId('roundtable-launch-dialog');
+  await expect(dialog).toBeVisible({ timeout: 10_000 });
+  await dialog.getByTestId('roundtable-mode-select').selectOption('deep');
+  await dialog.getByTestId('roundtable-topic-input').fill(topic);
+  await dialog.getByTestId('roundtable-launch-start').click();
+  await expect(dialog.getByTestId('roundtable-preview')).toBeVisible({ timeout: 30_000 });
+  await dialog.getByTestId('roundtable-launch-continue').click();
+  await expect(page.getByTestId('roundtable-panel')).toBeVisible({ timeout: 10_000 });
+}
+
 async function openTimeline(page: Page): Promise<void> {
   await page.getByTestId('open-run-timeline').click();
   await expect(page.getByTestId('run-timeline-panel')).toBeVisible({ timeout: 10_000 });
@@ -481,4 +505,131 @@ test('long multi-turn conversation keeps Run Timeline readable and persisted aft
   await expect(page.getByTestId('run-group')).toHaveCount(8);
   await expectRunTimelineLayout(page);
   await attachTimelineScreenshot(page, testInfo, 'run-timeline-long-thread-after-reload.png');
+});
+
+test('quick compare journey is visible in Run Timeline after adoption', async ({
+  page,
+}, testInfo) => {
+  test.setTimeout(150_000);
+  await seedStack();
+  await suppressTips(page);
+
+  await page.goto('/');
+  await expect(page.getByTestId('chat-panel')).toBeVisible({ timeout: 10_000 });
+
+  await runQuickCompare(page, '并行比较两种产品评审结论的表达方式');
+  await page.getByTestId('quick-compare-adopt-recommended').click();
+  await expect(page.getByTestId('quick-compare-card')).toHaveCount(0, { timeout: 20_000 });
+  await openTimeline(page);
+  await expect(page.getByTestId('run-group')).toHaveCount(1);
+  await expectTopRunEvent(page, 'quick_compare.completed', 'Quick Compare 完成');
+  await expectTopRunEvent(page, 'turn.completed', 'Quick Compare 完成');
+  await expectRunTimelineLayout(page);
+  await attachTimelineScreenshot(page, testInfo, 'run-timeline-quick-compare.png');
+});
+
+test('quick compare adoption followed by chat keeps earlier compare run visible in Run Timeline', async ({
+  page,
+}, testInfo) => {
+  test.setTimeout(180_000);
+  const { fastId } = await seedStack();
+  await suppressTips(page);
+
+  await page.goto('/');
+  await expect(page.getByTestId('chat-panel')).toBeVisible({ timeout: 10_000 });
+
+  await runQuickCompare(page, '先比较两种适合团队同步的结论模板');
+  await page.getByTestId('quick-compare-adopt-recommended').click();
+  await expect(page.getByTestId('quick-compare-card')).toHaveCount(0, { timeout: 20_000 });
+
+  await page.getByTestId('active-model').selectOption(fastId);
+  await sendAndWait(page, '沿用刚才采纳的结论，再压缩成一段更短的同步消息');
+
+  await openTimeline(page);
+  await expect(page.getByTestId('run-group')).toHaveCount(2);
+  await expectTopRunEvent(page, 'turn.completed', '用户回合完成');
+  await expect(page.locator('[data-testid="run-event"][data-kind="quick_compare.completed"]')).toContainText(
+    'Quick Compare 完成',
+  );
+  await expectRunTimelineLayout(page);
+  await attachTimelineScreenshot(page, testInfo, 'run-timeline-quick-compare-followup.png');
+});
+
+test('cost dashboard can jump back into the Run Timeline with the relevant run highlighted', async ({
+  page,
+}, testInfo) => {
+  test.setTimeout(180_000);
+  const { toolId } = await seedStack();
+  await suppressTips(page);
+
+  await page.goto('/');
+  await expect(page.getByTestId('chat-panel')).toBeVisible({ timeout: 10_000 });
+  await page.getByTestId('active-model').selectOption(toolId);
+
+  await sendAndWait(page, '请搜索 Taori 多模型助手资料，给我两个调研方向');
+  await expect(page.locator('[data-testid="tool-trace-step"][data-tool="builtin.web_search"]').last()).toBeVisible();
+
+  await sendAndWait(page, '继续抓取网页 https://example.com/，把它和上一步搜索结果合并');
+  await expect(page.locator('[data-testid="tool-trace-step"][data-tool="builtin.web_fetch"]').last()).toBeVisible();
+
+  await page.getByTestId('open-cost-dashboard').click();
+  await expect(page.getByTestId('cost-dashboard-panel')).toBeVisible({ timeout: 10_000 });
+  const firstCall = page.getByTestId('cost-call-log-row').first();
+  await expect(firstCall).toBeVisible({ timeout: 10_000 });
+  await firstCall.getByTestId('cost-call-focus-run').click();
+
+  await expect(page.getByTestId('run-timeline-panel')).toBeVisible({ timeout: 10_000 });
+  await expect(page.locator('[data-testid="run-event"][data-focused="1"]').first()).toBeVisible();
+  await expect(page.locator('[data-testid="run-event"][data-focused="1"]').first()).toContainText('Cost');
+  await expectRunTimelineLayout(page);
+  await attachTimelineScreenshot(page, testInfo, 'run-timeline-focused-from-cost.png');
+});
+
+test('roundtable cancel journey is recorded as a cancelled run in Run Timeline', async ({
+  page,
+}, testInfo) => {
+  test.setTimeout(210_000);
+  await seedStack();
+  await suppressTips(page);
+
+  await page.goto('/');
+  await expect(page.getByTestId('chat-panel')).toBeVisible({ timeout: 10_000 });
+  await launchDeepRoundtable(page, '是否应该把圆桌中途取消也纳入 Timeline');
+
+  const panel = page.getByTestId('roundtable-panel');
+  await panel.getByTestId('roundtable-action-start-round').click();
+  await expect(panel.getByTestId('roundtable-action-cancel')).toBeVisible({ timeout: 45_000 });
+  await panel.getByTestId('roundtable-action-cancel').click();
+
+  await openTimeline(page);
+  await expect(page.getByTestId('run-group')).toHaveCount(3);
+  await expectTopRunEvent(page, 'turn.cancelled', '圆桌已取消');
+  await expectTopRunEvent(page, 'turn.started', '取消圆桌');
+  await expectRunTimelineLayout(page);
+  await attachTimelineScreenshot(page, testInfo, 'run-timeline-roundtable-cancelled.png');
+});
+
+test('roundtable summarize-now path creates a dedicated summary run in Run Timeline', async ({
+  page,
+}, testInfo) => {
+  test.setTimeout(210_000);
+  await seedStack();
+  await suppressTips(page);
+
+  await page.goto('/');
+  await expect(page.getByTestId('chat-panel')).toBeVisible({ timeout: 10_000 });
+  await launchDeepRoundtable(page, '是否应该让圆桌总结单独成为一个可观察运行');
+
+  const panel = page.getByTestId('roundtable-panel');
+  await panel.getByTestId('roundtable-action-start-round').click();
+  await expect(panel.getByTestId('roundtable-action-summarize-now')).toBeVisible({ timeout: 45_000 });
+  await panel.getByTestId('roundtable-action-summarize-now').click();
+
+  await openTimeline(page);
+  await expect.poll(async () => await page.getByTestId('run-group').count(), { timeout: 45_000 }).toBe(3);
+  await expectRunEvent(page, 'model.started', '圆桌总结');
+  await expectRunEvent(page, 'context.snapshot', '圆桌总结上下文');
+  await expectRunEvent(page, 'cost.recorded', 'Cost');
+  await expectRunTimelineLayout(page);
+  await attachTimelineScreenshot(page, testInfo, 'run-timeline-roundtable-summary.png');
 });

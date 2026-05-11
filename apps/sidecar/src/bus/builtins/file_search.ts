@@ -45,6 +45,7 @@ export function createFileSearchTool(deps: {
         output: {
           results: results.map((result) => ({
             file_id: result.file_id,
+            file_name: result.file_name,
             chunk_id: result.chunk_id,
             snippet: result.snippet,
             chunk_index: result.chunk_index,

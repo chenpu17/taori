@@ -247,6 +247,7 @@ interface OpenRouterListItem {
   context_length?: number;
   pricing?: { prompt?: string; completion?: string; image?: string };
   architecture?: { modality?: string; input_modalities?: string[]; output_modalities?: string[] };
+  capabilities?: Record<string, unknown>;
 }
 
 function openRouterUrl(baseUrl: string, path: string, query?: Record<string, string>): string {
@@ -268,6 +269,28 @@ function openRouterPriceToUnit(raw: string | undefined): number | null {
   if (raw == null) return null;
   const n = Number(raw);
   return Number.isFinite(n) && n >= 0 ? n : null;
+}
+
+function inferSupportsToolsFromMetadata(args: {
+  capability: DiscoveredModel['capability'];
+  modelName: string;
+  displayName?: string;
+  explicitCapability?: string;
+  capabilities?: Record<string, unknown>;
+}): boolean {
+  if (!isChatCapable(args.capability)) return false;
+  const caps = args.capabilities ?? {};
+  if (
+    caps.tools === true ||
+    caps.tool_calls === true ||
+    caps.function_calling === true ||
+    caps.function_calls === true ||
+    caps.functions === true
+  ) {
+    return true;
+  }
+  const metadata = `${args.modelName} ${args.displayName ?? ''} ${args.explicitCapability ?? ''}`.toLowerCase();
+  return /\b(?:gpt-(?:4o|4\.1|5)|claude|gemini|qwen|deepseek|llama|mistral|command-r|moonshot|kimi|glm|doubao)\b/.test(metadata);
 }
 
 function openRouterToDiscovered(item: OpenRouterListItem): DiscoveredModel {
@@ -307,7 +330,12 @@ function openRouterToDiscovered(item: OpenRouterListItem): DiscoveredModel {
     modalities,
     context_length: item.context_length ?? null,
     supports_vision: supportsVision,
-    supports_tools: isChatCapable(capability),
+    supports_tools: inferSupportsToolsFromMetadata({
+      capability,
+      modelName: item.id,
+      displayName: item.name,
+      capabilities: item.capabilities,
+    }),
   };
 }
 
@@ -488,7 +516,13 @@ function inferOpenAICompatibleModel(item: OpenAIListItem): DiscoveredModel {
     modalities,
     context_length: item.context_length ?? null,
     supports_vision: supportsVision,
-    supports_tools: isChatCapable(capability),
+    supports_tools: inferSupportsToolsFromMetadata({
+      capability,
+      modelName: id,
+      displayName,
+      explicitCapability,
+      capabilities: item.capabilities,
+    }),
   };
 }
 

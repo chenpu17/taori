@@ -7,8 +7,16 @@
  */
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
+import {
+  CostBreakdownGroupBySchema,
+  CostReportFormatSchema,
+} from '@taori/shared';
 import type { BuildServerArgs } from '../server.js';
 import { CostsRepo } from '../db/repos/index.js';
+import {
+  renderCostReportCsv,
+  safeCostExportFilename,
+} from '../cost/export.js';
 
 const RealtimeQuery = z.object({
   conversation_id: z.string().optional(),
@@ -21,7 +29,14 @@ const AvgOutputQuery = z.object({
 const BreakdownQuery = z.object({
   scope: z.enum(['session', 'today', 'week', 'month']),
   conversation_id: z.string().optional(),
-  group_by: z.enum(['model_feature', 'model', 'conversation', 'feature']).optional(),
+  group_by: CostBreakdownGroupBySchema.optional(),
+});
+
+const ExportQuery = z.object({
+  scope: z.enum(['session', 'today', 'week', 'month']),
+  conversation_id: z.string().optional(),
+  group_by: CostBreakdownGroupBySchema.default('tag'),
+  format: CostReportFormatSchema.default('csv'),
 });
 
 const CallLogsQuery = z.object({
@@ -89,5 +104,39 @@ export function registerCostsRoute(app: FastifyInstance, deps: BuildServerArgs):
         ? repo.breakdown(scope, conversation_id ?? null)
         : repo.breakdownBy(scope, normalizedGroupBy, conversation_id ?? null);
     return { ok: true, data: { scope, group_by: normalizedGroupBy, rows } };
+  });
+
+  app.get('/v1/costs/export', async (req, reply) => {
+    const parsed = ExportQuery.safeParse(req.query);
+    if (!parsed.success) {
+      reply.code(400);
+      return { ok: false, error: parsed.error.errors[0]?.message ?? 'invalid query' };
+    }
+    const { scope, conversation_id, group_by, format } = parsed.data;
+    const rows =
+      group_by === 'model_feature'
+        ? repo.breakdown(scope, conversation_id ?? null)
+        : repo.breakdownBy(scope, group_by, conversation_id ?? null);
+    const filename = safeCostExportFilename({
+      scope,
+      groupBy: group_by,
+      format,
+    });
+    reply.header(
+      'Content-Disposition',
+      `attachment; filename="${filename}"`,
+    );
+    if (format === 'json') {
+      reply.header('Content-Type', 'application/json; charset=utf-8');
+      return JSON.stringify({
+        exported_at: Date.now(),
+        scope,
+        group_by,
+        conversation_id: conversation_id ?? null,
+        rows,
+      }, null, 2);
+    }
+    reply.header('Content-Type', 'text/csv; charset=utf-8');
+    return renderCostReportCsv(rows as Array<Record<string, unknown>>);
   });
 }

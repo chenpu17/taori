@@ -141,6 +141,155 @@ test('M3.A.5 cost label visible in panel header', async ({ page }) => {
   await expect(cost).toContainText('$');
 });
 
+test('M3.A.5 completed summary shows save-template and history compare', async ({ page }) => {
+  const now = Date.now();
+  const participants = [
+    {
+      model_id: 'model_a',
+      display_name: 'Chat 0',
+      role_label: '综合视角',
+      persona_prompt: '你从综合视角参与圆桌讨论。',
+    },
+    {
+      model_id: 'model_b',
+      display_name: 'Chat 1',
+      role_label: '批判视角',
+      persona_prompt: '你从批判视角参与圆桌讨论。',
+    },
+  ];
+  const summary = {
+    consensus: ['先在小范围验证'],
+    divergence: [{ topic: '是否立即全量上线', positions: [{ role: '综合视角', stance: '否' }] }],
+    risks: ['迁移风险'],
+    recommended_decision: '先灰度再全量',
+    next_steps: ['搭建灰度环境'],
+  };
+
+  await page.route('**/v1/roundtable/rt_history/template', async (route) => {
+    await route.fulfill({
+      status: 201,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        ok: true,
+        template: {
+          id: 'prompt_rt_history',
+          name: '圆桌模板：需要选 ORM 框架',
+          description: '由圆桌结论生成',
+          content: '请围绕新的决策问题“{{决策问题}}”输出...',
+          created_at: now,
+          updated_at: now,
+        },
+      }),
+    });
+  });
+  await page.route('**/v1/roundtable/rt_history/loopback', async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        conversation_id: 'conv_origin',
+        message_id: 'msg_loopback',
+      }),
+    });
+  });
+  await page.route('**/v1/roundtable/rt_history/history?*', async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        roundtable_id: 'rt_history',
+        items: [{
+          id: 'rt_old',
+          topic: '旧决策',
+          mode: 'fast',
+          created_at: now - 86_400_000,
+          recommended_decision: '先保守推进',
+          consensus: ['先验证'],
+          risks: ['组织学习成本'],
+          divergence_topics: ['是否立即切换'],
+        }],
+      }),
+    });
+  });
+  await page.route('**/v1/roundtable/rt_history', async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        roundtable: {
+          id: 'rt_history',
+          conversation_id: 'conv_history',
+          topic: '需要选 ORM 框架',
+          mode: 'fast',
+          participants,
+          summarizer_model_id: 'model_a',
+          analyzer_fallback: false,
+          status: 'completed',
+          current_round: 1,
+          summary,
+          estimated_cost_usd_low: 0.01,
+          estimated_cost_usd_high: 0.02,
+          created_at: now,
+          updated_at: now,
+          completed_at: now,
+        },
+        messages: [],
+        total_cost_usd: 0.0123,
+      }),
+    });
+  });
+  await page.route('**/v1/roundtable', async (route) => {
+    await route.fulfill({
+      status: 201,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        id: 'rt_history',
+        conversation_id: 'conv_history',
+        topic: '需要选 ORM 框架',
+        mode: 'fast',
+        participants,
+        summarizer_model_id: 'model_a',
+        analyzer_fallback: false,
+        status: 'completed',
+        current_round: 1,
+        estimated_cost_usd_low: 0.01,
+        estimated_cost_usd_high: 0.02,
+        created_at: now,
+        preview: {
+          topic_type: 'technical',
+          complexity: 'medium',
+          requested_mode: 'auto',
+          analyzer_chose_mode_reason: '这是一个需要结构化判断的技术选型问题。',
+          estimated_calls: 4,
+          estimated_duration_sec_low: 8,
+          estimated_duration_sec_high: 16,
+          alt_mode: 'deep',
+          alt_estimated_cost_usd_low: 0.02,
+          alt_estimated_cost_usd_high: 0.04,
+          alt_estimated_calls: 6,
+          alt_estimated_duration_sec_low: 16,
+          alt_estimated_duration_sec_high: 32,
+        },
+      }),
+    });
+  });
+
+  await page.goto('/');
+  await expect(page.getByTestId('chat-panel')).toBeVisible({ timeout: 10_000 });
+  await page.getByTestId('composer-input').fill('需要选 ORM 框架');
+  await page.getByTestId('composer-roundtable').click();
+  const dlg = page.getByTestId('roundtable-launch-dialog');
+  await dlg.getByTestId('roundtable-launch-start').click();
+  await expect(dlg.getByTestId('roundtable-preview')).toBeVisible({ timeout: 15_000 });
+  await dlg.getByTestId('roundtable-launch-continue').click();
+
+  const panel = page.getByTestId('roundtable-panel');
+  await expect(panel).toBeVisible();
+  await expect(page.getByTestId('roundtable-history-compare')).toContainText('旧决策');
+  await page.getByTestId('roundtable-save-template').click();
+  await expect(page.getByTestId('roundtable-save-template-ok')).toContainText('圆桌模板');
+});
+
 test('M3.A.5 deep round content stays scrollable and summary JSON is hidden', async ({
   page,
 }) => {

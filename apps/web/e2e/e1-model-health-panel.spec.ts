@@ -47,6 +47,7 @@ test('E1 model health panel shows 24h calls, failures, latency and last failure 
   const modelId = await getDefaultModelId();
   await sendChat(modelId, 'health success');
   await sendChat(modelId, 'health failure', 'rate_limit');
+  await sendChat(modelId, 'health network failure', 'network');
 
   await suppressTips(page);
   await page.goto('/');
@@ -58,8 +59,11 @@ test('E1 model health panel shows 24h calls, failures, latency and last failure 
   await page.getByTestId(`model-health-toggle-${modelId}`).click();
   const panel = page.getByTestId(`model-health-panel-${modelId}`);
   await expect(panel).toBeVisible();
-  await expect(panel.getByTestId('model-health-calls')).toHaveText('2');
-  await expect(panel.getByTestId('model-health-failures')).toHaveText('1');
+  await expect(panel.getByTestId('model-health-calls')).toHaveText('3');
+  await expect(panel.getByTestId('model-health-failures')).toHaveText('2');
   await expect(panel.getByTestId('model-health-ttfb')).toContainText('ms');
-  await expect(panel.getByTestId('model-health-last-failure')).toContainText('限流');
+  await expect(panel.getByTestId('model-health-last-failure')).toContainText(/限流|网络失败/);
+  await expect(panel.getByTestId('model-health-trend')).toBeVisible();
+  await expect(panel.getByTestId('model-health-distribution')).toContainText('限流');
+  await expect(panel.getByTestId('model-health-distribution')).toContainText('网络失败');
 });

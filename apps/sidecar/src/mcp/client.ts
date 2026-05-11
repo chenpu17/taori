@@ -1,4 +1,5 @@
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
+import { resolveManagedMcpServerConfig } from './managed.js';
 
 interface JsonRpcMessage {
   jsonrpc: '2.0';
@@ -21,6 +22,12 @@ export interface McpServerConfig {
   env: Record<string, string>;
 }
 
+export interface McpServerLogEntry {
+  ts: number;
+  level: 'info' | 'warn' | 'error';
+  message: string;
+}
+
 type McpClassification = 'tool_timeout' | 'mcp_crashed';
 
 interface ClassifiedMcpError extends Error {
@@ -33,10 +40,14 @@ interface PooledSession {
 }
 
 const pool = new Map<string, PooledSession>();
+const logsByKey = new Map<string, McpServerLogEntry[]>();
+const MAX_LOG_ENTRIES = 200;
 
 export async function listMcpTools(config: McpServerConfig): Promise<McpToolInfo[]> {
+  const resolvedConfig = resolveManagedMcpServerConfig(config);
+  const key = sessionKey(resolvedConfig);
   try {
-    const session = await getPooledSession(config);
+    const session = await getPooledSession(resolvedConfig);
     const result = await session.request('tools/list', {});
     const tools = result && typeof result === 'object' && Array.isArray((result as { tools?: unknown }).tools)
       ? (result as { tools: unknown[] }).tools
@@ -54,6 +65,7 @@ export async function listMcpTools(config: McpServerConfig): Promise<McpToolInfo
       })
       .filter((tool): tool is McpToolInfo => tool !== null);
   } catch (e) {
+    appendSessionLog(key, 'error', `tools/list failed: ${e instanceof Error ? e.message : String(e)}`);
     if (isFatalMcpError(e)) closeMcpServerSession(config);
     throw e;
   }
@@ -64,28 +76,42 @@ export async function callMcpTool(
   toolName: string,
   args: Record<string, unknown>,
 ): Promise<unknown> {
+  const resolvedConfig = resolveManagedMcpServerConfig(config);
+  const key = sessionKey(resolvedConfig);
   try {
-    const session = await getPooledSession(config);
+    const session = await getPooledSession(resolvedConfig);
     return await session.request('tools/call', {
       name: toolName,
       arguments: args,
     });
   } catch (e) {
+    appendSessionLog(key, 'error', `tools/call ${toolName} failed: ${e instanceof Error ? e.message : String(e)}`);
     if (isFatalMcpError(e)) closeMcpServerSession(config);
     throw e;
   }
 }
 
 export function closeMcpServerSession(config: McpServerConfig): void {
-  const key = sessionKey(config);
+  const key = sessionKey(resolveManagedMcpServerConfig(config));
   const pooled = pool.get(key);
   pool.delete(key);
+  appendSessionLog(key, 'info', 'session closed');
   pooled?.session.close();
 }
 
 export function closeAllMcpSessions(): void {
   for (const pooled of pool.values()) pooled.session.close();
   pool.clear();
+}
+
+export function getMcpServerLogs(config: McpServerConfig, limit = 80): McpServerLogEntry[] {
+  const entries = logsByKey.get(sessionKey(resolveManagedMcpServerConfig(config))) ?? [];
+  return entries.slice(-Math.max(1, limit));
+}
+
+export function isMcpServerSessionRunning(config: McpServerConfig): boolean {
+  const pooled = pool.get(sessionKey(resolveManagedMcpServerConfig(config)));
+  return pooled ? pooled.session.isRunning() : false;
 }
 
 async function getPooledSession(config: McpServerConfig): Promise<McpStdioSession> {
@@ -107,6 +133,23 @@ async function getPooledSession(config: McpServerConfig): Promise<McpStdioSessio
   })();
   pool.set(key, { session, ready });
   return ready;
+}
+
+function appendSessionLog(
+  key: string,
+  level: McpServerLogEntry['level'],
+  message: string,
+): void {
+  const entries = logsByKey.get(key) ?? [];
+  entries.push({
+    ts: Date.now(),
+    level,
+    message: message.slice(0, 2000),
+  });
+  if (entries.length > MAX_LOG_ENTRIES) {
+    entries.splice(0, entries.length - MAX_LOG_ENTRIES);
+  }
+  logsByKey.set(key, entries);
 }
 
 function sessionKey(config: McpServerConfig): string {
@@ -161,7 +204,11 @@ class McpStdioSession {
     }
   >();
 
-  constructor(private readonly config: McpServerConfig) {}
+  private readonly key: string;
+
+  constructor(private readonly config: McpServerConfig) {
+    this.key = sessionKey(config);
+  }
 
   async start(): Promise<void> {
     if (this.child && isChildAlive(this.child)) return;
@@ -170,12 +217,23 @@ class McpStdioSession {
       env: { ...process.env, ...this.config.env },
       stdio: ['pipe', 'pipe', 'pipe'],
     });
+    appendSessionLog(
+      this.key,
+      'info',
+      `spawn ${this.config.command}${this.config.args.length > 0 ? ` ${this.config.args.join(' ')}` : ''}`,
+    );
     this.child = child;
     child.stdout.on('data', (chunk: Buffer) => this.onData(chunk));
-    child.stderr.on('data', () => {
-      /* stderr is intentionally not surfaced; failed requests carry context. */
+    child.stderr.on('data', (chunk: Buffer) => {
+      const text = chunk.toString('utf8').trim();
+      if (!text) return;
+      for (const line of text.split(/\r?\n/)) {
+        const trimmed = line.trim();
+        if (trimmed) appendSessionLog(this.key, 'warn', trimmed);
+      }
     });
     child.on('exit', (code, signal) => {
+      appendSessionLog(this.key, 'warn', processExitedMessage(code, signal));
       for (const [id, pending] of this.pending) {
         clearTimeout(pending.timer);
         pending.reject(
@@ -215,6 +273,7 @@ class McpStdioSession {
       clientInfo: { name: 'taori', version: '0.0.2' },
     });
     this.notify('notifications/initialized', {});
+    appendSessionLog(this.key, 'info', 'initialized');
   }
 
   request(method: string, params: unknown, timeoutMs = 15_000): Promise<unknown> {
@@ -228,6 +287,7 @@ class McpStdioSession {
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
         this.pending.delete(id);
+        appendSessionLog(this.key, 'error', `request timeout: ${method}`);
         reject(classifiedError(`MCP request timed out: ${method}`, 'tool_timeout'));
       }, timeoutMs);
       this.pending.set(id, { resolve, reject, timer });
@@ -258,6 +318,10 @@ class McpStdioSession {
     this.pending.clear();
     if (!child.stdin.destroyed) child.stdin.end();
     child.kill();
+  }
+
+  isRunning(): boolean {
+    return Boolean(this.child && isChildAlive(this.child));
   }
 
   private onData(chunk: Buffer): void {
@@ -294,6 +358,7 @@ class McpStdioSession {
     clearTimeout(pending.timer);
     this.pending.delete(message.id);
     if (message.error) {
+      appendSessionLog(this.key, 'error', message.error.message ?? `MCP error ${message.error.code ?? ''}`);
       pending.reject(new Error(message.error.message ?? `MCP error ${message.error.code ?? ''}`));
       return;
     }

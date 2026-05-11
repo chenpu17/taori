@@ -25,6 +25,10 @@ export const ID_PREFIXES = {
   prompt_template: 'ptpl_',
   persona: 'per_',
   workflow_recipe: 'wfr_',
+  research_session: 'rs_',
+  research_task: 'rst_',
+  research_source: 'rsrc_',
+  research_claim: 'rclm_',
 } as const;
 
 export type IdPrefixKey = keyof typeof ID_PREFIXES;

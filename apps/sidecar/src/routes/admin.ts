@@ -38,6 +38,10 @@ import {
   prompt_templates,
   personas,
   workflow_recipes,
+  research_sessions,
+  research_tasks,
+  research_sources,
+  research_claims,
   cost_records,
   mcp_servers,
   roundtables,
@@ -294,6 +298,10 @@ async function wipeAllData(deps: BuildServerArgs): Promise<{
   deps.db.delete(roundtable_messages).where(sql`1=1`).run();
   deps.db.delete(roundtables).where(sql`1=1`).run();
   deps.db.delete(cost_records).where(sql`1=1`).run();
+  deps.db.delete(research_claims).where(sql`1=1`).run();
+  deps.db.delete(research_sources).where(sql`1=1`).run();
+  deps.db.delete(research_tasks).where(sql`1=1`).run();
+  deps.db.delete(research_sessions).where(sql`1=1`).run();
   deps.db.delete(mcp_servers).where(sql`1=1`).run();
   deps.db.run(sql`DELETE FROM file_chunk_fts`);
   deps.db.delete(files).where(sql`1=1`).run();
@@ -849,12 +857,17 @@ export function registerAdminRoute(app: FastifyInstance, deps: BuildServerArgs):
       } else if (row.source_type === 'topic_analyzer' || row.source_type === 'summarizer') {
         sourceId = remap(sourceId, roundtableIdMap);
       }
+      const cacheInputTokens =
+        'cache_input_tokens' in row && typeof row.cache_input_tokens === 'number'
+          ? row.cache_input_tokens
+          : null;
       costRows.push({
         ...row,
         id: finalId,
         conversation_id: remap(row.conversation_id, conversationIdMap),
         source_id: sourceId,
         model_id: remap(row.model_id, modelIdMap),
+        cache_input_tokens: cacheInputTokens,
       });
       imported.cost_records += 1;
     }

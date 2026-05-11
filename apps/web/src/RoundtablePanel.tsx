@@ -23,6 +23,7 @@ import { streamRoundtableAnnotations } from './roundtableStream.js';
 import type {
   Provider,
   Roundtable,
+  RoundtableHistoryEntry,
   RoundtableMessage,
   RoundtableAnnotation,
   RoundtableSummary,
@@ -117,6 +118,8 @@ export function RoundtablePanel(props: RoundtablePanelProps): ReactElement {
   const [summaryModelOptions, setSummaryModelOptions] = useState<
     Array<ModelDisplayLike & { demoted?: boolean }>
   >([]);
+  const [historyItems, setHistoryItems] = useState<RoundtableHistoryEntry[]>([]);
+  const [historyError, setHistoryError] = useState<string | null>(null);
   const [selectedSummaryModelId, setSelectedSummaryModelId] = useState('');
   const [actionBusy, setActionBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -169,6 +172,29 @@ export function RoundtablePanel(props: RoundtablePanelProps): ReactElement {
       return null;
     }
   }, [roundtableId]);
+
+  useEffect(() => {
+    let cancelled = false;
+    if (rt?.status !== 'completed') {
+      setHistoryItems([]);
+      setHistoryError(null);
+      return;
+    }
+    api.getRoundtableHistory(roundtableId)
+      .then((res) => {
+        if (cancelled || !mountedRef.current) return;
+        setHistoryItems(res.items);
+        setHistoryError(null);
+      })
+      .catch((e) => {
+        if (cancelled || !mountedRef.current) return;
+        setHistoryItems([]);
+        setHistoryError(e instanceof Error ? e.message : String(e));
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [roundtableId, rt?.status]);
 
   useEffect(() => {
     void refresh();
@@ -618,7 +644,10 @@ export function RoundtablePanel(props: RoundtablePanelProps): ReactElement {
 
       {summary ? (
         <SummaryCard
+          roundtableTopic={rt?.topic ?? ''}
           summary={summary}
+          historyItems={historyItems}
+          historyError={historyError}
           totalCost={totalCost}
           onFollowUp={onFollowUp}
           roundtableId={roundtableId}
@@ -941,18 +970,27 @@ function ParticipantColumn({
 }
 
 function SummaryCard({
+  roundtableTopic,
   summary,
+  historyItems,
+  historyError,
   totalCost,
   onFollowUp,
   roundtableId,
   onLoopback,
 }: {
+  roundtableTopic: string;
   summary: RoundtableSummary;
+  historyItems: RoundtableHistoryEntry[];
+  historyError: string | null;
   totalCost: number;
   onFollowUp?: (topic: string) => void;
   roundtableId: string;
   onLoopback?: (conversationId: string) => void;
 }): ReactElement {
+  const [templateBusy, setTemplateBusy] = useState(false);
+  const [templateSavedName, setTemplateSavedName] = useState<string | null>(null);
+  const [templateError, setTemplateError] = useState<string | null>(null);
   const [loopbackBusy, setLoopbackBusy] = useState(false);
   const [loopbackError, setLoopbackError] = useState<string | null>(null);
   const [loopbackDone, setLoopbackDone] = useState(false);
@@ -991,6 +1029,20 @@ function SummaryCard({
     }
     const conversationId = await writeLoopback();
     if (conversationId) onLoopback(conversationId);
+  }
+
+  async function saveTemplate(): Promise<void> {
+    setTemplateBusy(true);
+    setTemplateError(null);
+    try {
+      const res = await api.saveRoundtableTemplate(roundtableId);
+      setTemplateSavedName(res.template.name);
+      window.dispatchEvent(new Event('taori:prompt-assets-changed'));
+    } catch (err) {
+      setTemplateError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setTemplateBusy(false);
+    }
   }
 
   return (
@@ -1077,6 +1129,72 @@ function SummaryCard({
         </section>
       ) : null}
       <div className="roundtable-summary-cost">总成本：${totalCost.toFixed(4)}</div>
+      <div className="roundtable-summary-asset-actions">
+        <button
+          type="button"
+          className="roundtable-template-save-btn"
+          data-testid="roundtable-save-template"
+          disabled={templateBusy}
+          onClick={() => void saveTemplate()}
+          title="把这次圆桌的分析框架保存为提示词模板，后续可直接插入复用"
+        >
+          {templateBusy ? '保存中…' : templateSavedName ? '✓ 已保存到模板库' : '💾 保存为模板'}
+        </button>
+        {templateSavedName ? (
+          <span className="roundtable-template-save-ok" data-testid="roundtable-save-template-ok">
+            {templateSavedName}
+          </span>
+        ) : null}
+        {templateError ? (
+          <span className="roundtable-template-save-error" data-testid="roundtable-save-template-error">
+            {templateError}
+          </span>
+        ) : null}
+      </div>
+      <div className="roundtable-history-compare" data-testid="roundtable-history-compare">
+        <div className="roundtable-history-compare-head">
+          <h5>🕘 历史决策对比</h5>
+          <span>{historyItems.length > 0 ? `同关联对话下最近 ${historyItems.length} 次` : '暂无可对比历史'}</span>
+        </div>
+        {historyError ? (
+          <p className="roundtable-history-compare-error">{historyError}</p>
+        ) : null}
+        {historyItems.length > 0 ? (
+          <div className="roundtable-history-compare-list">
+            {historyItems.map((item) => (
+              <article
+                key={item.id}
+                className="roundtable-history-card"
+                data-testid={`roundtable-history-item-${item.id}`}
+              >
+                <header>
+                  <strong>{item.topic}</strong>
+                  <span>{new Date(item.created_at).toLocaleDateString('zh-CN')}</span>
+                </header>
+                <p className="roundtable-history-card-decision">
+                  <small>当时建议</small>
+                  <span>{item.recommended_decision ?? '未形成结构化推荐决策'}</span>
+                </p>
+                <div className="roundtable-history-card-metrics">
+                  <span>{item.mode === 'fast' ? '快速' : '深度'} 模式</span>
+                  <span>{item.consensus.length} 条共识</span>
+                  <span>{item.risks.length} 条风险</span>
+                  <span>{item.divergence_topics.length} 个分歧点</span>
+                </div>
+                {item.divergence_topics.length > 0 ? (
+                  <p className="roundtable-history-card-topics">
+                    分歧主题：{item.divergence_topics.join(' / ')}
+                  </p>
+                ) : null}
+              </article>
+            ))}
+          </div>
+        ) : (
+          <p className="roundtable-history-compare-empty">
+            当前「{roundtableTopic || '这次圆桌'}」还没有同关联对话下的已完成历史圆桌可对比。
+          </p>
+        )}
+      </div>
       {onLoopback ? (
         <div className="roundtable-summary-loopback">
           <button

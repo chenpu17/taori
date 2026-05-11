@@ -78,5 +78,13 @@ test('R5 demoted model carries ⚠️ in selector and settings list', async ({ p
 
   // Model Center also shows the demoted badge.
   await page.getByTestId('open-model-center').click();
-  await expect(page.locator('[data-testid^="model-demoted-"]').first()).toBeVisible({ timeout: 5_000 });
+  const badge = page.locator('[data-testid^="model-demoted-"]').first();
+  await expect(badge).toBeVisible({ timeout: 5_000 });
+  await expect(badge).toContainText('降级');
+  await expect.poll(async () =>
+    badge.evaluate((el) => {
+      const style = getComputedStyle(el);
+      return style.whiteSpace === 'nowrap' && el.getBoundingClientRect().height <= 24;
+    }),
+  ).toBe(true);
 });

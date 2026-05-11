@@ -104,6 +104,10 @@ test('model-center: checks key status explicitly and opens re-entry flow', async
   await page.getByTestId('provider-key-status-check').click();
   await expect(page.getByTestId('provider-key-status-summary')).toContainText('缺失 1 项');
 
+  const providerNavItem = page.getByTestId(`provider-nav-item-${providerId}`);
+  await expect(providerNavItem).toContainText('未启用（待补 Key）');
+  await expect(providerNavItem).toHaveClass(/is-unready/);
+
   const missingBadge = page.getByTestId(`provider-chip-key-missing-${providerId}`);
   await expect(missingBadge).toBeVisible();
   await expect(missingBadge).toContainText('Key 缺失');

@@ -116,6 +116,40 @@ describe('builtin web tools', () => {
       { title: 'Example & Title', url: 'https://example.com/a', snippet: 'Snippet & details' },
     ]);
   });
+
+  it('web_search falls back to secondary DuckDuckGo endpoint after a timeout', async () => {
+    await app.close();
+    const fetchMock = vi.fn()
+      .mockRejectedValueOnce(Object.assign(new Error('timed out'), { name: 'AbortError' }))
+      .mockResolvedValueOnce(new Response(`
+        <a rel="nofollow" class="result__a" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fexample.com%2Fb">Fallback Title</a>
+        <a class="result__snippet">Fallback snippet</a>
+      `, {
+        status: 200,
+        headers: { 'content-type': 'text/html; charset=utf-8' },
+      }));
+    vi.stubGlobal('fetch', fetchMock);
+    app = await makeApp(db, dbPath);
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/v1/tools/invoke',
+      headers: { authorization: `Bearer ${bearer}`, 'content-type': 'application/json' },
+      payload: JSON.stringify({
+        name: 'builtin.web_search',
+        input: { query: 'fallback search' },
+      }),
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect(res.json().data.ok).toBe(true);
+    expect(res.json().data.output.results).toEqual([
+      { title: 'Fallback Title', url: 'https://example.com/b', snippet: 'Fallback snippet' },
+    ]);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(String(fetchMock.mock.calls[0]?.[0])).toContain('html.duckduckgo.com/html/');
+    expect(String(fetchMock.mock.calls[1]?.[0])).toContain('duckduckgo.com/html/');
+  });
 });
 
 async function makeApp(db: Db, dbPath: string): Promise<FastifyInstance> {

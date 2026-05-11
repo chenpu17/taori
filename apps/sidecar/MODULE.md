@@ -6,12 +6,12 @@ Taori 业务编排进程，负责 LLM 调用、工具调度、圆桌执行、SQL
 
 ## 主要接口
 
-- REST/SSE：`/v1/chat`、`/v1/runs/:id/continue`、`/v1/runs/:id/recover`、`/v1/tools/*`、`/v1/mcp/servers*`、`/v1/models*`、`/v1/roundtable*`、`/v1/costs*`
+- REST/SSE：`/v1/chat`、`/v1/runs/:id/continue`、`/v1/runs/:id/recover`、`/v1/tools/*`、`/v1/mcp/servers*`、`/v1/models*`、`/v1/roundtable*`、`/v1/costs*`、`/v1/research/sessions*`
 - 内部：Capability Bus、Provider registry、Roundtable runner、Catalog sync、DB repos
 
 ## 拥有状态
 
-- SQLite 业务数据：providers、models、mcp_servers、conversations、messages、roundtables、cost_records、memories、run_events、agent_runs
+- SQLite 业务数据：providers、models、mcp_servers、conversations、messages、roundtables、cost_records、memories、run_events、agent_runs、research_sessions、research_tasks、research_sources、research_claims
 - 运行态：Capability Bus 工具注册表、进行中的 chat/roundtable SSE 流
 
 ## 依赖
@@ -45,3 +45,5 @@ Taori 业务编排进程，负责 LLM 调用、工具调度、圆桌执行、SQL
 - Sidecar 现支持模型 thinking 配置：全局默认值复用 `memories(scope='global', key='thinking_enabled')`，单模型 `models.thinking_enabled` 可覆盖全局；聊天、Quick Compare、Roundtable、自动记忆抽取与 `/v1/models/:id/test` 共用统一解析。当前已知适配：OpenRouter → `reasoning`，DeepSeek 官方 → `thinking`，OpenAI/custom 的 GPT-5 / o 系列 → `reasoning_effort`；未确认的 provider 保持不注入 thinking 参数。
 - standalone npm CLI 新增 daemon 生命周期：`taori daemon start|status|stop`；默认仍前台监听 `127.0.0.1`，但 standalone 可通过 `--host 0.0.0.0` 进入远程 / Web 部署模式。desktop 托管语义不变，仍由 Rust 负责本地 sidecar 的 spawn / 守护。
 - standalone npm 模式现可同源托管浏览器 Web UI：当 npm 包内存在 `dist-web` 资源时，Sidecar 会直接提供 `/` 登录页与 `/app` Web UI；浏览器用户通过 `--password` 设置的访问密码换取 HttpOnly cookie 会话，普通脚本与自动化仍可继续使用 Bearer Token 调 API。
+- 聊天成本链路新增 `cache_input_tokens`：`/v1/chat` 流内 `cost` annotation、`cost.recorded` run event 与 `GET /v1/costs/calls` 会透出输入 / cache / 输出 token；OpenAI-compatible provider metadata 与 DeepSeek 官方原始 usage 中的 cached prompt tokens 会被尽力采集并落入 `cost_records`。
+- 深度研究第一切片已落地：Sidecar 新增 `research_sessions / tasks / sources / claims` 四张表、`ResearchRepo`、确定性 planner 与 `/v1/research/sessions*` 资源路由；`start` 支持计划预览与确认启动，`pause/resume/cancel/export` 支持工作台基础状态流转与导出。

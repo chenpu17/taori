@@ -106,6 +106,11 @@ async function expectPageHasNoHorizontalOverflow(page: Page): Promise<void> {
   expect(overflow).toBeLessThanOrEqual(1);
 }
 
+async function expectElementHasNoHorizontalOverflow(locator: Locator): Promise<void> {
+  const overflow = await locator.evaluate((el) => el.scrollWidth - el.clientWidth);
+  expect(overflow).toBeLessThanOrEqual(1);
+}
+
 async function capture(page: Page, testInfo: TestInfo, name: string): Promise<void> {
   const path = testInfo.outputPath(`${name}.png`);
   await page.waitForTimeout(250);
@@ -151,14 +156,16 @@ test('desktop visual: capability suggestion and tool timeline are legible in the
     timeout: 30_000,
   });
 
-  const timeline = page.getByTestId('tool-trace-timeline').last();
+  const settledAssistant = page.locator('.msg.assistant:not(.streaming)').last();
+  await expect(settledAssistant).toContainText('视觉验证回复', { timeout: 30_000 });
+  const timeline = settledAssistant.getByTestId('tool-trace-timeline');
   await expect(timeline).toBeVisible();
   await expect(timeline).toContainText('工具执行');
   await expect(timeline.getByTestId('tool-trace-step').first()).toHaveAttribute(
     'data-tool',
     'builtin.web_search',
   );
-  await expectHorizontallyWithinViewport(page, timeline);
+  await expectElementHasNoHorizontalOverflow(timeline);
   await expectPageHasNoHorizontalOverflow(page);
   await capture(page, testInfo, 'desktop-tool-timeline');
 });

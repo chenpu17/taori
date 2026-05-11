@@ -12,3 +12,8 @@ apps/sidecar/data/
 .taori-dev/
 test-results/
 apps/web/e2e/.test-env
+
+# build artifacts
+packages/npm/dist-web/
+apps/web/tsconfig.tsbuildinfo
+tmp/

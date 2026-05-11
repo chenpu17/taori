@@ -22,6 +22,10 @@ import {
 } from '@taori/shared';
 import type { ProviderType } from '@taori/shared';
 import { api } from './api.js';
+import {
+  CUSTOM_COMPAT_PROVIDER_TEMPLATES,
+  type CompatProviderTemplate,
+} from './providerLabels.js';
 
 interface OnboardingProps {
   onDone: () => void;
@@ -29,6 +33,8 @@ interface OnboardingProps {
 }
 
 type Step = 'enter-key' | 'testing' | 'discovering' | 'pick-model' | 'saving';
+type CompatProviderId = CompatProviderTemplate['id'];
+type OnboardingProviderChoice = ProviderType | CompatProviderId;
 
 const PROVIDER_PRESETS: Partial<
   Record<ProviderType, { label: string; default_base_url: string; help: string }>
@@ -85,13 +91,143 @@ const PROVIDER_PRESETS: Partial<
   },
 };
 
+const PROVIDER_GUIDES: Partial<
+  Record<
+    ProviderType,
+    {
+      category: string;
+      bestFor: string;
+      fallback: string;
+      examples?: string[];
+    }
+  >
+> = {
+  deepseek: {
+    category: '国内直连',
+    bestFor: '适合作为主力中文推理 / 编码入口。',
+    fallback: '推荐把硅基流动或 OpenRouter 放在后面做兜底。',
+  },
+  siliconflow: {
+    category: '国内聚合',
+    bestFor: '适合统一接入多家国产模型，承担扩展面与 fallback。',
+    fallback: '高频主任务建议仍保留一个官方直连作为第一顺位。',
+  },
+  volcengine_ark: {
+    category: '国内直连',
+    bestFor: '适合豆包、视觉、生图和视频一体化接入。',
+    fallback: '建议搭配硅基流动或 OpenRouter 做视觉 / 图像备用出口。',
+  },
+  huawei_maas: {
+    category: '国内直连',
+    bestFor: '适合企业云接入和兼容 OpenAI 的稳态出口。',
+    fallback: '企业网络或区域不稳时，建议同时保留公网聚合备份。',
+  },
+  openrouter: {
+    category: '海外聚合',
+    bestFor: '适合广覆盖试模型、做价格对照、承担海外 fallback。',
+    fallback: '中文主力建议另配国内直连模型，减少延迟和本地化落差。',
+  },
+  ollama: {
+    category: '本地',
+    bestFor: '适合离线 / 内网兜底，不依赖外部账单。',
+    fallback: '更适合做最后一道 fallback，不建议一上来承担关键主任务。',
+  },
+  packyapi: {
+    category: '专用图像',
+    bestFor: '适合作为固定生图出口，承担图像专用工作流。',
+    fallback: '建议同时保留火山或硅基流动，避免单点图像出口。',
+  },
+  custom: {
+    category: '兼容接入',
+    bestFor: '适合接通义、Kimi、智谱、MiniMax 等 OpenAI 兼容端点。',
+    fallback: '推荐把兼容端点放在明确主力 provider 后面，用作定向补位。',
+    examples: ['阿里云百炼', '智谱', 'MiniMax', 'Kimi'],
+  },
+};
+
+const PROVIDER_STACK_RECIPES: Partial<
+  Record<
+    ProviderType,
+    {
+      title: string;
+      primary: string;
+      fallback: string;
+      note: string;
+    }[]
+  >
+> = {
+  deepseek: [
+    {
+      title: '中文主力 + 海外兜底',
+      primary: 'DeepSeek 官方',
+      fallback: 'OpenRouter',
+      note: '主链路保持低延迟和中文体验，复杂场景再切到海外广覆盖模型。',
+    },
+    {
+      title: '中文主力 + 国产扩展面',
+      primary: 'DeepSeek 官方',
+      fallback: '硅基流动',
+      note: '适合想把国内直连放前面，同时保留更多模型和多模态出口的组合。',
+    },
+  ],
+  siliconflow: [
+    {
+      title: '国产聚合 + 官方主力',
+      primary: 'DeepSeek 官方',
+      fallback: '硅基流动',
+      note: '把官方模型留给高频主任务，再用聚合承担扩展、失败重试和多样化试验。',
+    },
+  ],
+  openrouter: [
+    {
+      title: '广覆盖试模 + 中文主力',
+      primary: 'DeepSeek 官方 / 火山方舟',
+      fallback: 'OpenRouter',
+      note: '先用国内直连扛主路径，再用 OpenRouter 做比价、试模和海外兜底。',
+    },
+  ],
+  volcengine_ark: [
+    {
+      title: '视觉生产 + 聊天兜底',
+      primary: '火山方舟',
+      fallback: '硅基流动 / OpenRouter',
+      note: '适合把视觉、多模态和图像工作流留在火山体系，同时保留备用出口。',
+    },
+  ],
+  ollama: [
+    {
+      title: '本地保底 + 云端主力',
+      primary: 'DeepSeek 官方 / OpenRouter',
+      fallback: 'Ollama',
+      note: '更适合把 Ollama 放在最后一道保底，而不是一开始承担全部任务。',
+    },
+  ],
+  custom: [
+    {
+      title: '兼容端点补位栈',
+      primary: 'DeepSeek 官方 / OpenRouter',
+      fallback: '通义 / Kimi / 智谱（兼容端点）',
+      note: '兼容端点更适合做特定场景补位；可直接选阿里云百炼、智谱、MiniMax、Kimi 模板自动填充 Base URL。',
+    },
+  ],
+};
+
 function defaultProviderName(type: ProviderType): string {
   const presetLabel = PROVIDER_PRESETS[type]?.label ?? type;
   return presetLabel.replace(/（.+?）/g, '').trim() || '自定义 Provider';
 }
 
+function findCompatTemplate(choice: OnboardingProviderChoice): CompatProviderTemplate | null {
+  return CUSTOM_COMPAT_PROVIDER_TEMPLATES.find((template) => template.id === choice) ?? null;
+}
+
+function defaultProviderNameForChoice(choice: OnboardingProviderChoice, type: ProviderType): string {
+  return findCompatTemplate(choice)?.providerName ?? defaultProviderName(type);
+}
+
 export function Onboarding({ onDone, onSkip }: OnboardingProps): JSX.Element {
   const [type, setType] = useState<ProviderType>('openrouter');
+  const [providerChoice, setProviderChoice] = useState<OnboardingProviderChoice>('openrouter');
   const [providerName, setProviderName] = useState(defaultProviderName('openrouter'));
   const [providerNameTouched, setProviderNameTouched] = useState(false);
   const [baseUrl, setBaseUrl] = useState(
@@ -122,15 +258,26 @@ export function Onboarding({ onDone, onSkip }: OnboardingProps): JSX.Element {
   // useful starting set without having to pick by hand.
   const [chosenSet, setChosenSet] = useState<Set<string>>(new Set());
 
-  const onTypeChange = (t: ProviderType): void => {
-    const previousDefault = defaultProviderName(type);
+  const onTypeChange = (t: ProviderType, nextChoice: OnboardingProviderChoice = t): void => {
+    const previousDefault = defaultProviderNameForChoice(providerChoice, type);
+    setProviderChoice(nextChoice);
     setType(t);
     const preset = PROVIDER_PRESETS[t];
     if (preset) setBaseUrl(preset.default_base_url);
     if (!providerNameTouched || providerName.trim() === previousDefault) {
-      setProviderName(defaultProviderName(t));
+      setProviderName(defaultProviderNameForChoice(nextChoice, t));
       setProviderNameTouched(false);
     }
+  };
+
+  const applyCompatTemplate = (template: (typeof CUSTOM_COMPAT_PROVIDER_TEMPLATES)[number]): void => {
+    setProviderChoice(template.id);
+    if (type !== 'custom') {
+      setType('custom');
+    }
+    setBaseUrl(template.baseUrl);
+    setProviderName(template.providerName);
+    setProviderNameTouched(true);
   };
 
   const submitKey = async (e: React.FormEvent): Promise<void> => {
@@ -186,26 +333,8 @@ export function Onboarding({ onDone, onSkip }: OnboardingProps): JSX.Element {
             price_per_video_second: m.price_per_video_second ?? null,
           })),
       });
-      const chatEligible = disc.models.find(
-        (m) => m.capability === 'chat' || m.capability === 'multimodal',
-      );
-      const primary = disc.recommended.chat ?? chatEligible?.model_name ?? '';
-      setChosen(primary);
-      // Pre-check up to 3 candidates. Always include the recommended one.
-      // Then add up to 2 additional non-vision low-tier picks.
-      const initial = new Set<string>();
-      if (primary) initial.add(primary);
-      const firstVision = disc.models.find((m) => m.capability === 'multimodal');
-      if (firstVision) initial.add(firstVision.model_name);
-      const firstImage = disc.models.find((m) => m.capability === 'image');
-      if (firstImage) initial.add(firstImage.model_name);
-      const firstVideo = disc.models.find((m) => m.capability === 'video');
-      if (firstVideo) initial.add(firstVideo.model_name);
-      for (const m of disc.models) {
-        if (initial.size >= 4) break;
-        if (!initial.has(m.model_name)) initial.add(m.model_name);
-      }
-      setChosenSet(initial);
+      setChosen('');
+      setChosenSet(new Set());
       setStep('pick-model');
     } catch (e) {
       setStep('enter-key');
@@ -216,16 +345,13 @@ export function Onboarding({ onDone, onSkip }: OnboardingProps): JSX.Element {
   const finishWithModel = async (): Promise<void> => {
     if (!discovery) return;
     setError(null);
-    // Determine the set we will create. The "primary" chosen one becomes the
-    // default for chat (and vision if it supports vision). The rest are
-    // imported as additional, non-default models so users can switch.
-    const primary = chosen;
     const set = new Set(chosenSet);
-    if (primary) set.add(primary);
     if (set.size === 0) {
       setError('请至少勾选一个模型');
       return;
     }
+    // Only an actually selected chat/multimodal model can become the default.
+    const primary = chosen && set.has(chosen) ? chosen : '';
     setStep('saving');
     try {
       for (const modelName of set) {
@@ -263,19 +389,26 @@ export function Onboarding({ onDone, onSkip }: OnboardingProps): JSX.Element {
   const toggleChosen = (modelName: string): void => {
     setChosenSet((prev) => {
       const next = new Set(prev);
-      if (next.has(modelName)) {
-        next.delete(modelName);
-        // If we just deselected the primary, fall back to any remaining one.
-        if (modelName === chosen) {
-          const fallback = next.values().next().value;
-          setChosen(fallback ?? '');
+        const currentCandidate = discovery?.candidates.find((candidate) => candidate.model_name === modelName);
+        const canBeChatDefault =
+          currentCandidate?.capability === 'chat' || currentCandidate?.capability === 'multimodal';
+        if (next.has(modelName)) {
+          next.delete(modelName);
+          // If we just deselected the primary, fall back to any remaining one.
+          if (modelName === chosen) {
+            const fallback = discovery?.candidates.find(
+              (candidate) =>
+                next.has(candidate.model_name)
+                && (candidate.capability === 'chat' || candidate.capability === 'multimodal'),
+            )?.model_name;
+            setChosen(fallback ?? '');
+          }
+        } else {
+          next.add(modelName);
+          if (!chosen && canBeChatDefault) setChosen(modelName);
         }
-      } else {
-        next.add(modelName);
-        if (!chosen) setChosen(modelName);
-      }
-      return next;
-    });
+        return next;
+      });
   };
 
   const statusCopy: Partial<Record<Step, { title: string; hint: string }>> = {
@@ -285,13 +418,16 @@ export function Onboarding({ onDone, onSkip }: OnboardingProps): JSX.Element {
     },
     discovering: {
       title: '正在拉取可用模型',
-      hint: 'Taori 会自动识别推荐模型，并帮你预选一组适合起步的候选。',
+      hint: 'Taori 会识别推荐模型，你可以按需勾选要导入的候选。',
     },
     saving: {
       title: '正在保存模型配置',
       hint: '导入完成后即可直接开始聊天、作图或发起圆桌。',
     },
   };
+  const providerGuide = PROVIDER_GUIDES[type];
+  const providerStackRecipes = PROVIDER_STACK_RECIPES[type] ?? [];
+  const providerHelp = findCompatTemplate(providerChoice)?.hint ?? PROVIDER_PRESETS[type]?.help ?? '';
 
   return (
     <div className="onboarding" data-testid="onboarding">
@@ -308,18 +444,75 @@ export function Onboarding({ onDone, onSkip }: OnboardingProps): JSX.Element {
           <label>
             供应商
             <select
-              value={type}
-              onChange={(e) => onTypeChange(e.target.value as ProviderType)}
+              value={providerChoice}
+              onChange={(e) => {
+                const nextChoice = e.target.value as OnboardingProviderChoice;
+                const compatTemplate = findCompatTemplate(nextChoice);
+                if (compatTemplate) {
+                  applyCompatTemplate(compatTemplate);
+                  return;
+                }
+                onTypeChange(nextChoice as ProviderType);
+              }}
               data-testid="onb-provider-type"
             >
-              {Object.entries(PROVIDER_PRESETS).map(([k, v]) => (
-                <option key={k} value={k}>
-                  {v.label}
-                </option>
-              ))}
+              <optgroup label="官方 / 原生">
+                {Object.entries(PROVIDER_PRESETS).map(([k, v]) => (
+                  <option key={k} value={k}>
+                    {v.label}
+                  </option>
+                ))}
+              </optgroup>
+              <optgroup label="常用兼容端点">
+                {CUSTOM_COMPAT_PROVIDER_TEMPLATES.map((template) => (
+                  <option key={template.id} value={template.id}>
+                    {template.label}
+                  </option>
+                ))}
+              </optgroup>
             </select>
           </label>
-          <p className="hint">{PROVIDER_PRESETS[type]?.help ?? ''}</p>
+          <p className="hint">{providerHelp}</p>
+          {providerGuide && (
+            <div className="onboarding-provider-note" data-testid="onb-provider-note">
+              <strong>{providerGuide.category}</strong>
+              <span>{providerGuide.bestFor}</span>
+              {providerGuide.examples?.length ? (
+                <em>{providerGuide.examples.join(' / ')}</em>
+              ) : null}
+              {providerStackRecipes[0] ? (
+                <small>
+                  推荐搭配：{providerStackRecipes[0].primary} → {providerStackRecipes[0].fallback}
+                </small>
+              ) : null}
+            </div>
+          )}
+          {type === 'custom' && (
+            <div className="onboarding-compat-templates" data-testid="onb-compat-templates">
+              <div className="onboarding-compat-templates__head">
+                <strong>常用兼容供应商</strong>
+                <span>选一个模板即可自动填好名称和 Base URL，再补 API Key 即可。</span>
+              </div>
+              <div className="onboarding-compat-templates__grid">
+                {CUSTOM_COMPAT_PROVIDER_TEMPLATES.map((template) => {
+                  const active =
+                    providerName.trim() === template.providerName && baseUrl.trim() === template.baseUrl;
+                  return (
+                    <button
+                      key={template.id}
+                      type="button"
+                      className={`onboarding-compat-template${active ? ' is-active' : ''}`}
+                      onClick={() => applyCompatTemplate(template)}
+                      data-testid={`onb-compat-template-${template.id}`}
+                    >
+                      <strong>{template.label}</strong>
+                      <span>{template.hint}</span>
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+          )}
           <label>
             供应商名称
             <input
@@ -330,7 +523,7 @@ export function Onboarding({ onDone, onSkip }: OnboardingProps): JSX.Element {
               }}
               maxLength={100}
               spellCheck={false}
-              placeholder={defaultProviderName(type)}
+              placeholder={defaultProviderNameForChoice(providerChoice, type)}
               data-testid="onb-provider-name"
             />
           </label>
@@ -389,6 +582,11 @@ export function Onboarding({ onDone, onSkip }: OnboardingProps): JSX.Element {
           <p className="onboarding-pick-intro">
             选择要导入的模型（可多选）。文本/多模态模型可设为默认聊天模型；图像/视频模型仅可在画图/视频流程中使用。
           </p>
+          {discovery.chat ? (
+            <p className="onboarding-pick-note" data-testid="onb-pick-note">
+              推荐默认聊天模型：{discovery.candidates.find((candidate) => candidate.model_name === discovery.chat)?.display_name ?? discovery.chat}
+            </p>
+          ) : null}
           <ul className="onboarding-candidates" data-testid="onb-candidates">
             {discovery.candidates.map((m) => {
               const tier = priceTier(m.price_input_per_1m);

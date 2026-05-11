@@ -15,6 +15,7 @@ import { TaoriIcon } from './TaoriIcon.js';
 import { ThemeToggle } from './ThemeToggle.js';
 import { RoundtableLaunchDialog } from './Roundtable.js';
 import { RoundtablePanel } from './RoundtablePanel.js';
+import { ResearchCenter } from './ResearchCenter.js';
 import { priceTier, PRICE_TIER_LABEL, formatUsd, estimateInputTokens, estimateCostUsd } from '@taori/shared';
 import type {
   ContextSource,
@@ -60,9 +61,12 @@ interface CostRunFocusDetail {
 }
 
 interface CostCallFocusDetail {
-  costRecordId: string;
+  costRecordId: string | null;
   runId: string | null;
   runEventId: string | null;
+  providerKey?: string | null;
+  modelId?: string | null;
+  preferredScope?: 'today' | 'week' | 'month';
 }
 
 interface RunTimelineFocusTarget {
@@ -73,9 +77,77 @@ interface RunTimelineFocusTarget {
 
 type MessageCost = {
   input_tokens: number | null;
+  cache_input_tokens: number | null;
   output_tokens: number | null;
   actual_usd: number | null;
 };
+
+interface QuickCompareParticipantConfigDraft {
+  modelId: string;
+  toolNames: string[];
+}
+
+interface QuickCompareArbitrationSummary {
+  recommendedOutputId: string;
+  confidence: 'high' | 'medium' | 'low';
+  title: string;
+  reasons: string[];
+  caution: string | null;
+  totalCostUsd: number | null;
+  minorityTitle: string | null;
+  risks: string[];
+  reviewPoints: string[];
+  cards: Array<{
+    outputId: string;
+    title: string;
+    score: number;
+    stance: 'recommended' | 'minority' | 'supporting';
+    costUsd: number | null;
+    toolSuccesses: number;
+    toolFailures: number;
+  }>;
+}
+
+type QuickCompareReportActionState = {
+  kind: 'copied' | 'exported' | 'drafted' | 'minority' | 'focused' | 'error';
+  message: string;
+};
+
+interface QuickCompareCostLogRow {
+  id: string;
+  actual_cost_usd: number | null;
+  classification: string | null;
+  success: boolean;
+}
+
+function quickCompareLabelKey(model: Model, providers: Provider[]): string {
+  return modelDisplayWithProvider(model, providers).trim().toLowerCase();
+}
+
+function quickCompareDisambiguationSuffix(model: Model, providers: Provider[]): string | null {
+  const provider = providers.find((item) => item.id === model.provider_id);
+  if (!provider) return model.id.slice(-4);
+  if (provider.base_url) {
+    try {
+      const host = new URL(provider.base_url).host;
+      if (host) return host;
+    } catch {
+      // Fall back to a stable short id when the configured base URL is malformed.
+    }
+  }
+  return provider.id.slice(-4);
+}
+
+function formatQuickCompareModelLabel(
+  model: Model,
+  providers: Provider[],
+  duplicateCounts: Map<string, number>,
+): string {
+  const label = modelDisplayWithProvider(model, providers);
+  if ((duplicateCounts.get(quickCompareLabelKey(model, providers)) ?? 0) <= 1) return label;
+  const suffix = quickCompareDisambiguationSuffix(model, providers);
+  return suffix ? `${label} · ${suffix}` : label;
+}
 
 const STARTER_PROMPTS: Array<{ icon: string; title: string; desc: string; text: string }> = [
   {
@@ -206,6 +278,14 @@ interface GeneratedImage {
   data_b64?: string;
 }
 
+interface FileSearchPreviewItem {
+  chunk_id: string;
+  file_id: string;
+  file_name: string | null;
+  snippet: string;
+  score: number;
+}
+
 function formatTokenCount(value: number | null): string {
   return value == null ? '—' : value.toLocaleString();
 }
@@ -227,6 +307,17 @@ function formatLatencyMs(value: number | null | undefined): string | null {
   if (value == null || !Number.isFinite(value)) return null;
   if (value < 1_000) return `${Math.round(value)}ms`;
   return value < 10_000 ? `${(value / 1_000).toFixed(1)}s` : `${Math.round(value / 1_000)}s`;
+}
+
+function quickCompareToolLabel(name: string): string {
+  const labels: Record<string, string> = {
+    'builtin.file_read': '文件读取',
+    'builtin.file_search': '文件检索',
+    'builtin.web_search': '网页搜索',
+    'builtin.web_fetch': '网页抓取',
+    'builtin.image_generate': '图像生成',
+  };
+  return labels[name] ?? name;
 }
 
 function currentBudgetMonthKey(now = new Date()): string {
@@ -551,11 +642,14 @@ export function App(): JSX.Element {
   useEffect(() => {
     const onFocusCostCall = (event: Event): void => {
       const detail = (event as CustomEvent<CostCallFocusDetail>).detail;
-      if (!detail?.costRecordId) return;
+      if (!detail?.costRecordId && !detail?.providerKey && !detail?.modelId) return;
       setCostCallFocus({
         costRecordId: detail.costRecordId,
         runId: detail.runId ?? null,
         runEventId: detail.runEventId ?? null,
+        providerKey: detail.providerKey ?? null,
+        modelId: detail.modelId ?? null,
+        preferredScope: detail.preferredScope,
       });
       openControlCenter('costs');
     };
@@ -826,6 +920,25 @@ function Workspace({
   const [roundtableLaunchSeq, setRoundtableLaunchSeq] = useState(0);
   const [timelineFocus, setTimelineFocus] = useState<RunTimelineFocusTarget | null>(null);
 
+  // 2026-05 UI shell: workspace mode (chat vs deep research).
+  // Stored in localStorage so user's last view is restored on reload.
+  const [workspaceMode, setWorkspaceMode] = useState<'chat' | 'research'>(() => {
+    if (typeof window === 'undefined') return 'chat';
+    try {
+      const raw = window.localStorage.getItem('taori.workspace.mode');
+      return raw === 'research' ? 'research' : 'chat';
+    } catch {
+      return 'chat';
+    }
+  });
+  useEffect(() => {
+    try {
+      window.localStorage.setItem('taori.workspace.mode', workspaceMode);
+    } catch {
+      // ignore
+    }
+  }, [workspaceMode]);
+
   useEffect(() => {
     const t = setTimeout(() => setDebouncedQuery(searchQuery), 200);
     return () => clearTimeout(t);
@@ -963,10 +1076,48 @@ function Workspace({
     return () => document.removeEventListener('keydown', handleKeyDown);
   }, []);
 
-  const onNewChat = (): void => {
+  const onNewChat = useCallback((): void => {
     setActiveConvId(null);
     setChatKey((n) => n + 1);
-  };
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    let unlisten: (() => void) | null = null;
+    void import('@tauri-apps/api/event')
+      .then(({ listen }) =>
+        listen<{ action?: string } | string>('taori:desktop-action', (event) => {
+          const action =
+            typeof event.payload === 'string' ? event.payload : event.payload?.action ?? null;
+          if (!action) return;
+          if (action === 'new-chat') {
+            onNewChat();
+            return;
+          }
+          if (action === 'open-settings') {
+            onOpenSettings();
+            return;
+          }
+          if (action === 'open-help') {
+            onOpenHelp();
+          }
+        }),
+      )
+      .then((dispose) => {
+        if (cancelled) {
+          dispose();
+          return;
+        }
+        unlisten = dispose;
+      })
+      .catch(() => {
+        /* browser mode: no desktop event bridge */
+      });
+    return () => {
+      cancelled = true;
+      unlisten?.();
+    };
+  }, [onNewChat, onOpenHelp, onOpenSettings]);
 
   const onSelectConv = (id: string): void => {
     if (id === activeConvId) return;
@@ -1052,6 +1203,12 @@ function Workspace({
     setBatchMode(false);
     setSelectedConvIds(new Set());
   };
+  const onSelectAllVisible = (): void => {
+    setSelectedConvIds(new Set(conversations.map((conversation) => conversation.id)));
+  };
+  const onClearSelected = (): void => {
+    setSelectedConvIds(new Set());
+  };
   const onBatchDelete = async (): Promise<void> => {
     if (selectedConvIds.size === 0) return;
     if (
@@ -1080,14 +1237,26 @@ function Workspace({
     await refreshConversations();
   };
 
+  useEffect(() => {
+    if (!batchMode) return;
+    setSelectedConvIds((prev) => {
+      if (prev.size === 0) return prev;
+      const visibleIds = new Set(conversations.map((conversation) => conversation.id));
+      const next = new Set(Array.from(prev).filter((id) => visibleIds.has(id)));
+      return next.size === prev.size ? prev : next;
+    });
+  }, [batchMode, conversations]);
+
   const activeModel = useMemo(
     () => chatModels.find((m) => m.id === activeModelId) ?? defaultModel,
     [chatModels, activeModelId, defaultModel],
   );
 
   return (
-    <div className="workspace">
+    <div className="workspace" data-workspace-mode={workspaceMode}>
       <Sidebar
+        workspaceMode={workspaceMode}
+        onWorkspaceModeChange={setWorkspaceMode}
         conversations={conversations}
         activeId={activeConvId}
         onNew={onNewChat}
@@ -1103,40 +1272,46 @@ function Workspace({
         onToggleSelected={onToggleSelected}
         onEnterBatch={onEnterBatch}
         onExitBatch={onExitBatch}
+        onSelectAllVisible={onSelectAllVisible}
+        onClearSelected={onClearSelected}
         onBatchDelete={() => void onBatchDelete()}
       />
       <main className="workspace-main">
-        <ChatPanel
-          key={chatKey}
-          endpoint={endpoint}
-          providers={providers}
-          chatModels={chatModels}
-          model={activeModel}
-          tools={tools}
-          modelMemoryScope={activeModelMemoryScope}
-          onModelChange={persistActiveModel}
-          conversationId={activeConvId}
-          conversationType={
-            conversations.find((c) => c.id === activeConvId)?.type ?? null
-          }
-          onConversationCreated={(id) => {
-            setActiveConvId(id);
-            void refreshConversations();
-          }}
-          onConversationUpdated={() => void refreshConversations()}
-          onOpenSettings={onOpenSettings}
-          onOpenModelCenter={onOpenModelCenter}
-          onOpenTools={onOpenTools}
-          externalOverlayOpen={externalOverlayOpen}
-          roundtableLaunchSeq={roundtableLaunchSeq}
-          timelineFocus={timelineFocus}
-          onTimelineFocusConsumed={() => setTimelineFocus(null)}
-          onLoopbackToConversation={(id) => {
-            setActiveConvId(id);
-            setTimelineFocus(null);
-            void refreshConversations();
-          }}
-        />
+        {workspaceMode === 'research' ? (
+          <ResearchCenter />
+        ) : (
+          <ChatPanel
+            key={chatKey}
+            endpoint={endpoint}
+            providers={providers}
+            chatModels={chatModels}
+            model={activeModel}
+            tools={tools}
+            modelMemoryScope={activeModelMemoryScope}
+            onModelChange={persistActiveModel}
+            conversationId={activeConvId}
+            conversationType={
+              conversations.find((c) => c.id === activeConvId)?.type ?? null
+            }
+            onConversationCreated={(id) => {
+              setActiveConvId(id);
+              void refreshConversations();
+            }}
+            onConversationUpdated={() => void refreshConversations()}
+            onOpenSettings={onOpenSettings}
+            onOpenModelCenter={onOpenModelCenter}
+            onOpenTools={onOpenTools}
+            externalOverlayOpen={externalOverlayOpen}
+            roundtableLaunchSeq={roundtableLaunchSeq}
+            timelineFocus={timelineFocus}
+            onTimelineFocusConsumed={() => setTimelineFocus(null)}
+            onLoopbackToConversation={(id) => {
+              setActiveConvId(id);
+              setTimelineFocus(null);
+              void refreshConversations();
+            }}
+          />
+        )}
       </main>
       <CommandPalette
         isOpen={cmdPaletteOpen}
@@ -1424,6 +1599,8 @@ function renderGroupedConversations(
 }
 
 function Sidebar({
+  workspaceMode,
+  onWorkspaceModeChange,
   conversations,
   activeId,
   onNew,
@@ -1439,8 +1616,12 @@ function Sidebar({
   onToggleSelected,
   onEnterBatch,
   onExitBatch,
+  onSelectAllVisible,
+  onClearSelected,
   onBatchDelete,
 }: {
+  workspaceMode: 'chat' | 'research';
+  onWorkspaceModeChange: (mode: 'chat' | 'research') => void;
   conversations: ConversationSummary[];
   activeId: string | null;
   onNew: () => void;
@@ -1456,10 +1637,14 @@ function Sidebar({
   onToggleSelected: (id: string) => void;
   onEnterBatch: () => void;
   onExitBatch: () => void;
+  onSelectAllVisible: () => void;
+  onClearSelected: () => void;
   onBatchDelete: () => void;
 }): JSX.Element {
   const [editingTagsForId, setEditingTagsForId] = useState<string | null>(null);
   const [tagDraft, setTagDraft] = useState<string>('');
+  const allVisibleSelected =
+    conversations.length > 0 && conversations.every((conversation) => selectedIds.has(conversation.id));
   const cb: ConvRowCallbacks = {
     onSelect,
     onDelete,
@@ -1475,51 +1660,93 @@ function Sidebar({
     setTagDraft,
   };
   return (
-    <aside className="sidebar" data-testid="sidebar">
-      <button type="button" className="new-chat" onClick={onNew} data-testid="sidebar-new">
-        🆕 新对话
-      </button>
-      <div className="sidebar-search">
-        <input
-          type="search"
-          className="conv-search"
-          data-testid="conv-search"
-          placeholder="搜索对话标题或内容…"
-          value={searchQuery}
-          onChange={(e) => onSearchQueryChange(e.target.value)}
-        />
-      </div>
-      <div className="sidebar-batch-bar">
-        {batchMode ? (
-          <>
-            <span className="batch-count" data-testid="batch-count">
-              已选 {selectedIds.size}
-            </span>
-            <button
-              type="button"
-              data-testid="batch-delete"
-              onClick={onBatchDelete}
-              disabled={selectedIds.size === 0}
-            >
-              批量删除
-            </button>
-            <button type="button" data-testid="batch-cancel" onClick={onExitBatch}>
-              取消
-            </button>
-          </>
-        ) : (
-          <button
-            type="button"
-            data-testid="batch-enter"
-            className="batch-enter"
-            onClick={onEnterBatch}
-            disabled={conversations.length === 0}
-            title="批量选择"
-          >
-            ☑ 批量
+    <aside className="sidebar" data-testid="sidebar" data-mode={workspaceMode}>
+      <nav className="workspace-tabs" data-testid="workspace-tabs" aria-label="工作区">
+        <button
+          type="button"
+          className={`workspace-tab ${workspaceMode === 'chat' ? 'active' : ''}`}
+          data-testid="workspace-tab-chat"
+          aria-pressed={workspaceMode === 'chat'}
+          onClick={() => onWorkspaceModeChange('chat')}
+        >
+          <span className="workspace-tab__icon" aria-hidden>💬</span>
+          <span>对话</span>
+        </button>
+        <button
+          type="button"
+          className={`workspace-tab ${workspaceMode === 'research' ? 'active' : ''}`}
+          data-testid="workspace-tab-research"
+          aria-pressed={workspaceMode === 'research'}
+          onClick={() => onWorkspaceModeChange('research')}
+        >
+          <span className="workspace-tab__icon" aria-hidden>🔎</span>
+          <span>深度研究</span>
+        </button>
+      </nav>
+      {workspaceMode === 'research' ? (
+        <div className="sidebar-research-hint" data-testid="sidebar-research-hint">
+          <p>正在使用 <strong>深度研究</strong>。</p>
+          <p className="sidebar-research-hint__sub">
+            研究任务列表与工作台位于右侧主面板。需要回到日常对话时，点击上方"对话"。
+          </p>
+        </div>
+      ) : (
+        <>
+          <button type="button" className="new-chat" onClick={onNew} data-testid="sidebar-new">
+            🆕 新对话
           </button>
-        )}
-      </div>
+          <div className="sidebar-search">
+            <input
+              type="search"
+              className="conv-search"
+              data-testid="conv-search"
+              placeholder="搜索对话标题或内容…"
+              value={searchQuery}
+              onChange={(e) => onSearchQueryChange(e.target.value)}
+            />
+          </div>
+          <div className="sidebar-batch-bar">
+            {batchMode ? (
+              <>
+                <span className="batch-count" data-testid="batch-count">
+                  已选 {selectedIds.size}
+                </span>
+                <button
+                  type="button"
+                  data-testid="batch-select-all"
+                  onClick={allVisibleSelected ? onClearSelected : onSelectAllVisible}
+                  disabled={conversations.length === 0}
+                >
+                  {allVisibleSelected ? '清空选择' : '全选当前列表'}
+                </button>
+                <button
+                  type="button"
+                  data-testid="batch-delete"
+                  onClick={onBatchDelete}
+                  disabled={selectedIds.size === 0}
+                >
+                  批量删除
+                </button>
+                <button type="button" data-testid="batch-cancel" onClick={onExitBatch}>
+                  取消
+                </button>
+              </>
+            ) : (
+              <button
+                type="button"
+                data-testid="batch-enter"
+                className="batch-enter"
+                onClick={onEnterBatch}
+                disabled={conversations.length === 0}
+                title="批量选择"
+              >
+                ☑ 批量
+              </button>
+            )}
+          </div>
+        </>
+      )}
+      {workspaceMode === 'chat' && (
       <ul className="conv-list" data-testid="conv-list">
         {conversations.length === 0 ? (
           <li className="conv-empty">
@@ -1546,6 +1773,7 @@ function Sidebar({
           renderGroupedConversations(conversations, activeId, searchQuery, cb)
         )}
       </ul>
+      )}
     </aside>
   );
 }
@@ -1623,8 +1851,17 @@ function ChatPanel({
   const [pending, setPending] = useState<PendingAttachment[]>([]);
   const [dropping, setDropping] = useState(false);
   const [dropError, setDropError] = useState<string | null>(null);
+  const [desktopImporting, setDesktopImporting] = useState(false);
+  const desktopImportTimeoutRef = useRef<number | null>(null);
+  const [fileSearchPreview, setFileSearchPreview] = useState<{
+    query: string;
+    loading: boolean;
+    results: FileSearchPreviewItem[];
+  }>({ query: '', loading: false, results: [] });
   const pendingHasImage = pending.some((p) => p.kind === 'image');
   const [historyLoading, setHistoryLoading] = useState(false);
+  const desktopClipboardAvailable =
+    typeof window !== 'undefined' && Boolean(window.__TAURI_INTERNALS__);
   // M2.1 — captures `failure_decision` annotations keyed by assistant
   // message id. We render a card below that message; we also use it to
   // drive the optional auto-fallback single-hop retry.
@@ -1650,6 +1887,48 @@ function ChatPanel({
       setDropError(null);
     }
   }, [dropError, pendingHasImage]);
+
+  const clearDesktopImportTimeout = useCallback((): void => {
+    if (desktopImportTimeoutRef.current != null) {
+      window.clearTimeout(desktopImportTimeoutRef.current);
+      desktopImportTimeoutRef.current = null;
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!desktopImporting) {
+      clearDesktopImportTimeout();
+      return;
+    }
+    clearDesktopImportTimeout();
+    desktopImportTimeoutRef.current = window.setTimeout(() => {
+      desktopImportTimeoutRef.current = null;
+      setDesktopImporting(false);
+      setDropError('桌面剪贴板导入超时，请重试。');
+    }, 5_000);
+    return () => {
+      clearDesktopImportTimeout();
+    };
+  }, [clearDesktopImportTimeout, desktopImporting]);
+
+  const maybePromoteVisionModel = useCallback(
+    (attachments: PendingAttachment[]): void => {
+      if (!attachments.some((item) => item.kind === 'image') || model.supports_vision) {
+        return;
+      }
+      const visionPick = chatModels.find(
+        (candidate) =>
+          candidate.supports_vision
+          && !candidate.demoted
+          && !(candidate.disabled_until && candidate.disabled_until > Date.now()),
+      );
+      if (visionPick && visionPick.id !== model.id) {
+        onModelChange(visionPick.id);
+        setDropError(`已自动切换至视觉模型：${modelDisplayWithProvider(visionPick, providers)}`);
+      }
+    },
+    [chatModels, model.id, model.supports_vision, onModelChange, providers],
+  );
 
   const clearFailureDecisionState = useCallback((): void => {
     setFailureByMsg({});
@@ -1821,7 +2100,12 @@ function ChatPanel({
     initialTopic: string;
   } | null>(null);
   const [quickCompare, setQuickCompare] = useState<QuickCompareUiState | null>(null);
+  const [quickCompareCostLogs, setQuickCompareCostLogs] = useState<
+    Record<string, QuickCompareCostLogRow>
+  >({});
   const [quickCompareAdoptingId, setQuickCompareAdoptingId] = useState<string | null>(null);
+  const [quickCompareReportAction, setQuickCompareReportAction] =
+    useState<QuickCompareReportActionState | null>(null);
   const [activeRoundtableId, setActiveRoundtableId] = useState<string | null>(
     null,
   );
@@ -1839,6 +2123,28 @@ function ChatPanel({
     [personas, selectedPersonaId],
   );
   const [templatePickerOpen, setTemplatePickerOpen] = useState(false);
+  // 2026-05 UI shell: ribbon (CapabilityPreflight) collapse, persisted.
+  const [ribbonCollapsed, setRibbonCollapsed] = useState<boolean>(() => {
+    if (typeof window === 'undefined') return true;
+    try {
+      const raw = window.localStorage.getItem('taori.chat.ribbon.collapsed');
+      if (raw === '0') return false;
+      if (raw === '1') return true;
+      return false; // default expanded; user can collapse and we remember it
+    } catch {
+      return false;
+    }
+  });
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(
+        'taori.chat.ribbon.collapsed',
+        ribbonCollapsed ? '1' : '0',
+      );
+    } catch {
+      // ignore
+    }
+  }, [ribbonCollapsed]);
   const [templateVarDraft, setTemplateVarDraft] = useState<{
     template: TemplateLike;
     vars: string[];
@@ -1893,7 +2199,10 @@ function ChatPanel({
         // not JSON — leave alone
       }
     }
-    const res = await fetch(input as RequestInfo, nextInit);
+    const res = await fetch(input as RequestInfo, {
+      ...nextInit,
+      credentials: 'include',
+    });
     if (!res.ok || !res.body) return res;
     const reader = res.body.getReader();
     const decoder = new TextDecoder();
@@ -2472,7 +2781,7 @@ function ChatPanel({
     api: `${endpoint.url}/v1/chat`,
     streamProtocol: 'data',
     fetch: failureFetch,
-    headers: { Authorization: `Bearer ${endpoint.bearer}` },
+    headers: endpoint.bearer ? { Authorization: `Bearer ${endpoint.bearer}` } : undefined,
     body: {
       model_id: model.id,
       conversation_id: conversationId ?? undefined,
@@ -2520,11 +2829,13 @@ function ChatPanel({
         if (a && a.type === 'cost' && typeof a.message_id === 'string') {
           setCostByMsg((prev) => ({
             ...prev,
-            [a.message_id as string]: {
-              input_tokens: typeof a.input_tokens === 'number' ? (a.input_tokens as number) : null,
-              output_tokens: typeof a.output_tokens === 'number' ? (a.output_tokens as number) : null,
-              actual_usd:
-                typeof a.actual_usd === 'number' ? (a.actual_usd as number) : null,
+              [a.message_id as string]: {
+                input_tokens: typeof a.input_tokens === 'number' ? (a.input_tokens as number) : null,
+                cache_input_tokens:
+                  typeof a.cache_input_tokens === 'number' ? (a.cache_input_tokens as number) : null,
+                output_tokens: typeof a.output_tokens === 'number' ? (a.output_tokens as number) : null,
+                actual_usd:
+                  typeof a.actual_usd === 'number' ? (a.actual_usd as number) : null,
             },
           }));
         }
@@ -2572,6 +2883,126 @@ function ChatPanel({
       onConversationUpdated();
     },
   });
+
+  useEffect(() => {
+    let cancelled = false;
+    let unlisten: (() => void) | null = null;
+    void import('@tauri-apps/api/event')
+      .then(({ listen }) =>
+        listen<{
+          action?: string;
+          error?: string | null;
+          clipboard_items?: Array<{
+            kind?: string;
+            text?: string | null;
+            mime?: string | null;
+            name?: string | null;
+            data_b64?: string | null;
+          }>;
+        }>('taori:desktop-action', (event) => {
+          const payload = typeof event.payload === 'string' ? null : event.payload;
+          if (payload?.action !== 'import-clipboard') {
+            return;
+          }
+          clearDesktopImportTimeout();
+          setDesktopImporting(false);
+          if (payload.error) {
+            setDropError(payload.error);
+            window.requestAnimationFrame(() => composerRef.current?.focus());
+            return;
+          }
+          const items = payload.clipboard_items ?? [];
+          const textBlocks = items
+            .filter((item) => item.kind === 'text' && item.text)
+            .map((item) => String(item.text).trim())
+            .filter(Boolean);
+          const imageAttachments: PendingAttachment[] = items
+            .filter((item) => item.kind === 'image' && item.data_b64)
+            .map((item, index) => ({
+              kind: 'image',
+              mime: item.mime || 'image/png',
+              name: item.name || `clipboard-image-${index + 1}.png`,
+              data_b64: String(item.data_b64),
+            }));
+          if (textBlocks.length === 0 && imageAttachments.length === 0) {
+            setDropError('剪贴板里没有可导入的文本或图片。');
+            window.requestAnimationFrame(() => composerRef.current?.focus());
+            return;
+          }
+          setDropError(null);
+          if (textBlocks.length > 0) {
+            setInput((current) => {
+              const prefix = current.trim().length > 0 ? `${current.trimEnd()}\n\n` : '';
+              return `${prefix}${textBlocks.join('\n\n')}`;
+            });
+          }
+          if (imageAttachments.length > 0) {
+            setPending((current) => [...current, ...imageAttachments]);
+            maybePromoteVisionModel(imageAttachments);
+          }
+          window.requestAnimationFrame(() => composerRef.current?.focus());
+        }),
+      )
+      .then((dispose) => {
+        if (cancelled) {
+          dispose();
+          return;
+        }
+        unlisten = dispose;
+      })
+      .catch(() => {
+        /* browser mode: no desktop clipboard bridge */
+      });
+    return () => {
+      cancelled = true;
+      unlisten?.();
+    };
+  }, [clearDesktopImportTimeout, maybePromoteVisionModel, setInput]);
+
+  useEffect(() => {
+    const query = input.trim();
+    if (!conversationId || query.length < 2) {
+      setFileSearchPreview((current) =>
+        current.query === '' && current.results.length === 0 && !current.loading
+          ? current
+          : { query: '', loading: false, results: [] },
+      );
+      return;
+    }
+    let cancelled = false;
+    const timer = window.setTimeout(() => {
+      setFileSearchPreview((current) => ({ ...current, query, loading: true }));
+      api.searchFiles({
+        conversation_id: conversationId,
+        query,
+        limit: 4,
+        include_content: false,
+      })
+        .then((res) => {
+          if (cancelled) return;
+          setFileSearchPreview({
+            query,
+            loading: false,
+            results: res.data.results.map((item) => ({
+              chunk_id: item.chunk_id,
+              file_id: item.file_id,
+              file_name: item.file_name ?? null,
+              snippet: item.snippet,
+              score: item.score,
+            })),
+          });
+        })
+        .catch((searchError) => {
+          if (cancelled) return;
+          console.warn('[file search preview] load failed:', searchError);
+          setFileSearchPreview({ query, loading: false, results: [] });
+        });
+    }, 220);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
+  }, [conversationId, input]);
 
   useEffect(() => {
     if (!isLoading) {
@@ -2869,28 +3300,48 @@ function ChatPanel({
       || (conversationIdRef.current
         ? confirmPrefs.disabledConvs.includes(conversationIdRef.current)
         : false);
-    const imageOverBudget =
+    const imageOverMonthlyBudget =
       monthlyBudgetUsd != null
       && monthlyBudgetUsd > 0
       && realtime != null
       && realtime.month_usd >= monthlyBudgetUsd;
-    if (imageOverBudget) {
+    const imageOverDailyBudget =
+      dailyBudgetUsd != null
+      && dailyBudgetUsd > 0
+      && realtime != null
+      && realtime.today_usd >= dailyBudgetUsd;
+    if (imageOverMonthlyBudget || imageOverDailyBudget) {
       const im = imageModels.find((m) => m.id === modelId);
-      if (im && monthlyBudgetUsd != null && realtime) {
+      if (im && realtime) {
+        const isDailyBreach = imageOverDailyBudget;
+        const fire = (overrideModelId?: string) => {
+          setPendingConfirm(null);
+          void runImageGenerate(prompt, overrideModelId ?? modelId, sourceMessageId);
+        };
         setImagePicker(null);
         setPendingConfirm({
           estimate: im.price_per_call ?? 0,
           reason: 'budget',
           model: im,
+          blocked: isDailyBreach ? dailyBudgetHardLimit : monthlyBudgetHardLimit,
           budget: {
-            monthly_budget_usd: monthlyBudgetUsd,
+            monthly_budget_usd: monthlyBudgetUsd ?? 0,
             month_spent_usd: realtime.month_usd,
+            daily_budget_usd: dailyBudgetUsd ?? undefined,
+            day_spent_usd: realtime.today_usd,
+            period: isDailyBreach ? 'day' : 'month',
           },
           onContinue: () => {
-            setPendingConfirm(null);
-            void runImageGenerate(prompt, modelId, sourceMessageId);
+            fire();
           },
-          onCheaper: () => { setPendingConfirm(null); },
+          onCheaper: () => {
+            const cheaper = findKnownCheaperPeer(imageModels, im);
+            if (cheaper) {
+              fire(cheaper.id);
+            } else {
+              fire();
+            }
+          },
           onCancel: () => { setPendingConfirm(null); },
         });
         return;
@@ -2900,6 +3351,10 @@ function ChatPanel({
       const im = imageModels.find((m) => m.id === modelId);
       const est = im?.price_per_call ?? 0;
       if (im) {
+        const fire = (overrideModelId?: string) => {
+          setPendingConfirm(null);
+          void runImageGenerate(prompt, overrideModelId ?? modelId, sourceMessageId);
+        };
         // Close the picker so the confirm dialog renders on top + isolates UX.
         // Captured prompt/modelId/sourceMessageId in closure above.
         setImagePicker(null);
@@ -2908,17 +3363,33 @@ function ChatPanel({
           reason: 'image',
           model: im,
           onContinue: () => {
-            setPendingConfirm(null);
-            void runImageGenerate(prompt, modelId, sourceMessageId);
+            fire();
           },
-          onCheaper: () => { setPendingConfirm(null); },
+          onCheaper: () => {
+            const cheaper = findKnownCheaperPeer(imageModels, im);
+            if (cheaper) {
+              fire(cheaper.id);
+            } else {
+              fire();
+            }
+          },
           onCancel: () => { setPendingConfirm(null); },
         });
         return;
       }
     }
     await runImageGenerate(prompt, modelId, sourceMessageId);
-  }, [imagePicker, confirmPrefs, imageModels, monthlyBudgetUsd, realtime, runImageGenerate]);
+  }, [
+    imagePicker,
+    confirmPrefs,
+    imageModels,
+    monthlyBudgetUsd,
+    dailyBudgetUsd,
+    monthlyBudgetHardLimit,
+    dailyBudgetHardLimit,
+    realtime,
+    runImageGenerate,
+  ]);
 
   const attachGeneratedImageForVision = useCallback((img: {
     file_id: string;
@@ -3229,78 +3700,123 @@ function ChatPanel({
   }, [refreshRealtime]);
 
   useEffect(() => {
-    if (!realtime || monthlyBudgetUsd == null || monthlyBudgetUsd <= 0) return;
     const currentMonth = currentBudgetMonthKey();
-    const normalizedState =
+    const normalizedMonthState =
       budgetAlertState.month === currentMonth
         ? budgetAlertState
         : { month: currentMonth, seen: [] as number[] };
-    const ratio = realtime.month_usd / monthlyBudgetUsd;
-    const threshold = ([100, 80, 50] as const).find(
-      (value) => ratio >= value / 100 && !normalizedState.seen.includes(value),
-    );
-    if (budgetAlertState.month !== normalizedState.month && normalizedState.seen.length === 0) {
-      setBudgetAlertState(normalizedState);
+    if (budgetAlertState.month !== normalizedMonthState.month && normalizedMonthState.seen.length === 0) {
+      setBudgetAlertState(normalizedMonthState);
     }
-    if (!threshold) return;
-    const reachedThresholds = ([50, 80, 100] as const).filter(
-      (value) => ratio >= value / 100,
-    );
-    const nextState = {
-      month: currentMonth,
-      seen: Array.from(new Set([...normalizedState.seen, ...reachedThresholds])).sort((a, b) => a - b),
-    };
-    setBudgetAlertState(nextState);
-    setBudgetToast({
-      threshold,
-      period: 'month',
-      budgetUsd: monthlyBudgetUsd,
-      spentUsd: realtime.month_usd,
-    });
-    void api
-      .putMemory('global', 'monthly_budget_alert_state', JSON.stringify(nextState))
-      .catch(() => {});
-  }, [realtime, monthlyBudgetUsd, budgetAlertState]);
 
-  useEffect(() => {
-    if (!realtime || dailyBudgetUsd == null || dailyBudgetUsd <= 0) return;
     const currentDay = currentBudgetDayKey();
-    const normalizedState =
+    const normalizedDayState =
       dailyBudgetAlertState.day === currentDay
         ? dailyBudgetAlertState
         : { day: currentDay, seen: [] as number[] };
-    const ratio = realtime.today_usd / dailyBudgetUsd;
-    const threshold = ([100, 80, 50] as const).find(
-      (value) => ratio >= value / 100 && !normalizedState.seen.includes(value),
-    );
-    if (dailyBudgetAlertState.day !== normalizedState.day && normalizedState.seen.length === 0) {
-      setDailyBudgetAlertState(normalizedState);
+    if (dailyBudgetAlertState.day !== normalizedDayState.day && normalizedDayState.seen.length === 0) {
+      setDailyBudgetAlertState(normalizedDayState);
     }
-    if (!threshold) return;
-    const reachedThresholds = ([50, 80, 100] as const).filter(
-      (value) => ratio >= value / 100,
-    );
-    const nextState = {
-      day: currentDay,
-      seen: Array.from(new Set([...normalizedState.seen, ...reachedThresholds])).sort((a, b) => a - b),
-    };
-    setDailyBudgetAlertState(nextState);
+
+    if (!realtime || budgetToast) return;
+
+    const candidates: Array<{
+      threshold: 50 | 80 | 100;
+      period: 'day' | 'month';
+      budgetUsd: number;
+      spentUsd: number;
+      reachedThresholds: number[];
+    }> = [];
+
+    if (monthlyBudgetUsd != null && monthlyBudgetUsd > 0) {
+      const ratio = realtime.month_usd / monthlyBudgetUsd;
+      const threshold = ([100, 80, 50] as const).find(
+        (value) => ratio >= value / 100 && !normalizedMonthState.seen.includes(value),
+      );
+      if (threshold) {
+        candidates.push({
+          threshold,
+          period: 'month',
+          budgetUsd: monthlyBudgetUsd,
+          spentUsd: realtime.month_usd,
+          reachedThresholds: ([50, 80, 100] as const).filter((value) => ratio >= value / 100),
+        });
+      }
+    }
+
+    if (dailyBudgetUsd != null && dailyBudgetUsd > 0) {
+      const ratio = realtime.today_usd / dailyBudgetUsd;
+      const threshold = ([100, 80, 50] as const).find(
+        (value) => ratio >= value / 100 && !normalizedDayState.seen.includes(value),
+      );
+      if (threshold) {
+        candidates.push({
+          threshold,
+          period: 'day',
+          budgetUsd: dailyBudgetUsd,
+          spentUsd: realtime.today_usd,
+          reachedThresholds: ([50, 80, 100] as const).filter((value) => ratio >= value / 100),
+        });
+      }
+    }
+
+    if (candidates.length === 0) return;
+
+    const nextToast = [...candidates].sort((a, b) => {
+      if (a.threshold !== b.threshold) return b.threshold - a.threshold;
+      if (a.period === b.period) return 0;
+      return a.period === 'day' ? -1 : 1;
+    })[0]!;
+
+    if (nextToast.period === 'month') {
+      const nextState = {
+        month: currentMonth,
+        seen: Array.from(
+          new Set([...normalizedMonthState.seen, ...nextToast.reachedThresholds]),
+        ).sort((a, b) => a - b),
+      };
+      setBudgetAlertState(nextState);
+      void api
+        .putMemory('global', 'monthly_budget_alert_state', JSON.stringify(nextState))
+        .catch(() => {});
+    } else {
+      const nextState = {
+        day: currentDay,
+        seen: Array.from(
+          new Set([...normalizedDayState.seen, ...nextToast.reachedThresholds]),
+        ).sort((a, b) => a - b),
+      };
+      setDailyBudgetAlertState(nextState);
+      void api
+        .putMemory('global', 'daily_budget_alert_state', JSON.stringify(nextState))
+        .catch(() => {});
+    }
+
     setBudgetToast({
-      threshold,
-      period: 'day',
-      budgetUsd: dailyBudgetUsd,
-      spentUsd: realtime.today_usd,
+      threshold: nextToast.threshold,
+      period: nextToast.period,
+      budgetUsd: nextToast.budgetUsd,
+      spentUsd: nextToast.spentUsd,
     });
-    void api
-      .putMemory('global', 'daily_budget_alert_state', JSON.stringify(nextState))
-      .catch(() => {});
-  }, [realtime, dailyBudgetUsd, dailyBudgetAlertState]);
+  }, [
+    realtime,
+    monthlyBudgetUsd,
+    budgetAlertState,
+    dailyBudgetUsd,
+    dailyBudgetAlertState,
+    budgetToast,
+  ]);
 
   useEffect(() => {
     if (!budgetToast) return;
     const timer = window.setTimeout(() => setBudgetToast(null), 5000);
     return () => window.clearTimeout(timer);
   }, [budgetToast]);
+
+  const budgetToastCheaperPeer = useMemo(
+    () => findKnownCheaperPeer(chatModels, model),
+    [chatModels, model],
+  );
 
   const tipBlocked =
     activeRoundtableId != null
@@ -3380,6 +3896,8 @@ function ChatPanel({
                   ...prev,
                   [id]: {
                     input_tokens: typeof a.input_tokens === 'number' ? (a.input_tokens as number) : null,
+                    cache_input_tokens:
+                      typeof a.cache_input_tokens === 'number' ? (a.cache_input_tokens as number) : null,
                     output_tokens: typeof a.output_tokens === 'number' ? (a.output_tokens as number) : null,
                     actual_usd:
                       typeof a.actual_usd === 'number' ? (a.actual_usd as number) : null,
@@ -3825,10 +4343,25 @@ function ChatPanel({
     () => chatModels.filter((item) => isQuickCompareEligibleModel(item)),
     [chatModels],
   );
+  const quickCompareEligibleLabelCounts = useMemo(() => {
+    const counts = new Map<string, number>();
+    for (const candidate of quickCompareEligibleModels) {
+      const key = quickCompareLabelKey(candidate, providers);
+      counts.set(key, (counts.get(key) ?? 0) + 1);
+    }
+    return counts;
+  }, [providers, quickCompareEligibleModels]);
+  const quickCompareSelectableTools = useMemo(
+    () => effectiveTools
+      .filter((tool) => tool.effective_enabled)
+      .slice()
+      .sort((a, b) => a.name.localeCompare(b.name)),
+    [effectiveTools],
+  );
   const quickCompareNeedsTools = hasQuickCompareToolIntent(input);
 
   const defaultQuickCompareModelIds = useMemo(() => {
-    return quickCompareEligibleModels
+    const sorted = quickCompareEligibleModels
       .slice()
       .sort((a, b) => {
         if (quickCompareNeedsTools) {
@@ -3838,10 +4371,36 @@ function ChatPanel({
         if (a.id === model.id) return -1;
         if (b.id === model.id) return 1;
         return a.fallback_order - b.fallback_order;
-      })
-      .map((item) => item.id)
-      .slice(0, 3);
-  }, [model.id, quickCompareEligibleModels, quickCompareNeedsTools]);
+      });
+    const picked: string[] = [];
+    const seenLabels = new Set<string>();
+    for (const candidate of sorted) {
+      const key = quickCompareLabelKey(candidate, providers);
+      if (seenLabels.has(key)) continue;
+      picked.push(candidate.id);
+      seenLabels.add(key);
+      if (picked.length >= 3) return picked;
+    }
+    for (const candidate of sorted) {
+      if (picked.includes(candidate.id)) continue;
+      picked.push(candidate.id);
+      if (picked.length >= 3) break;
+    }
+    return picked;
+  }, [model.id, providers, quickCompareEligibleModels, quickCompareNeedsTools]);
+  const defaultQuickCompareParticipantConfigs = useMemo(
+    () =>
+      defaultQuickCompareModelIds.map((modelId) => {
+        const candidate = quickCompareEligibleModels.find((item) => item.id === modelId) ?? null;
+        return {
+          modelId,
+          toolNames: candidate?.supports_tools
+            ? quickCompareSelectableTools.map((tool) => tool.name)
+            : [],
+        };
+      }),
+    [defaultQuickCompareModelIds, quickCompareEligibleModels, quickCompareSelectableTools],
+  );
   const quickCompareDisabledReason = !input.trim()
     ? '先输入要比较的问题'
     : quickCompareEligibleModels.length < 2
@@ -3850,17 +4409,91 @@ function ChatPanel({
         ? '当前模型不能处理待发送图片'
         : null;
   const quickCompareDisabled = quickCompareDisabledReason !== null;
+  useEffect(() => {
+    if (!quickCompare || quickCompare.running) return;
+    const costRecordIds = Array.from(
+      new Set(
+        quickCompare.outputs
+          .map((output) => output.costRecordId)
+          .filter((value): value is string => Boolean(value)),
+      ),
+    );
+    if (costRecordIds.length === 0) {
+      setQuickCompareCostLogs({});
+      return;
+    }
+    let cancelled = false;
+    void api.costsCallLogs(100)
+      .then((res) => {
+        if (cancelled) return;
+        const wanted = new Set(costRecordIds);
+        const next = Object.fromEntries(
+          (res.data.rows ?? [])
+            .filter((row) => wanted.has(row.id))
+            .map((row) => [
+              row.id,
+              {
+                id: row.id,
+                actual_cost_usd: row.actual_cost_usd,
+                classification: row.classification,
+                success: row.success,
+              } satisfies QuickCompareCostLogRow,
+            ]),
+        );
+        setQuickCompareCostLogs(next);
+      })
+      .catch(() => {
+        if (!cancelled) setQuickCompareCostLogs({});
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [quickCompare]);
+  const quickCompareArbitration = useMemo(
+    () => (quickCompare
+      ? deriveQuickCompareArbitration(quickCompare, chatModels, providers, quickCompareCostLogs)
+      : null),
+    [chatModels, providers, quickCompare, quickCompareCostLogs],
+  );
+  const quickCompareCardsByOutputId = useMemo(
+    () => new Map((quickCompareArbitration?.cards ?? []).map((card) => [card.outputId, card])),
+    [quickCompareArbitration],
+  );
+  const recommendedQuickCompareCostFocus = useMemo<CostCallFocusDetail | null>(() => {
+    if (!quickCompare || !quickCompareArbitration) return null;
+    const recommended = quickCompare.outputs.find(
+      (item) => item.outputId === quickCompareArbitration.recommendedOutputId,
+    );
+    return recommended?.costRecordId
+      ? {
+          costRecordId: recommended.costRecordId,
+          runId: null,
+          runEventId: null,
+        }
+      : null;
+  }, [quickCompare, quickCompareArbitration]);
 
   const runQuickCompare = useCallback(async (
-    modelIds: string[] = defaultQuickCompareModelIds,
+    participantConfigs: QuickCompareParticipantConfigDraft[] = defaultQuickCompareParticipantConfigs,
     confirmedCost = false,
   ): Promise<void> => {
     if (quickCompare?.running || isLoading) return;
     const prompt = input.trim();
     if (!prompt) return;
     const currentModelEligible = isQuickCompareEligibleModel(model);
-    const candidateIds = [...new Set(modelIds)].slice(0, 3);
+    const normalizedConfigs = participantConfigs
+      .reduce<QuickCompareParticipantConfigDraft[]>((acc, item) => {
+        if (!item.modelId || acc.some((existing) => existing.modelId === item.modelId)) return acc;
+        acc.push({
+          modelId: item.modelId,
+          toolNames: [...new Set(item.toolNames)],
+        });
+        return acc;
+      }, [])
+      .slice(0, 3);
+    const candidateIds = normalizedConfigs.map((item) => item.modelId);
     if (candidateIds.length < 2) {
+      setQuickCompareCostLogs({});
       setQuickCompare({
         compareId: null,
         running: false,
@@ -3868,10 +4501,20 @@ function ChatPanel({
           ? 'Quick Compare 至少需要 2 个可用聊天模型。'
           : '当前会话模型暂不可用于 Quick Compare，请切换到启用中的聊天或多模态模型后重试。',
         outputs: [],
+        requestText: prompt,
+        requestedToolIntent: normalizedConfigs.some((item) => item.toolNames.length > 0),
       });
       return;
     }
-    setQuickCompare({ compareId: null, running: true, error: null, outputs: [] });
+    setQuickCompareCostLogs({});
+    setQuickCompare({
+      compareId: null,
+      running: true,
+      error: null,
+      outputs: [],
+      requestText: prompt,
+      requestedToolIntent: normalizedConfigs.some((item) => item.toolNames.length > 0),
+    });
     setActionError(null);
     try {
       const atts = pending.map(({ kind, mime, data_b64, name }) => ({ kind, mime, data_b64, name }));
@@ -3885,6 +4528,10 @@ function ChatPanel({
           conversation_id: conversationIdRef.current ?? undefined,
           messages: requestMessages,
           model_ids: candidateIds,
+          participant_configs: normalizedConfigs.map((item) => ({
+            model_id: item.modelId,
+            tool_names: item.toolNames,
+          })),
           ...(atts.length > 0 ? { attachments: atts } : {}),
           ...(activePersona ? { persona_id: activePersona.id } : {}),
           ...(confirmedCost ? { confirmed_cost: true } : {}),
@@ -3893,7 +4540,14 @@ function ChatPanel({
           onAnnotation: (annotation) => {
             setQuickCompare((current) =>
               applyQuickCompareAnnotation(
-                current ?? { compareId: null, running: true, error: null, outputs: [] },
+                current ?? {
+                  compareId: null,
+                  running: true,
+                  error: null,
+                  outputs: [],
+                  requestText: prompt,
+                  requestedToolIntent: normalizedConfigs.some((item) => item.toolNames.length > 0),
+                },
                 annotation,
               ),
             );
@@ -3928,11 +4582,12 @@ function ChatPanel({
             : undefined,
           onContinue: () => {
             setPendingConfirm(null);
-            void runQuickCompare(candidateIds, true);
+            void runQuickCompare(normalizedConfigs, true);
           },
           onCheaper: () => { setPendingConfirm(null); },
           onCancel: () => {
             setPendingConfirm(null);
+            setQuickCompareCostLogs({});
             setQuickCompare(null);
           },
         });
@@ -3943,11 +4598,14 @@ function ChatPanel({
         running: false,
         error: e instanceof Error ? e.message : 'Quick Compare 失败',
         outputs: [],
+        requestText: prompt,
+        requestedToolIntent: normalizedConfigs.some((item) => item.toolNames.length > 0),
       });
+      setQuickCompareCostLogs({});
     }
   }, [
     activePersona,
-    defaultQuickCompareModelIds,
+    defaultQuickCompareParticipantConfigs,
     input,
     isLoading,
     loadConversationMessages,
@@ -3968,6 +4626,7 @@ function ChatPanel({
       await loadConversationMessages(res.data.conversation_id);
       onConversationCreated(res.data.conversation_id);
       onConversationUpdated();
+      setQuickCompareCostLogs({});
       setQuickCompare(null);
     } catch (e) {
       setActionError(e instanceof Error ? e.message : '采纳失败');
@@ -3981,6 +4640,75 @@ function ChatPanel({
     quickCompare?.compareId,
     quickCompareAdoptingId,
   ]);
+  const exportQuickCompareDecisionReport = useCallback(async (mode: 'copy' | 'download'): Promise<void> => {
+    if (!quickCompare || !quickCompareArbitration) return;
+    const markdown = buildQuickCompareDecisionReportMarkdown(
+      quickCompare,
+      quickCompareArbitration,
+      quickCompareCardsByOutputId,
+      chatModels,
+      providers,
+    );
+    try {
+      if (mode === 'copy') {
+        await copyToClipboard(markdown);
+        setQuickCompareReportAction({ kind: 'copied', message: 'Decision Report 已复制到剪贴板。' });
+        return;
+      }
+      const blob = new Blob([markdown], { type: 'text/markdown;charset=utf-8' });
+      const url = URL.createObjectURL(blob);
+      const anchor = document.createElement('a');
+      anchor.href = url;
+      anchor.download = `quick-compare_${quickCompare.compareId ?? 'report'}.md`;
+      document.body.appendChild(anchor);
+      anchor.click();
+      anchor.remove();
+      URL.revokeObjectURL(url);
+      setQuickCompareReportAction({ kind: 'exported', message: 'Decision Report Markdown 已下载。' });
+    } catch (error) {
+      setQuickCompareReportAction({
+        kind: 'error',
+        message: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }, [chatModels, providers, quickCompare, quickCompareArbitration, quickCompareCardsByOutputId]);
+  const draftQuickCompareFollowUp = useCallback((): void => {
+    if (!quickCompare || !quickCompareArbitration) return;
+    const next = buildQuickCompareFollowUpPrompt(quickCompare, quickCompareArbitration);
+    setInput((prev) => (prev.trim() ? `${prev}\n\n${next}` : next));
+    setQuickCompareReportAction({
+      kind: 'drafted',
+      message: '已把复查提示放入输入框，可直接继续追问。',
+    });
+  }, [quickCompare, quickCompareArbitration]);
+  const draftQuickCompareMinorityReview = useCallback((): void => {
+    if (!quickCompare || !quickCompareArbitration) return;
+    const next = buildQuickCompareMinorityReviewPrompt(quickCompare, quickCompareArbitration);
+    setInput((prev) => (prev.trim() ? `${prev}\n\n${next}` : next));
+    setQuickCompareReportAction({
+      kind: 'minority',
+      message: '已把少数意见复核提示放入输入框，可直接挑战推荐结论。',
+    });
+  }, [quickCompare, quickCompareArbitration]);
+  const focusQuickCompareRecommendedCost = useCallback((): void => {
+    if (!recommendedQuickCompareCostFocus) {
+      setQuickCompareReportAction({
+        kind: 'error',
+        message: '推荐列暂时还没有成本记录，稍后再试。',
+      });
+      return;
+    }
+    focusCostCall(recommendedQuickCompareCostFocus);
+    setQuickCompareReportAction({
+      kind: 'focused',
+      message: '已打开成本看板并定位到推荐列的成本记录。',
+    });
+  }, [recommendedQuickCompareCostFocus]);
+  useEffect(() => {
+    if (!quickCompareReportAction) return;
+    const timer = window.setTimeout(() => setQuickCompareReportAction(null), 3000);
+    return () => window.clearTimeout(timer);
+  }, [quickCompareReportAction]);
 
   const onRecoverClick = useCallback(async (
     action: Extract<RecoverRunRequest['action'], 'retry_same_model' | 'switch_model' | 'compact_context' | 'skip_tool'>,
@@ -4182,7 +4910,7 @@ function ChatPanel({
           data-testid="open-template-picker"
           onClick={() => setTemplatePickerOpen(true)}
         >
-          模板
+          模板市场
         </button>
         <label className="persona-select-wrap">
           <span className="persona-select-label">Persona</span>
@@ -4235,12 +4963,27 @@ function ChatPanel({
             {exportBusy ? '导出中…' : '导出'}
           </button>
         )}
+        <button
+          type="button"
+          className={`ribbon-toggle ${ribbonCollapsed ? 'collapsed' : 'expanded'}`}
+          data-testid="ribbon-toggle"
+          aria-expanded={!ribbonCollapsed}
+          aria-controls="capability-preflight"
+          onClick={() => setRibbonCollapsed((v) => !v)}
+          title={ribbonCollapsed ? '展开工具与会话信息栏' : '收起工具与会话信息栏'}
+        >
+          <span aria-hidden>{ribbonCollapsed ? '▾' : '▴'}</span>
+          <span className="ribbon-toggle__label">
+            {ribbonCollapsed ? '工具栏' : '收起'}
+          </span>
+        </button>
       </div>
       {promptAssetsError && (
         <div className="prompt-assets-error" data-testid="prompt-assets-error" role="alert">
           {promptAssetsError}
         </div>
       )}
+      {!ribbonCollapsed && (
       <CapabilityPreflight
         model={model}
         chatModels={chatModels}
@@ -4274,6 +5017,7 @@ function ChatPanel({
         onSelectImageModel={(id) => void persistImageModelPreference(id)}
         onSelectImageAuto={() => void clearImageModelPreference()}
       />
+      )}
       {activeRoundtableId ? (
         <RoundtablePanel
           roundtableId={activeRoundtableId}
@@ -4654,18 +5398,158 @@ function ChatPanel({
       </div>
       {error && <ChatErrorBanner error={error} />}
       {quickCompare && (
-        <section className="quick-compare-card" data-testid="quick-compare-card">
+        <section
+          className="quick-compare-card"
+          data-testid="quick-compare-card"
+          data-compare-id={quickCompare.compareId ?? ''}
+        >
           <div className="quick-compare-head">
             <div>
               <strong>Quick Compare</strong>
-              <span>一次对比多个模型回答，采纳后才写入正式上下文。</span>
+              <span>一次对比多个模型回答，并自动生成可采纳的决策报告。</span>
             </div>
-            <button type="button" onClick={() => setQuickCompare(null)} data-testid="quick-compare-close">
+            <button
+              type="button"
+              onClick={() => {
+                setQuickCompareCostLogs({});
+                setQuickCompare(null);
+              }}
+              data-testid="quick-compare-close"
+            >
               关闭
             </button>
           </div>
           {quickCompare.running && <p className="hint">正在并行请求候选模型…</p>}
           {quickCompare.error && <p className="err" data-testid="quick-compare-error">{quickCompare.error}</p>}
+          {quickCompareArbitration && (
+            <div
+              className="quick-compare-arbitration"
+              data-testid="quick-compare-arbitration"
+            >
+              <div className="quick-compare-arbitration__head">
+                <div>
+                  <strong>Decision Report</strong>
+                  <span>推荐先采纳 {quickCompareArbitration.title}</span>
+                </div>
+                <span
+                  className={`quick-compare-arbitration__confidence quick-compare-arbitration__confidence--${quickCompareArbitration.confidence}`}
+                >
+                  置信度
+                  {' '}
+                  {quickCompareArbitration.confidence === 'high'
+                    ? '高'
+                    : quickCompareArbitration.confidence === 'medium'
+                      ? '中'
+                      : '低'}
+                </span>
+              </div>
+              <div className="quick-compare-arbitration__stats" data-testid="quick-compare-decision-report">
+                <span>
+                  <small>推荐方案</small>
+                  <strong>{quickCompareArbitration.title}</strong>
+                </span>
+                <span>
+                  <small>总成本</small>
+                  <strong>
+                    {quickCompareArbitration.totalCostUsd == null
+                      ? '待统计'
+                      : formatUsd(quickCompareArbitration.totalCostUsd)}
+                  </strong>
+                </span>
+                <span>
+                  <small>少数意见</small>
+                  <strong>{quickCompareArbitration.minorityTitle ?? '无明显分歧列'}</strong>
+                </span>
+              </div>
+              <ul className="quick-compare-arbitration__reasons">
+                {quickCompareArbitration.reasons.map((reason) => (
+                  <li key={reason}>{reason}</li>
+                ))}
+              </ul>
+              {quickCompareArbitration.risks.length > 0 && (
+                <div className="quick-compare-arbitration__block">
+                  <strong>风险</strong>
+                  <ul className="quick-compare-arbitration__list">
+                    {quickCompareArbitration.risks.map((risk) => (
+                      <li key={risk}>{risk}</li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+              {quickCompareArbitration.reviewPoints.length > 0 && (
+                <div className="quick-compare-arbitration__block">
+                  <strong>复查点</strong>
+                  <ul className="quick-compare-arbitration__list">
+                    {quickCompareArbitration.reviewPoints.map((point) => (
+                      <li key={point}>{point}</li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+              {quickCompareArbitration.caution && <p className="hint">{quickCompareArbitration.caution}</p>}
+              <div className="quick-compare-arbitration__actions">
+                <button
+                  type="button"
+                  className="quick-compare-adopt quick-compare-adopt--primary"
+                  disabled={quickCompareAdoptingId === quickCompareArbitration.recommendedOutputId}
+                  onClick={() => void adoptQuickCompareOutput(quickCompareArbitration.recommendedOutputId)}
+                  data-testid="quick-compare-adopt-recommended"
+                >
+                  {quickCompareAdoptingId === quickCompareArbitration.recommendedOutputId ? '采纳中…' : '采纳仲裁建议'}
+                </button>
+                <button
+                  type="button"
+                  className="quick-compare-arbitration__action-btn"
+                  onClick={draftQuickCompareFollowUp}
+                  data-testid="quick-compare-draft-follow-up"
+                >
+                  生成复查提示
+                </button>
+                <button
+                  type="button"
+                  className="quick-compare-arbitration__action-btn"
+                  onClick={draftQuickCompareMinorityReview}
+                  data-testid="quick-compare-draft-minority-review"
+                >
+                  复核少数意见
+                </button>
+                {recommendedQuickCompareCostFocus && (
+                  <button
+                    type="button"
+                    className="quick-compare-arbitration__action-btn"
+                    onClick={focusQuickCompareRecommendedCost}
+                    data-testid="quick-compare-open-cost-focus"
+                  >
+                    看推荐列成本
+                  </button>
+                )}
+                <button
+                  type="button"
+                  className="quick-compare-arbitration__action-btn"
+                  onClick={() => void exportQuickCompareDecisionReport('copy')}
+                  data-testid="quick-compare-copy-report"
+                >
+                  复制报告
+                </button>
+                <button
+                  type="button"
+                  className="quick-compare-arbitration__action-btn"
+                  onClick={() => void exportQuickCompareDecisionReport('download')}
+                  data-testid="quick-compare-download-report"
+                >
+                  导出 Markdown
+                </button>
+              </div>
+              {quickCompareReportAction && (
+                <p
+                  className={`quick-compare-arbitration__action-note quick-compare-arbitration__action-note--${quickCompareReportAction.kind}`}
+                  data-testid="quick-compare-report-action"
+                >
+                  {quickCompareReportAction.message}
+                </p>
+              )}
+            </div>
+          )}
           {quickCompare.outputs.length > 0 && (
             <div className="quick-compare-grid" data-testid="quick-compare-grid">
               {(() => {
@@ -4683,6 +5567,8 @@ function ChatPanel({
                   : null;
                 return quickCompare.outputs.map((output) => {
                   const outputModel = chatModels.find((item) => item.id === output.modelId) ?? null;
+                  const outputToolSummary = output.toolNames.map(quickCompareToolLabel).join(' / ');
+                  const decisionCard = quickCompareCardsByOutputId.get(output.outputId) ?? null;
                   const isFastestFirstToken =
                     fastestFirstTokenMs != null && output.firstTokenMs != null && output.firstTokenMs === fastestFirstTokenMs;
                   const isFastestDuration =
@@ -4695,21 +5581,48 @@ function ChatPanel({
                     >
                       <header>
                         <div className="quick-compare-output-title">
-                          <strong>{outputModel ? modelDisplayWithProvider(outputModel, providers) : output.modelId}</strong>
-                          {(isFastestFirstToken || isFastestDuration) && (
+                          <strong>
+                            {outputModel
+                              ? formatQuickCompareModelLabel(
+                                  outputModel,
+                                  providers,
+                                  quickCompareEligibleLabelCounts,
+                                )
+                              : output.modelId}
+                          </strong>
+                          {(isFastestFirstToken
+                            || isFastestDuration
+                            || decisionCard?.stance === 'recommended'
+                            || decisionCard?.stance === 'minority') && (
                             <div className="quick-compare-speed-badges">
                               {isFastestFirstToken && <span className="quick-compare-speed-badge">首字最快</span>}
                               {isFastestDuration && <span className="quick-compare-speed-badge">完成最快</span>}
+                              {decisionCard?.stance === 'recommended' && <span className="quick-compare-speed-badge">推荐方案</span>}
+                              {decisionCard?.stance === 'minority' && <span className="quick-compare-speed-badge">少数意见</span>}
                             </div>
                           )}
                         </div>
                         <span>{output.status === 'failed' ? '失败' : output.status === 'complete' ? '完成' : '生成中'}</span>
                       </header>
-                      {(output.firstTokenMs != null || output.durationMs != null || outputModel?.supports_tools) && (
+                      {(output.firstTokenMs != null || output.durationMs != null || outputModel != null) && (
                         <div className="quick-compare-metrics">
                           {output.firstTokenMs != null && <span>首字 {formatLatencyMs(output.firstTokenMs)}</span>}
                           {output.durationMs != null && <span>总耗时 {formatLatencyMs(output.durationMs)}</span>}
-                          {outputModel?.supports_tools && <span>支持 Tools</span>}
+                          {decisionCard?.costUsd != null && <span>成本 {formatUsd(decisionCard.costUsd)}</span>}
+                          {decisionCard != null && <span>评分 {decisionCard.score}</span>}
+                          {outputModel?.supports_tools
+                            ? (
+                                <span data-testid={`quick-compare-output-tools-${output.modelId}`}>
+                                  {outputToolSummary ? `工具 ${outputToolSummary}` : '无工具'}
+                                </span>
+                              )
+                            : <span>纯文本列</span>}
+                          {decisionCard != null && (
+                            <span>
+                              工具成功 {decisionCard.toolSuccesses}
+                              {decisionCard.toolFailures > 0 ? ` · 失败 ${decisionCard.toolFailures}` : ''}
+                            </span>
+                          )}
                         </div>
                       )}
                       {output.toolTraces.length > 0 && (
@@ -4740,12 +5653,16 @@ function ChatPanel({
                       )}
                       <button
                         type="button"
-                        className="quick-compare-adopt"
+                        className={`quick-compare-adopt${quickCompareArbitration?.recommendedOutputId === output.outputId ? ' quick-compare-adopt--recommended' : ''}`}
                         disabled={output.status !== 'complete' || quickCompareAdoptingId === output.outputId}
                         onClick={() => void adoptQuickCompareOutput(output.outputId)}
                         data-testid="quick-compare-adopt"
                       >
-                        {quickCompareAdoptingId === output.outputId ? '采纳中…' : '采纳这版'}
+                        {quickCompareAdoptingId === output.outputId
+                          ? '采纳中…'
+                          : quickCompareArbitration?.recommendedOutputId === output.outputId
+                            ? '采纳推荐稿'
+                            : '采纳这版'}
                       </button>
                     </article>
                   );
@@ -4762,6 +5679,33 @@ function ChatPanel({
       />
       {dropError && (
         <div className="vision-warning" data-testid="drop-error" role="alert">{dropError}</div>
+      )}
+      {conversationId && input.trim().length >= 2 && (fileSearchPreview.loading || fileSearchPreview.results.length > 0) && (
+        <div className="composer-file-search-preview" data-testid="composer-file-search-preview">
+          <div className="composer-file-search-preview__head">
+            <strong>将优先参考这些文档片段</strong>
+            <span>
+              {fileSearchPreview.loading
+                ? '检索中…'
+                : `${fileSearchPreview.results.length} 条命中`}
+            </span>
+          </div>
+          <div className="composer-file-search-preview__list">
+            {fileSearchPreview.results.map((result) => (
+              <article
+                key={result.chunk_id}
+                className="composer-file-search-preview__item"
+                data-testid="composer-file-search-item"
+              >
+                <div className="composer-file-search-preview__meta">
+                  <strong>{result.file_name ?? result.file_id.slice(0, 10)}</strong>
+                  <span>chunk {result.chunk_id.slice(-6)}</span>
+                </div>
+                <p>{result.snippet}</p>
+              </article>
+            ))}
+          </div>
+        </div>
       )}
       <EstimateBar estimate={estimate} sampleCount={avgOutput?.n ?? 0} hasInput={input.trim().length > 0} />
       {contextStatus && contextStatus.state !== 'ok' && (
@@ -4894,21 +5838,7 @@ function ChatPanel({
           }
           if (next.length > 0) {
             setPending((p) => [...p, ...next]);
-            // Spec §7 step 5: dropping an image onto a non-vision model should
-            // auto-switch to a vision-capable peer (transparent UX) and only
-            // fall back to the warning banner if no such model is configured.
-            const hasImage = next.some((n) => n.kind === 'image');
-            if (hasImage && !model.supports_vision) {
-              const visionPick = chatModels.find(
-                (m) => m.supports_vision && !m.demoted && !(m.disabled_until && m.disabled_until > Date.now()),
-              );
-              if (visionPick && visionPick.id !== model.id) {
-                onModelChange(visionPick.id);
-                setDropError(
-                  `已自动切换至视觉模型：${modelDisplayWithProvider(visionPick, providers)}`,
-                );
-              }
-            }
+            maybePromoteVisionModel(next);
           }
         }}
         data-testid="composer-form"
@@ -4964,6 +5894,25 @@ function ChatPanel({
           <>
             <button
               type="button"
+              data-testid="composer-import-clipboard"
+              className="roundtable-btn clipboard-import-btn"
+              title="把桌面剪贴板中的文本 / 截图带入当前问答"
+              disabled={desktopImporting || !desktopClipboardAvailable}
+              onClick={() => {
+                setDesktopImporting(true);
+                void import('@tauri-apps/api/core')
+                  .then(({ invoke }) => invoke('import_clipboard'))
+                  .catch((error) => {
+                    clearDesktopImportTimeout();
+                    setDesktopImporting(false);
+                    setDropError(error instanceof Error ? error.message : String(error));
+                  });
+              }}
+            >
+              {desktopImporting ? '📋 导入中…' : '📋 剪贴板'}
+            </button>
+            <button
+              type="button"
               data-testid="composer-quick-compare"
               className="roundtable-btn quick-compare-btn"
               title={quickCompareDisabledReason ?? '一键并行对比 2-3 个模型回答'}
@@ -4999,11 +5948,40 @@ function ChatPanel({
           data-testid="budget-toast"
           role="status"
         >
-          {budgetToast.period === 'day' ? '今日预算' : '本月预算'}已用到 {budgetToast.threshold}%：
-          {' '}
-          {formatUsd(budgetToast.spentUsd)}
-          {' / '}
-          {formatUsd(budgetToast.budgetUsd)}
+          <div className="budget-toast__content">
+            <span>
+              {budgetToast.period === 'day' ? '今日预算' : '本月预算'}已用到 {budgetToast.threshold}%：
+              {' '}
+              {formatUsd(budgetToast.spentUsd)}
+              {' / '}
+              {formatUsd(budgetToast.budgetUsd)}
+            </span>
+            <div className="budget-toast__actions">
+              <button
+                type="button"
+                onClick={() =>
+                  focusCostCall({
+                    costRecordId: null,
+                    runId: null,
+                    runEventId: null,
+                    modelId: model.id,
+                    preferredScope: budgetToast.period === 'day' ? 'today' : 'month',
+                  })}
+                data-testid="budget-toast-open-costs"
+              >
+                看成本建议
+              </button>
+              {budgetToastCheaperPeer && (
+                <button
+                  type="button"
+                  onClick={() => onModelChange(budgetToastCheaperPeer.id)}
+                  data-testid="budget-toast-switch-cheaper"
+                >
+                  改用 {budgetToastCheaperPeer.display_name}
+                </button>
+              )}
+            </div>
+          </div>
         </div>
       )}
       <CostStatusBar
@@ -5023,7 +6001,10 @@ function ChatPanel({
           conversationId={conversationId}
           hasCheaperPeer={
             pendingConfirm.allowCheaper !== false &&
-            findKnownCheaperPeer(chatModels, pendingConfirm.model ?? model) != null
+            findKnownCheaperPeer(
+              (pendingConfirm.model ?? model).capability === 'image' ? imageModels : chatModels,
+              pendingConfirm.model ?? model,
+            ) != null
           }
           budget={pendingConfirm.budget}
           blocked={pendingConfirm.blocked === true}
@@ -5125,13 +6106,14 @@ function ChatPanel({
       {quickComparePickerOpen && (
         <QuickCompareModelPickerDialog
           models={quickCompareEligibleModels}
-          selectedIds={defaultQuickCompareModelIds}
+          selectedConfigs={defaultQuickCompareParticipantConfigs}
+          availableTools={quickCompareSelectableTools}
           providers={providers}
           currentModelId={model.id}
           onCancel={() => setQuickComparePickerOpen(false)}
-          onSubmit={(modelIds) => {
+          onSubmit={(participantConfigs) => {
             setQuickComparePickerOpen(false);
-            void runQuickCompare(modelIds, false);
+            void runQuickCompare(participantConfigs, false);
           }}
         />
       )}
@@ -5161,6 +6143,115 @@ function ChatPanel({
   );
 }
 
+type TemplateMarketSource = 'builtin' | 'recipe' | 'template';
+
+interface TemplateMarketEntry {
+  key: string;
+  source: TemplateMarketSource;
+  name: string;
+  description: string | null;
+  content: string;
+  vars: string[];
+  summary: string;
+  tags: string[];
+  template: TemplateLike;
+  recipe?: WorkflowRecipe;
+  testId: 'workflow-template-item' | 'workflow-recipe-item' | 'template-picker-item';
+}
+
+const TEMPLATE_MARKET_SOURCE_LABEL: Record<TemplateMarketSource, string> = {
+  builtin: '内置工作流',
+  recipe: 'Workflow Recipe',
+  template: '我的模板',
+};
+
+const TEMPLATE_MARKET_TASK_LABEL: Record<WorkflowRecipe['spec']['recommended_task'], string> = {
+  general: '通用任务',
+  coding: '代码任务',
+  fast: '快速产出',
+  cheap: '预算敏感',
+  long_context: '长上下文',
+  vision: '视觉任务',
+};
+
+const TEMPLATE_MARKET_MODEL_STRATEGY_LABEL: Record<WorkflowRecipe['spec']['model_strategy'], string> = {
+  keep_current: '沿用当前模型',
+  recommend: '推荐合适模型',
+  prefer_cheap: '优先低成本',
+  prefer_fast: '优先速度',
+};
+
+function describeRecipePersona(recipe: WorkflowRecipe): string {
+  if (recipe.spec.persona.mode === 'existing') return '绑定现有 Persona';
+  if (recipe.spec.persona.mode === 'inline') return '内嵌 Persona';
+  return '不指定 Persona';
+}
+
+function buildTemplateMarketEntries(
+  templates: PromptTemplate[],
+  recipes: WorkflowRecipe[],
+): TemplateMarketEntry[] {
+  const builtinEntries: TemplateMarketEntry[] = BUILTIN_WORKFLOW_TEMPLATES.map((template) => ({
+    key: `builtin:${template.id}`,
+    source: 'builtin',
+    name: template.name,
+    description: template.description,
+    content: template.content,
+    vars: extractTemplateVariables(template.content),
+    summary: '直接把常用工作流骨架带入当前输入框。',
+    tags: ['本地即用', '内置', `${extractTemplateVariables(template.content).length} 个变量`],
+    template,
+    testId: 'workflow-template-item',
+  }));
+  const recipeEntries: TemplateMarketEntry[] = recipes.map((recipe) => {
+    const declared = recipe.spec.variables.map((variable) => variable.name);
+    const extracted = extractTemplateVariables(recipe.spec.prompt_template);
+    const vars = Array.from(new Set([...declared, ...extracted]));
+    return {
+      key: `recipe:${recipe.id}`,
+      source: 'recipe',
+      name: recipe.name,
+      description: recipe.description,
+      content: recipe.spec.prompt_template,
+      vars,
+      summary: `适合 ${TEMPLATE_MARKET_TASK_LABEL[recipe.spec.recommended_task]}，${TEMPLATE_MARKET_MODEL_STRATEGY_LABEL[recipe.spec.model_strategy]}。`,
+      tags: [
+        recipe.enabled ? '已启用' : '已停用',
+        recipe.spec.output_format.kind.toUpperCase(),
+        describeRecipePersona(recipe),
+        recipe.spec.tools.required.length > 0
+          ? `${recipe.spec.tools.required.length} 个必需工具`
+          : recipe.spec.tools.optional.length > 0
+            ? `${recipe.spec.tools.optional.length} 个可选工具`
+            : '无工具依赖',
+      ],
+      template: {
+        name: recipe.name,
+        description: recipe.description,
+        content: recipe.spec.prompt_template,
+      },
+      recipe,
+      testId: 'workflow-recipe-item',
+    };
+  });
+  const customEntries: TemplateMarketEntry[] = templates.map((template) => {
+    const vars = extractTemplateVariables(template.content);
+    return {
+      key: `template:${template.id}`,
+      source: 'template',
+      name: template.name,
+      description: template.description,
+      content: template.content,
+      vars,
+      summary: vars.length > 0 ? `包含 ${vars.length} 个变量，适合复用固定提示结构。` : '可直接插入当前输入框，作为自定义提示骨架。',
+      tags: ['自定义', vars.length > 0 ? `${vars.length} 个变量` : '即插即用'],
+      template,
+      testId: 'template-picker-item',
+    };
+  });
+  return [...builtinEntries, ...recipeEntries, ...customEntries];
+}
+
 function TemplatePickerDialog({
   templates,
   recipes,
@@ -5174,7 +6265,46 @@ function TemplatePickerDialog({
   onApply: (template: TemplateLike) => void;
   onApplyRecipe: (recipe: WorkflowRecipe) => void;
 }): JSX.Element {
-  const hasTemplates = templates.length > 0;
+  const [query, setQuery] = useState('');
+  const [sourceFilter, setSourceFilter] = useState<'all' | TemplateMarketSource>('all');
+  const allEntries = useMemo(() => buildTemplateMarketEntries(templates, recipes), [recipes, templates]);
+  const filteredEntries = useMemo(() => {
+    const normalized = query.trim().toLowerCase();
+    return allEntries.filter((entry) => {
+      if (sourceFilter !== 'all' && entry.source !== sourceFilter) return false;
+      if (!normalized) return true;
+      const haystack = [
+        entry.name,
+        entry.description ?? '',
+        entry.content,
+        entry.summary,
+        ...entry.vars,
+        ...entry.tags,
+      ]
+        .join(' ')
+        .toLowerCase();
+      return haystack.includes(normalized);
+    });
+  }, [allEntries, query, sourceFilter]);
+  const [selectedKey, setSelectedKey] = useState<string | null>(filteredEntries[0]?.key ?? null);
+  useEffect(() => {
+    if (filteredEntries.length === 0) {
+      setSelectedKey(null);
+      return;
+    }
+    if (!filteredEntries.some((entry) => entry.key === selectedKey)) {
+      setSelectedKey(filteredEntries[0]?.key ?? null);
+    }
+  }, [filteredEntries, selectedKey]);
+  const selected = filteredEntries.find((entry) => entry.key === selectedKey) ?? filteredEntries[0] ?? null;
+  const applyEntry = useCallback((entry: TemplateMarketEntry) => {
+    if (entry.recipe) {
+      onApplyRecipe(entry.recipe);
+      return;
+    }
+    onApply(entry.template);
+  }, [onApply, onApplyRecipe]);
+
   return (
     <div
       className="dialog-backdrop"
@@ -5183,78 +6313,156 @@ function TemplatePickerDialog({
         if (e.target === e.currentTarget) onClose();
       }}
     >
-      <div className="picker-dialog" role="dialog" aria-label="选择 Prompt 模板">
+      <div className="picker-dialog template-market-dialog" role="dialog" aria-label="选择 Prompt 模板">
         <div className="picker-dialog-head">
-          <h3>选择 Prompt 模板</h3>
+          <div>
+            <h3>本地模板市场</h3>
+            <p className="hint">浏览内置工作流、Workflow Recipe 和你的自定义模板，先预览，再一键套用。</p>
+          </div>
           <button type="button" className="settings-close" onClick={onClose}>
             ✕
           </button>
         </div>
-        <div className="picker-dialog-list">
-          <div className="picker-dialog-section-title">内置工作流</div>
-          {BUILTIN_WORKFLOW_TEMPLATES.map((template) => (
-            <button
-              key={template.id}
-              type="button"
-              className="picker-dialog-item workflow-template"
-              data-testid="workflow-template-item"
-              onClick={() => onApply(template)}
-            >
-              <strong>{template.name}</strong>
-              <span>{template.description}</span>
-              <code>{template.content.slice(0, 140)}</code>
-            </button>
-          ))}
-          <div className="picker-dialog-section-title">Workflow Recipe</div>
-          {recipes.length === 0 ? (
-            <EmptyState
-              title="还没有 Recipe"
-              hint="可以在控制中心的模板与 Persona 里创建。"
-              icon="🧪"
-              compact
-              tone="muted"
-            />
-          ) : (
-            recipes.map((recipe) => (
+        <div className="template-market-toolbar">
+          <input
+            data-testid="template-market-search"
+            className="template-market-search"
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            placeholder="搜索模板名、变量、提示内容…"
+          />
+          <div className="template-market-filters" role="tablist" aria-label="模板来源">
+            {[
+              ['all', `全部 · ${allEntries.length}`],
+              ['builtin', `内置 · ${allEntries.filter((entry) => entry.source === 'builtin').length}`],
+              ['recipe', `Recipe · ${allEntries.filter((entry) => entry.source === 'recipe').length}`],
+              ['template', `我的模板 · ${allEntries.filter((entry) => entry.source === 'template').length}`],
+            ].map(([id, label]) => (
               <button
-                key={recipe.id}
+                key={id}
                 type="button"
-                className="picker-dialog-item workflow-template"
-                data-testid="workflow-recipe-item"
-                onClick={() => onApplyRecipe(recipe)}
+                data-testid={`template-market-filter-${id}`}
+                className={sourceFilter === id ? 'is-active' : ''}
+                onClick={() => setSourceFilter(id as 'all' | TemplateMarketSource)}
               >
-                <strong>{recipe.name}</strong>
-                {recipe.description && <span>{recipe.description}</span>}
-                <code>{recipe.spec.prompt_template.slice(0, 140)}</code>
+                {label}
               </button>
-            ))
-          )}
-          <div className="picker-dialog-section-title">我的模板</div>
-          {!hasTemplates ? (
-            <EmptyState
-              title="还没有自定义模板"
-              hint="可以先到设置里创建一个。"
-              icon="🗂"
-              compact
-              tone="muted"
-            />
-          ) : (
-            <>
-              {templates.map((template) => (
+            ))}
+          </div>
+        </div>
+        <div className="template-market-layout">
+          <div className="template-market-list" data-testid="template-market-list">
+            {filteredEntries.length === 0 ? (
+              <EmptyState
+                title="没有匹配的模板"
+                hint="换个关键词，或先去设置里创建一个模板 / Recipe。"
+                icon="🧭"
+                compact
+                tone="muted"
+              />
+            ) : (
+              filteredEntries.map((entry) => (
                 <button
-                  key={template.id}
+                  key={entry.key}
                   type="button"
-                  className="picker-dialog-item"
-                  data-testid="template-picker-item"
-                  onClick={() => onApply(template)}
+                  className={`picker-dialog-item template-market-card${entry.source !== 'template' ? ' workflow-template' : ''}${selected?.key === entry.key ? ' is-selected' : ''}`}
+                  data-testid={entry.testId}
+                  onMouseEnter={() => setSelectedKey(entry.key)}
+                  onFocus={() => setSelectedKey(entry.key)}
+                  onClick={() => applyEntry(entry)}
                 >
-                  <strong>{template.name}</strong>
-                  {template.description && <span>{template.description}</span>}
-                  <code>{template.content.slice(0, 140)}</code>
+                  <div className="template-market-card__eyebrow">
+                    <span className={`template-market-card__source template-market-card__source--${entry.source}`}>
+                      {TEMPLATE_MARKET_SOURCE_LABEL[entry.source]}
+                    </span>
+                    <span>{entry.vars.length > 0 ? `${entry.vars.length} 个变量` : '即插即用'}</span>
+                  </div>
+                  <strong>{entry.name}</strong>
+                  {entry.description && <span>{entry.description}</span>}
+                  <small>{entry.summary}</small>
+                  <code>{entry.content.slice(0, 160)}</code>
                 </button>
-              ))}
-            </>
-          )}
+              ))
+            )}
+          </div>
+          <aside className="template-market-preview" data-testid="template-market-preview">
+            {selected ? (
+              <>
+                <div className="template-market-preview__head">
+                  <span className={`template-market-card__source template-market-card__source--${selected.source}`}>
+                    {TEMPLATE_MARKET_SOURCE_LABEL[selected.source]}
+                  </span>
+                  <h4>{selected.name}</h4>
+                  {selected.description && <p>{selected.description}</p>}
+                </div>
+                <div className="template-market-preview__tags">
+                  {selected.tags.map((tag) => (
+                    <span key={tag}>{tag}</span>
+                  ))}
+                </div>
+                {selected.recipe && (
+                  <dl className="template-market-preview__meta">
+                    <div>
+                      <dt>任务类型</dt>
+                      <dd>{TEMPLATE_MARKET_TASK_LABEL[selected.recipe.spec.recommended_task]}</dd>
+                    </div>
+                    <div>
+                      <dt>模型策略</dt>
+                      <dd>{TEMPLATE_MARKET_MODEL_STRATEGY_LABEL[selected.recipe.spec.model_strategy]}</dd>
+                    </div>
+                    <div>
+                      <dt>工具要求</dt>
+                      <dd>
+                        {selected.recipe.spec.tools.required.length > 0
+                          ? `必需 ${selected.recipe.spec.tools.required.join('、')}`
+                          : selected.recipe.spec.tools.optional.length > 0
+                            ? `可选 ${selected.recipe.spec.tools.optional.join('、')}`
+                            : '无'}
+                      </dd>
+                    </div>
+                    <div>
+                      <dt>输出格式</dt>
+                      <dd>{selected.recipe.spec.output_format.kind}</dd>
+                    </div>
+                  </dl>
+                )}
+                {selected.vars.length > 0 && (
+                  <div className="template-market-preview__vars">
+                    <strong>模板变量</strong>
+                    <div>
+                      {selected.vars.map((variable) => (
+                        <span key={variable}>{variable}</span>
+                      ))}
+                    </div>
+                  </div>
+                )}
+                <div className="template-market-preview__content">
+                  <div className="picker-dialog-section-title">Prompt 预览</div>
+                  <pre>{selected.content}</pre>
+                </div>
+                <div className="template-market-preview__actions">
+                  <button
+                    type="button"
+                    data-testid="template-market-apply"
+                    onClick={() => applyEntry(selected)}
+                  >
+                    {selected.vars.length > 0 ? '填写变量并套用' : '一键套用'}
+                  </button>
+                  <button type="button" onClick={onClose}>
+                    关闭
+                  </button>
+                </div>
+              </>
+            ) : (
+              <EmptyState
+                title="还没有可用模板"
+                hint="先去设置里创建一个模板或 Recipe。"
+                icon="🗂"
+                compact
+                tone="muted"
+              />
+            )}
+          </aside>
         </div>
       </div>
     </div>
@@ -5311,9 +6519,14 @@ function MessageContextDetails({
   const inactiveSources = sources.filter((source) => !source.active);
   const visibleSources = activeSources.length > 0 ? activeSources : sources.slice(0, 2);
   const summaryText = messageContextSummary(snapshot);
-  const tokenSummary = cost
-    ? `${formatTokenCount(cost.input_tokens)} in · ${formatTokenCount(cost.output_tokens)} out`
-    : 'Token 未返回';
+  const tokenParts = cost
+    ? [
+        cost.input_tokens != null ? `${formatTokenCount(cost.input_tokens)} in` : null,
+        cost.cache_input_tokens != null ? `${formatTokenCount(cost.cache_input_tokens)} cache` : null,
+        cost.output_tokens != null ? `${formatTokenCount(cost.output_tokens)} out` : null,
+      ].filter((part): part is string => Boolean(part))
+    : [];
+  const tokenSummary = tokenParts.length > 0 ? tokenParts.join(' · ') : 'Token 未返回';
   const costSummary = cost?.actual_usd != null ? formatUsd(cost.actual_usd) : '—';
   const summaryTitle = [
     summaryText !== '上下文' ? summaryText : null,
@@ -5333,10 +6546,15 @@ function MessageContextDetails({
           <span className="msg-cost context-snapshot-cost" data-testid="msg-cost">
             <span aria-hidden="true">💰</span>
             <strong>{costSummary}</strong>
+            {tokenParts.map((part) => (
+              <span key={part} className="msg-cost-note">
+                {part}
+              </span>
+            ))}
             <span className="sr-only">
               {` ${tokenSummary}`}
               {summaryText !== '上下文' ? ` ${summaryText}` : ''}
-              {cost.input_tokens == null || cost.output_tokens == null ? ' token 未返回。' : ''}
+              {tokenParts.length === 0 ? ' token 未返回。' : ''}
             </span>
           </span>
         ) : (
@@ -5383,7 +6601,7 @@ function MessageContextDetails({
           <small>Token</small>
           <strong>
             {cost
-              ? `${formatTokenCount(cost.input_tokens)} in / ${formatTokenCount(cost.output_tokens)} out`
+              ? tokenSummary
               : '未返回'}
           </strong>
         </span>
@@ -5456,6 +6674,7 @@ function runEventMeta(event: RunEvent): string {
   }
   if (event.kind === 'cost.recorded') {
     const input = typeof payload.input_tokens === 'number' ? `${payload.input_tokens} in` : null;
+    const cache = typeof payload.cache_input_tokens === 'number' ? `${payload.cache_input_tokens} cache` : null;
     const output = typeof payload.output_tokens === 'number' ? `${payload.output_tokens} out` : null;
     const actual =
       typeof payload.actual_usd === 'number'
@@ -5467,7 +6686,7 @@ function runEventMeta(event: RunEvent): string {
     const costId = typeof payload.cost_record_id === 'string'
       ? `Cost ${payload.cost_record_id.slice(0, 10)}`
       : null;
-    return [input, output, usd, costId].filter(Boolean).join(' · ');
+    return [input, cache, output, usd, costId].filter(Boolean).join(' · ');
   }
   if (event.kind.startsWith('memory.')) {
     const ids = Array.isArray(payload.memory_ids) ? `${payload.memory_ids.length} 条` : null;
@@ -5587,12 +6806,19 @@ function RunEventFileChunks({
     <div className="run-event-file-chunks" data-testid="run-event-file-chunks">
       {chunks.slice(0, 6).map((chunk, index) => {
         const fileId = typeof chunk.file_id === 'string' ? chunk.file_id : 'file';
+        const fileName = typeof chunk.file_name === 'string' ? chunk.file_name : fileId.slice(0, 10);
         const chunkIndex = typeof chunk.chunk_index === 'number' ? chunk.chunk_index : index;
-        const score = typeof chunk.score === 'number' ? chunk.score.toFixed(3) : null;
+        const snippet = typeof chunk.snippet === 'string' ? chunk.snippet : null;
         return (
-          <span key={`${fileId}-${chunkIndex}-${index}`} title={typeof chunk.chunk_id === 'string' ? chunk.chunk_id : undefined}>
-            {fileId.slice(0, 10)} · chunk {chunkIndex}{score ? ` · ${score}` : ''}
-          </span>
+          <article
+            key={`${fileId}-${chunkIndex}-${index}`}
+            className="run-event-file-chunk-card"
+            title={typeof chunk.chunk_id === 'string' ? chunk.chunk_id : undefined}
+          >
+            <strong>{fileName}</strong>
+            <small>chunk {chunkIndex}</small>
+            {snippet && <p>{snippet}</p>}
+          </article>
         );
       })}
     </div>
@@ -5835,29 +7061,362 @@ function TemplateVariablesDialog({
   );
 }
 
+function deriveQuickCompareArbitration(
+  quickCompare: QuickCompareUiState,
+  chatModels: Model[],
+  providers: Provider[],
+  costLogsById: Record<string, QuickCompareCostLogRow>,
+): QuickCompareArbitrationSummary | null {
+  const completed = quickCompare.outputs.filter((item) => item.status === 'complete' && item.content.trim());
+  if (completed.length < 2 || quickCompare.running) return null;
+  const fastestFirstTokenMs = Math.min(...completed.map((item) => item.firstTokenMs ?? Number.POSITIVE_INFINITY));
+  const fastestDurationMs = Math.min(...completed.map((item) => item.durationMs ?? Number.POSITIVE_INFINITY));
+  const costValues = completed
+    .map((item) => item.costRecordId ? costLogsById[item.costRecordId]?.actual_cost_usd ?? null : null)
+    .filter((value): value is number => value != null && Number.isFinite(value));
+  const cheapestCostUsd = costValues.length > 0 ? Math.min(...costValues) : null;
+  const averageCostUsd = costValues.length > 0
+    ? costValues.reduce((sum, value) => sum + value, 0) / costValues.length
+    : null;
+  const scored = completed
+    .map((output) => {
+      const outputModel = chatModels.find((item) => item.id === output.modelId) ?? null;
+      const costUsd = output.costRecordId ? costLogsById[output.costRecordId]?.actual_cost_usd ?? null : null;
+      const toolSuccesses = output.toolTraces.filter((trace) => trace.status === 'ok').length;
+      const toolFailures = output.toolTraces.filter((trace) => trace.status === 'error').length;
+      const lengthScore = Math.min(36, Math.round(output.content.trim().length / 28));
+      const toolScore = toolSuccesses * 8;
+      const breadthScore = output.toolNames.length > 0 ? Math.min(output.toolNames.length * 2, 8) : 0;
+      const speedScore =
+        (output.firstTokenMs != null && output.firstTokenMs === fastestFirstTokenMs ? 8 : 0)
+        + (output.durationMs != null && output.durationMs === fastestDurationMs ? 6 : 0);
+      const overlapScore = averageKeywordOverlap(output.content, completed.filter((item) => item.outputId !== output.outputId).map((item) => item.content));
+      const costScore =
+        costUsd != null && cheapestCostUsd != null && costUsd <= cheapestCostUsd * 1.15
+          ? 8
+          : costUsd != null && averageCostUsd != null && costUsd <= averageCostUsd
+            ? 4
+            : 0;
+      const penalty = toolFailures * 5;
+      const total = 100 + lengthScore + toolScore + breadthScore + speedScore + costScore + Math.round(overlapScore * 18) - penalty;
+      return {
+        output,
+        outputModel,
+        costUsd,
+        toolSuccesses,
+        toolFailures,
+        total,
+        overlapScore,
+      };
+    })
+    .sort((a, b) => b.total - a.total);
+  const best = scored[0];
+  const runnerUp = scored[1];
+  if (!best) return null;
+  const title = best.outputModel
+    ? modelDisplayWithProvider(best.outputModel, providers)
+    : best.output.modelId;
+  const gap = best.total - (runnerUp?.total ?? 0);
+  const confidence: QuickCompareArbitrationSummary['confidence'] =
+    gap >= 18 && best.overlapScore >= 0.2 ? 'high' : gap >= 10 ? 'medium' : 'low';
+  const minority = scored
+    .slice(1)
+    .filter((item) => item.overlapScore < 0.12)
+    .sort((a, b) => a.overlapScore - b.overlapScore)[0]
+    ?? null;
+  const reasons = [
+    best.output.content.trim().length >= 280
+      ? '内容展开更完整，适合直接采纳后再精修。'
+      : '表达更短更直接，适合作为结论稿起点。',
+    best.toolSuccesses > 0
+      ? `工具链有 ${best.toolSuccesses} 次成功调用，结论可追溯。`
+      : '不依赖工具链，适合纯判断题或创意题快速定稿。',
+    best.overlapScore >= 0.2
+      ? '和其他候选存在较多共同关键词，整体判断更稳。'
+      : '与其他候选分歧较大，建议采纳前再人工复核关键结论。',
+  ];
+  if (best.costUsd != null) {
+    reasons.push(
+      cheapestCostUsd != null && best.costUsd <= cheapestCostUsd * 1.15
+        ? '成本位于本轮较优区间，适合直接进入下一步执行。'
+        : `这列预估成本为 ${formatUsd(best.costUsd)}，建议结合任务重要性取舍。`,
+    );
+  }
+  const risks = [
+    scored.some((item) => item.toolFailures > 0)
+      ? '部分候选出现工具失败，涉及外部资料时要复核证据链。'
+      : null,
+    quickCompare.outputs.some((item) => item.status === 'failed')
+      ? '至少有一个候选未完成，本轮结论基于剩余成功列。'
+      : null,
+    confidence === 'low'
+      ? '候选之间分歧较大，当前推荐更像默认落点而非确定答案。'
+      : null,
+    averageCostUsd != null && costValues.some((value) => value >= averageCostUsd * 2)
+      ? '不同模型成本差异较大，正式批量使用前应先做预算校准。'
+      : null,
+  ].filter((item): item is string => Boolean(item));
+  const reviewPoints = [
+    minority
+      ? `少数意见来自 ${minority.outputModel ? modelDisplayWithProvider(minority.outputModel, providers) : minority.output.modelId}，建议复核它与推荐方案的关键分歧。`
+      : null,
+    quickCompare.requestedToolIntent && best.toolSuccesses === 0
+      ? '原问题看起来需要外部资料，但推荐列没有成功工具调用，建议补一次联网或文件复核。'
+      : null,
+    best.costUsd != null && cheapestCostUsd != null && best.costUsd > cheapestCostUsd * 1.8
+      ? '推荐列成本明显高于最便宜候选；如果是高频任务，可先验证是否值得长期默认采用。'
+      : null,
+  ].filter((item): item is string => Boolean(item));
+  const caution = confidence === 'low'
+    ? '当前候选之间差异较大，这个建议更偏“默认推荐”而不是确定答案。'
+    : null;
+  const cards: QuickCompareArbitrationSummary['cards'] = scored
+    .slice()
+    .sort((a, b) => a.output.index - b.output.index)
+    .map((item) => ({
+      outputId: item.output.outputId,
+      title: item.outputModel ? modelDisplayWithProvider(item.outputModel, providers) : item.output.modelId,
+      score: item.total,
+      stance: item.output.outputId === best.output.outputId
+        ? 'recommended'
+        : minority && item.output.outputId === minority.output.outputId
+          ? 'minority'
+          : 'supporting',
+      costUsd: item.costUsd,
+      toolSuccesses: item.toolSuccesses,
+      toolFailures: item.toolFailures,
+    }));
+  return {
+    recommendedOutputId: best.output.outputId,
+    confidence,
+    title,
+    reasons,
+    caution,
+    totalCostUsd: costValues.length > 0 ? costValues.reduce((sum, value) => sum + value, 0) : null,
+    minorityTitle: minority
+      ? (minority.outputModel
+        ? modelDisplayWithProvider(minority.outputModel, providers)
+        : minority.output.modelId)
+      : null,
+    risks,
+    reviewPoints,
+    cards,
+  };
+}
+
+function buildQuickCompareDecisionReportMarkdown(
+  quickCompare: QuickCompareUiState,
+  arbitration: QuickCompareArbitrationSummary,
+  cardsByOutputId: Map<string, QuickCompareArbitrationSummary['cards'][number]>,
+  chatModels: Model[],
+  providers: Provider[],
+): string {
+  const sections: string[] = [
+    '# Decision Report',
+    '',
+    `- 推荐方案：${arbitration.title}`,
+    `- 置信度：${arbitration.confidence === 'high' ? '高' : arbitration.confidence === 'medium' ? '中' : '低'}`,
+    `- 总成本：${arbitration.totalCostUsd == null ? '待统计' : formatUsd(arbitration.totalCostUsd)}`,
+    `- 少数意见：${arbitration.minorityTitle ?? '无明显分歧列'}`,
+  ];
+  if (quickCompare.requestText?.trim()) {
+    sections.push('', '## 原始问题', '', quickCompare.requestText.trim());
+  }
+  sections.push('', '## 推荐理由', '', ...arbitration.reasons.map((reason) => `- ${reason}`));
+  if (arbitration.risks.length > 0) {
+    sections.push('', '## 风险', '', ...arbitration.risks.map((risk) => `- ${risk}`));
+  }
+  if (arbitration.reviewPoints.length > 0) {
+    sections.push('', '## 复查点', '', ...arbitration.reviewPoints.map((point) => `- ${point}`));
+  }
+  if (arbitration.caution) {
+    sections.push('', '## 提醒', '', arbitration.caution);
+  }
+  sections.push('', '## 候选列明细');
+  for (const output of quickCompare.outputs) {
+    const outputModel = chatModels.find((item) => item.id === output.modelId) ?? null;
+    const title = outputModel ? modelDisplayWithProvider(outputModel, providers) : output.modelId;
+    const card = cardsByOutputId.get(output.outputId) ?? null;
+    sections.push('', `### ${title}`);
+    sections.push(
+      '',
+      `- 状态：${output.status === 'failed' ? '失败' : output.status === 'complete' ? '完成' : '生成中'}`,
+      `- 角色：${card?.stance === 'recommended' ? '推荐方案' : card?.stance === 'minority' ? '少数意见' : '支持列'}`,
+    );
+    if (card) {
+      sections.push(
+        `- 评分：${card.score}`,
+        `- 成本：${card.costUsd == null ? '待统计' : formatUsd(card.costUsd)}`,
+        `- 工具：成功 ${card.toolSuccesses}${card.toolFailures > 0 ? ` / 失败 ${card.toolFailures}` : ''}`,
+      );
+    }
+    if (output.firstTokenMs != null || output.durationMs != null) {
+      sections.push(
+        `- 速度：首字 ${formatLatencyMs(output.firstTokenMs) ?? '—'} / 总耗时 ${formatLatencyMs(output.durationMs) ?? '—'}`,
+      );
+    }
+    if (output.toolNames.length > 0) {
+      sections.push(`- 工具清单：${output.toolNames.map(quickCompareToolLabel).join(' / ')}`);
+    }
+    if (output.toolTraces.length > 0) {
+      sections.push('- 工具轨迹：');
+      for (const trace of output.toolTraces) {
+        sections.push(
+          `  - ${trace.label} · ${trace.status === 'running' ? '调用中' : trace.status === 'ok' ? '已完成' : '失败'}${trace.durationMs != null ? ` · ${formatLatencyMs(trace.durationMs)}` : ''}`,
+        );
+      }
+    }
+    sections.push('', output.status === 'failed' ? (output.error ?? '候选生成失败') : (output.content.trim() || '（暂无内容）'));
+  }
+  return `${sections.join('\n').trim()}\n`;
+}
+
+function buildQuickCompareFollowUpPrompt(
+  quickCompare: QuickCompareUiState,
+  arbitration: QuickCompareArbitrationSummary,
+): string {
+  const lines = [
+    `请基于刚才的 Quick Compare Decision Report，继续把推荐方案“${arbitration.title}”推进成可执行结论。`,
+  ];
+  if (quickCompare.requestText?.trim()) {
+    lines.push('', `原始问题：${quickCompare.requestText.trim()}`);
+  }
+  if (arbitration.reasons.length > 0) {
+    lines.push('', '优先保留这些推荐理由：', ...arbitration.reasons.map((reason) => `- ${reason}`));
+  }
+  if (arbitration.risks.length > 0) {
+    lines.push('', '同时逐条回应这些风险：', ...arbitration.risks.map((risk) => `- ${risk}`));
+  }
+  if (arbitration.reviewPoints.length > 0) {
+    lines.push('', '请重点复查这些点：', ...arbitration.reviewPoints.map((point) => `- ${point}`));
+  }
+  lines.push(
+    '',
+    '输出格式：',
+    '1. 最终推荐方案',
+    '2. 为什么不选其他候选',
+    '3. 仍需人工确认的事项',
+    '4. 下一步执行清单',
+  );
+  return lines.join('\n');
+}
+
+function buildQuickCompareMinorityReviewPrompt(
+  quickCompare: QuickCompareUiState,
+  arbitration: QuickCompareArbitrationSummary,
+): string {
+  const lines = [
+    `请站在“少数意见优先复核”的角度，重新审视刚才的 Quick Compare 结论。当前推荐方案是“${arbitration.title}”。`,
+    `如果少数意见“${arbitration.minorityTitle ?? '无明显分歧列'}”有道理，请明确指出它在哪些前提下比推荐方案更值得采用。`,
+  ];
+  if (quickCompare.requestText?.trim()) {
+    lines.push('', `原始问题：${quickCompare.requestText.trim()}`);
+  }
+  if (arbitration.reviewPoints.length > 0) {
+    lines.push('', '优先围绕这些复查点展开：', ...arbitration.reviewPoints.map((point) => `- ${point}`));
+  }
+  if (arbitration.risks.length > 0) {
+    lines.push('', '同时关注这些风险：', ...arbitration.risks.map((risk) => `- ${risk}`));
+  }
+  lines.push(
+    '',
+    '输出格式：',
+    '1. 少数意见最强论据',
+    '2. 推荐方案仍然更优的条件',
+    '3. 哪些前提变化会导致结论反转',
+    '4. 最终是否维持原推荐',
+  );
+  return lines.join('\n');
+}
+
+function focusCostCall(detail: CostCallFocusDetail): void {
+  window.dispatchEvent(new CustomEvent<CostCallFocusDetail>('taori:focus-cost-call', { detail }));
+}
+
+function averageKeywordOverlap(baseText: string, otherTexts: string[]): number {
+  const base = extractCompareKeywords(baseText);
+  if (base.size === 0 || otherTexts.length === 0) return 0;
+  const scores = otherTexts
+    .map((text) => extractCompareKeywords(text))
+    .filter((set) => set.size > 0)
+    .map((set) => {
+      let intersection = 0;
+      for (const token of set) {
+        if (base.has(token)) intersection += 1;
+      }
+      const union = new Set([...base, ...set]).size;
+      return union > 0 ? intersection / union : 0;
+    });
+  if (scores.length === 0) return 0;
+  return scores.reduce((sum, item) => sum + item, 0) / scores.length;
+}
+
+function extractCompareKeywords(text: string): Set<string> {
+  const lowered = text.toLowerCase();
+  const english = lowered.match(/[a-z0-9][a-z0-9_-]{2,}/g) ?? [];
+  const chineseWords = lowered.match(/[\u4e00-\u9fa5]{2,}/g) ?? [];
+  return new Set(
+    [...english, ...chineseWords]
+      .map((token) => token.trim())
+      .filter((token) => token.length >= 2),
+  );
+}
+
 function QuickCompareModelPickerDialog({
   models,
-  selectedIds,
+  selectedConfigs,
+  availableTools,
   providers,
   currentModelId,
   onCancel,
   onSubmit,
 }: {
   models: Model[];
-  selectedIds: string[];
+  selectedConfigs: QuickCompareParticipantConfigDraft[];
+  availableTools: EffectiveTool[];
   providers: Provider[];
   currentModelId: string;
   onCancel: () => void;
-  onSubmit: (modelIds: string[]) => void;
+  onSubmit: (participantConfigs: QuickCompareParticipantConfigDraft[]) => void;
 }): JSX.Element {
-  const [draftIds, setDraftIds] = useState<string[]>(() => selectedIds.slice(0, 3));
+  const [draftConfigs, setDraftConfigs] = useState<QuickCompareParticipantConfigDraft[]>(
+    () => selectedConfigs.slice(0, 3),
+  );
+  const duplicateLabelCounts = useMemo(() => {
+    const counts = new Map<string, number>();
+    for (const candidate of models) {
+      const key = quickCompareLabelKey(candidate, providers);
+      counts.set(key, (counts.get(key) ?? 0) + 1);
+    }
+    return counts;
+  }, [models, providers]);
+  const draftIds = draftConfigs.map((item) => item.modelId);
   const canSubmit = draftIds.length >= 2 && draftIds.length <= 3;
+  const selectionLimitReached = draftIds.length >= 3;
   const toggleModel = (modelId: string): void => {
-    setDraftIds((prev) => {
-      if (prev.includes(modelId)) return prev.filter((id) => id !== modelId);
+    setDraftConfigs((prev) => {
+      if (prev.some((item) => item.modelId === modelId)) {
+        return prev.filter((item) => item.modelId !== modelId);
+      }
       if (prev.length >= 3) return prev;
-      return [...prev, modelId];
+      const model = models.find((candidate) => candidate.id === modelId) ?? null;
+      return [
+        ...prev,
+        {
+          modelId,
+          toolNames: model?.supports_tools ? availableTools.map((tool) => tool.name) : [],
+        },
+      ];
     });
+  };
+  const toggleTool = (modelId: string, toolName: string): void => {
+    setDraftConfigs((prev) => prev.map((item) => {
+      if (item.modelId !== modelId) return item;
+      const nextToolNames = item.toolNames.includes(toolName)
+        ? item.toolNames.filter((name) => name !== toolName)
+        : [...item.toolNames, toolName];
+      return { ...item, toolNames: nextToolNames };
+    }));
   };
   return (
     <div
@@ -5873,13 +7432,16 @@ function QuickCompareModelPickerDialog({
         aria-label="选择 Quick Compare 模型"
         onSubmit={(e) => {
           e.preventDefault();
-          if (canSubmit) onSubmit(draftIds);
+          if (canSubmit) onSubmit(draftConfigs);
         }}
       >
         <div className="picker-dialog-head">
           <div>
             <h3>选择对比模型</h3>
-            <p className="hint">选择 2-3 个可用聊天模型。默认已按当前模型、低成本和能力候选预选。</p>
+            <p className="hint">
+              选择 2-3 个可用聊天模型，并为每一列单独裁剪工具集。
+              {selectionLimitReached ? ' 当前已选满 3 列，取消一列后可再勾选其他模型。' : ''}
+            </p>
           </div>
           <button type="button" className="settings-close" onClick={onCancel}>
             ✕
@@ -5888,37 +7450,90 @@ function QuickCompareModelPickerDialog({
         <div className="quick-compare-model-list">
           {models.map((candidate) => {
             const checked = draftIds.includes(candidate.id);
-            const disabled = !checked && draftIds.length >= 3;
+            const disabled = !checked && selectionLimitReached;
             const provider = providers.find((item) => item.id === candidate.provider_id);
+            const draft = draftConfigs.find((item) => item.modelId === candidate.id);
             return (
-              <label
+              <div
                 key={candidate.id}
                 className={`quick-compare-model-option${checked ? ' is-selected' : ''}${disabled ? ' is-disabled' : ''}`}
                 data-testid={`quick-compare-model-option-${candidate.id}`}
               >
-                <input
-                  type="checkbox"
-                  checked={checked}
-                  disabled={disabled}
-                  onChange={() => toggleModel(candidate.id)}
-                  data-testid={`quick-compare-model-check-${candidate.id}`}
-                />
-                <span className="quick-compare-model-main">
-                  <strong>{modelDisplayWithProvider(candidate, providers)}</strong>
-                  <small>
-                    {candidate.id === currentModelId ? '当前模型' : '候选模型'}
-                    {provider ? ` · ${provider.name}` : ''}
-                  </small>
-                </span>
-                <span className="quick-compare-model-tags">
-                  {candidate.supports_tools && <span>tools</span>}
-                  {candidate.supports_vision && <span>vision</span>}
-                  {candidate.context_length ? <span>{formatTokenCount(candidate.context_length)} ctx</span> : null}
-                  {candidate.price_input_per_1m != null && (
-                    <span>{formatUsd(candidate.price_input_per_1m)}/1M in</span>
-                  )}
-                </span>
-              </label>
+                <label className="quick-compare-model-toggle">
+                  <input
+                    type="checkbox"
+                    checked={checked}
+                    disabled={disabled}
+                    aria-describedby={disabled ? `quick-compare-model-note-${candidate.id}` : undefined}
+                    onChange={() => toggleModel(candidate.id)}
+                    data-testid={`quick-compare-model-check-${candidate.id}`}
+                  />
+                  <span className="quick-compare-model-main">
+                    <strong>{formatQuickCompareModelLabel(candidate, providers, duplicateLabelCounts)}</strong>
+                    <small>
+                      {candidate.id === currentModelId ? '当前模型' : '候选模型'}
+                      {provider ? ` · ${provider.name}` : ''}
+                    </small>
+                  </span>
+                  <span className="quick-compare-model-tags">
+                    {candidate.supports_tools && <span>tools</span>}
+                    {candidate.supports_vision && <span>vision</span>}
+                    {candidate.context_length ? <span>{formatTokenCount(candidate.context_length)} ctx</span> : null}
+                    {candidate.price_input_per_1m != null && (
+                      <span>{formatUsd(candidate.price_input_per_1m)}/1M in</span>
+                    )}
+                  </span>
+                </label>
+                {disabled && (
+                  <p
+                    id={`quick-compare-model-note-${candidate.id}`}
+                    className="quick-compare-model-option-note hint"
+                  >
+                    已达到 3/3 上限，先取消一列再切换到这个模型。
+                  </p>
+                )}
+                {checked && (
+                  <div
+                    className="quick-compare-model-tools"
+                    data-testid={`quick-compare-model-tools-${candidate.id}`}
+                  >
+                    {candidate.supports_tools ? (
+                      availableTools.length > 0 ? (
+                        <>
+                          <div className="quick-compare-model-tools-head">
+                            <strong>本列工具集</strong>
+                            <span>{draft?.toolNames.length ?? 0} 个已启用</span>
+                          </div>
+                          <div className="quick-compare-model-tool-list">
+                            {availableTools.map((tool) => {
+                              const selected = draft?.toolNames.includes(tool.name) ?? false;
+                              return (
+                                <label
+                                  key={tool.name}
+                                  className={`quick-compare-model-tool${selected ? ' is-selected' : ''}`}
+                                  data-testid={`quick-compare-tool-option-${candidate.id}-${tool.name}`}
+                                >
+                                  <input
+                                    type="checkbox"
+                                    checked={selected}
+                                    onChange={() => toggleTool(candidate.id, tool.name)}
+                                  />
+                                  <span>{quickCompareToolLabel(tool.name)}</span>
+                                </label>
+                              );
+                            })}
+                          </div>
+                          <p className="hint">只影响这一列，不会改会话级工具开关。</p>
+                        </>
+                      ) : (
+                        <p className="hint">当前会话没有可见工具，先到设置里开启需要的工具。</p>
+                      )
+                    ) : (
+                      <p className="hint">该模型不支持 tools，这一列会保持纯文本回答。</p>
+                    )}
+                  </div>
+                )}
+              </div>
             );
           })}
         </div>
@@ -6477,15 +8092,17 @@ function CostConfirmDialog({
               继续
             </button>
           )}
-          <button
-            type="button"
-            data-testid="cost-confirm-cheaper"
-            disabled={blocked || !hasCheaperPeer}
-            title={hasCheaperPeer ? undefined : '没有已知价格更低的同能力模型可切换'}
-            onClick={async () => { await persist(); onCheaper(); }}
-          >
-            {blocked ? '已被硬上限阻止' : '改用低成本模型'}
-          </button>
+          {!blocked && (
+            <button
+              type="button"
+              data-testid="cost-confirm-cheaper"
+              disabled={!hasCheaperPeer}
+              title={hasCheaperPeer ? undefined : '没有已知价格更低的同能力模型可切换'}
+              onClick={async () => { await persist(); onCheaper(); }}
+            >
+              改用低成本模型
+            </button>
+          )}
           <button type="button" data-testid="cost-confirm-cancel" onClick={() => { onCancel(); }}>
             取消
           </button>

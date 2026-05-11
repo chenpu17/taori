@@ -60,6 +60,33 @@ async function seedChatModels(count = 1): Promise<void> {
   }
 }
 
+async function seedModel(
+  providerId: string,
+  spec: {
+    model_name: string;
+    display_name: string;
+    capability: 'chat' | 'image';
+    is_default_for?: 'chat' | 'image';
+    supports_tools?: boolean;
+    supports_vision?: boolean;
+    price_input_per_1m?: number;
+    price_output_per_1m?: number;
+    price_per_call?: number;
+  },
+): Promise<void> {
+  const res = await authedFetch(env, '/v1/models', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      provider_id: providerId,
+      supports_tools: spec.supports_tools ?? false,
+      supports_vision: spec.supports_vision ?? false,
+      ...spec,
+    }),
+  });
+  expect(res.ok).toBeTruthy();
+}
+
 async function seedStreamingChatModels(count = 3): Promise<void> {
   const res = await authedFetch(env, '/v1/providers', {
     method: 'POST',
@@ -197,6 +224,11 @@ async function expectPageHasNoHorizontalOverflow(page: Page): Promise<void> {
   expect(overflow).toBeLessThanOrEqual(1);
 }
 
+async function expectElementHasNoHorizontalOverflow(locator: Locator): Promise<void> {
+  const overflow = await locator.evaluate((el) => el.scrollWidth - el.clientWidth);
+  expect(overflow).toBeLessThanOrEqual(1);
+}
+
 async function scrollToBottom(locator: Locator): Promise<void> {
   await locator.evaluate((el) => {
     el.scrollTop = el.scrollHeight;
@@ -256,6 +288,35 @@ test('small viewport: image picker remains scrollable and actions reachable with
   await expect(dialog.getByTestId('image-picker-cancel')).toBeInViewport();
 });
 
+test('small viewport: chat header wraps high-frequency controls instead of forcing horizontal scroll', async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  const providerId = await seedProvider();
+  await seedModel(providerId, {
+    model_name: 'visual-header-long',
+    capability: 'chat',
+    display_name: 'Visual Header Long Name With Vision Support',
+    is_default_for: 'chat',
+    supports_vision: true,
+    price_input_per_1m: 0.5,
+    price_output_per_1m: 1.5,
+  });
+
+  await page.goto('/');
+  await expect(page.getByTestId('chat-panel')).toBeVisible({ timeout: 10_000 });
+
+  const header = page.locator('.chat-header');
+  await expectElementHasNoHorizontalOverflow(header);
+  await expectHorizontallyWithinViewport(page, page.getByTestId('active-model'));
+  await expectHorizontallyWithinViewport(page, page.getByTestId('persona-select'));
+  await expect(page.getByTestId('open-template-picker')).toBeInViewport();
+  await expect(page.getByTestId('chat-export-markdown')).toBeInViewport();
+  await expect(page.getByTestId('persona-memory-scope')).toHaveText('未绑定');
+  await expect(page.getByTestId('vision-pill')).toBeVisible();
+  await expectPageHasNoHorizontalOverflow(page);
+});
+
 test('small viewport: roundtable launch dialog keeps primary actions reachable', async ({
   page,
 }) => {
@@ -305,6 +366,7 @@ test('small viewport: completed roundtable panel scrolls and loopback process en
     { timeout: 60_000 },
   );
   await scrollToBottom(panel);
+  await panel.getByTestId('roundtable-action-next-round').scrollIntoViewIfNeeded();
   await expect(panel.getByTestId('roundtable-action-next-round')).toBeInViewport();
 
   await panel.getByTestId('roundtable-action-next-round').click();
@@ -313,6 +375,7 @@ test('small viewport: completed roundtable panel scrolls and loopback process en
     { timeout: 60_000 },
   );
   await scrollToBottom(panel);
+  await panel.getByTestId('roundtable-action-summarize').scrollIntoViewIfNeeded();
   await expect(panel.getByTestId('roundtable-action-summarize')).toBeInViewport();
 
   await panel.getByTestId('roundtable-action-summarize').click();
@@ -325,6 +388,7 @@ test('small viewport: completed roundtable panel scrolls and loopback process en
   const loopback = panel.getByTestId('roundtable-loopback');
   await expect(loopback).toContainText('已带回', { timeout: 10_000 });
   await scrollToBottom(panel);
+  await loopback.scrollIntoViewIfNeeded();
   await expect(loopback).toBeInViewport();
   await loopback.click();
 
@@ -401,6 +465,31 @@ test('visual contrast: sidebar search, import filters, and edit cancel remain re
   page,
 }) => {
   await seedChatModels(1);
+  const providerRes = await authedFetch(env, '/v1/providers', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      name: 'Visual Import Ready',
+      type: 'openai',
+      base_url: MOCK_URL,
+      api_key: 'sk-visual-ready',
+    }),
+  });
+  expect(providerRes.ok).toBeTruthy();
+  const readyProviderId = ((await providerRes.json()) as { id: string }).id;
+  const readyModelRes = await authedFetch(env, '/v1/models', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      provider_id: readyProviderId,
+      model_name: 'visual-import-ready',
+      capability: 'chat',
+      display_name: 'Visual Import Ready',
+      price_input_per_1m: 0.5,
+      price_output_per_1m: 1.5,
+    }),
+  });
+  expect(readyModelRes.ok).toBeTruthy();
   await seedChatCost('视觉对比回归：按钮和过滤输入框');
   const conversationId = await findConversationContaining('视觉对比回归');
 
@@ -410,7 +499,8 @@ test('visual contrast: sidebar search, import filters, and edit cancel remain re
 
   await page.getByTestId('open-model-center').click();
   await expect(page.getByTestId('model-center')).toBeVisible();
-  await page.getByTestId('model-center-import').click();
+  await page.getByTestId(`provider-nav-item-${readyProviderId}`).click();
+  await page.getByTestId(`provider-detail-library-${readyProviderId}`).click();
   await expect(page.getByTestId('import-drawer')).toBeVisible();
   await expectReadableContrast(page.getByTestId('import-drawer-provider'));
   await expectReadableContrast(page.getByTestId('import-drawer-capability'));

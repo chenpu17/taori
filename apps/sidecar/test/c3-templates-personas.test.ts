@@ -84,9 +84,13 @@ describe('C3 prompt templates + personas', () => {
     });
     expect(first.statusCode).toBe(200);
     const firstPersonas = (first.json() as { personas: Array<{ name: string; description: string | null; prompt: string }> }).personas;
-    expect(firstPersonas).toHaveLength(2);
+    expect(firstPersonas).toHaveLength(6);
     expect(firstPersonas.map((persona) => persona.name).sort()).toEqual([
       'OpenClaw 行动派助手',
+      '初中教育专家',
+      '哲学家',
+      '小学教育专家',
+      '数学家',
       '架构评审助手',
     ]);
     expect(firstPersonas.find((persona) => persona.name === '架构评审助手')!.description).toContain('示例 Persona');
@@ -98,6 +102,10 @@ describe('C3 prompt templates + personas', () => {
     expect(openClawPrompt).toContain('# Memory and Boundaries');
     expect(openClawPrompt).toContain('不要以寒暄开场');
     expect(openClawPrompt).toContain('记忆系统用来服务用户，不用来膨胀人格');
+    expect(firstPersonas.find((persona) => persona.name === '哲学家')!.prompt).toContain('价值判断');
+    expect(firstPersonas.find((persona) => persona.name === '数学家')!.prompt).toContain('反例');
+    expect(firstPersonas.find((persona) => persona.name === '初中教育专家')!.description).toContain('初中阶段');
+    expect(firstPersonas.find((persona) => persona.name === '小学教育专家')!.prompt).toContain('小学生');
 
     const second = await app.inject({
       method: 'GET',
@@ -106,7 +114,7 @@ describe('C3 prompt templates + personas', () => {
     });
     expect(second.statusCode).toBe(200);
     const secondPersonas = (second.json() as { personas: Array<{ id: string }> }).personas;
-    expect(secondPersonas).toHaveLength(2);
+    expect(secondPersonas).toHaveLength(6);
 
     for (const persona of secondPersonas) {
       const deleted = await app.inject({
@@ -126,7 +134,7 @@ describe('C3 prompt templates + personas', () => {
     expect((afterDelete.json() as { personas: unknown[] }).personas).toHaveLength(0);
   });
 
-  it('adds the new OpenClaw builtin persona once for older installs without duplicating existing defaults', async () => {
+  it('adds newer builtin personas once for older installs without duplicating existing defaults', async () => {
     const memoriesRepo = new MemoriesRepo(db);
     memoriesRepo.set('global', null, 'personas.default_seeded.v1', '1');
     new PersonasRepo(db).create({
@@ -142,7 +150,14 @@ describe('C3 prompt templates + personas', () => {
     });
     expect(first.statusCode).toBe(200);
     const names = (first.json() as { personas: Array<{ name: string }> }).personas.map((persona) => persona.name).sort();
-    expect(names).toEqual(['OpenClaw 行动派助手', '架构评审助手']);
+    expect(names).toEqual([
+      'OpenClaw 行动派助手',
+      '初中教育专家',
+      '哲学家',
+      '小学教育专家',
+      '数学家',
+      '架构评审助手',
+    ]);
 
     const second = await app.inject({
       method: 'GET',
@@ -152,6 +167,10 @@ describe('C3 prompt templates + personas', () => {
     expect(second.statusCode).toBe(200);
     expect((second.json() as { personas: Array<{ name: string }> }).personas.map((persona) => persona.name).sort()).toEqual([
       'OpenClaw 行动派助手',
+      '初中教育专家',
+      '哲学家',
+      '小学教育专家',
+      '数学家',
       '架构评审助手',
     ]);
   });

@@ -293,4 +293,88 @@ describe('M2.2 cost L3+L4', () => {
     expect(body.data.rows.some((x: { label: string }) => x.label === 'Project Alpha')).toBe(true);
     expect(body.data.rows.some((x: { label: string }) => x.label === '未命名会话')).toBe(true);
   });
+
+  it('GET /v1/costs/breakdown?group_by=tag attributes multi-tag conversations evenly', async () => {
+    const pr = new ProvidersRepo(db).create({
+      name: 'P', type: 'openrouter', base_url: 'https://example.invalid', api_key: null,
+    });
+    const mr = new ModelsRepo(db);
+    const convRepo = new ConversationsRepo(db);
+    const tagged = convRepo.create({ title: 'Tagged Project' });
+    convRepo.setTags(tagged.id, ['project-alpha', 'frontend']);
+    const untagged = convRepo.create({ title: 'Loose Task' });
+    const model = mr.create({
+      provider_id: pr.id, model_name: 'alpha', capability: 'chat', display_name: 'Alpha', price_input_per_1m: 1,
+    });
+    const costs = new CostsRepo(db);
+    costs.insert({
+      conversation_id: tagged.id,
+      source_type: 'message',
+      source_id: 'msg_tagged',
+      feature: 'chat',
+      model_id: model.id,
+      model_name_snapshot: model.display_name,
+      actual_cost_usd: 0.6,
+      success: true,
+    });
+    costs.insert({
+      conversation_id: untagged.id,
+      source_type: 'message',
+      source_id: 'msg_untagged',
+      feature: 'chat',
+      model_id: model.id,
+      model_name_snapshot: model.display_name,
+      actual_cost_usd: 0.4,
+      success: true,
+    });
+
+    const r = await app.inject({
+      method: 'GET',
+      url: '/v1/costs/breakdown?scope=month&group_by=tag',
+      headers: { authorization: `Bearer ${bearer}` },
+    });
+    expect(r.statusCode).toBe(200);
+    const body = r.json();
+    expect(body.data.group_by).toBe('tag');
+    const projectRow = body.data.rows.find((x: { label: string }) => x.label === 'project-alpha');
+    const frontendRow = body.data.rows.find((x: { label: string }) => x.label === 'frontend');
+    const untaggedRow = body.data.rows.find((x: { label: string }) => x.label === '未归档项目');
+    expect(projectRow?.sum_usd).toBeCloseTo(0.3, 6);
+    expect(frontendRow?.sum_usd).toBeCloseTo(0.3, 6);
+    expect(projectRow?.count).toBeCloseTo(0.5, 6);
+    expect(untaggedRow?.sum_usd).toBeCloseTo(0.4, 6);
+  });
+
+  it('GET /v1/costs/export emits csv for the selected grouping', async () => {
+    const pr = new ProvidersRepo(db).create({
+      name: 'P', type: 'openrouter', base_url: 'https://example.invalid', api_key: null,
+    });
+    const model = new ModelsRepo(db).create({
+      provider_id: pr.id, model_name: 'alpha', capability: 'chat', display_name: 'Alpha', price_input_per_1m: 1,
+    });
+    const conv = new ConversationsRepo(db).create({ title: 'Export Scope' });
+    new ConversationsRepo(db).setTags(conv.id, ['ops']);
+    new CostsRepo(db).insert({
+      conversation_id: conv.id,
+      source_type: 'message',
+      source_id: 'msg_export',
+      feature: 'chat',
+      model_id: model.id,
+      model_name_snapshot: model.display_name,
+      actual_cost_usd: 0.25,
+      success: true,
+    });
+
+    const r = await app.inject({
+      method: 'GET',
+      url: '/v1/costs/export?scope=month&group_by=tag&format=csv',
+      headers: { authorization: `Bearer ${bearer}` },
+    });
+    expect(r.statusCode).toBe(200);
+    expect(r.headers['content-type']).toMatch(/^text\/csv/);
+    expect(r.headers['content-disposition']).toContain('taori-costs-tag-month.csv');
+    expect(r.payload).toContain('key,label');
+    expect(r.payload).toContain('sum_usd');
+    expect(r.payload).toContain('ops');
+  });
 });

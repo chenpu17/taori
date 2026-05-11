@@ -274,6 +274,104 @@ export const workflow_recipes = sqliteTable(
   }),
 );
 
+export const research_sessions = sqliteTable(
+  'research_sessions',
+  {
+    id: text('id').primaryKey(),
+    conversation_id: text('conversation_id').references(() => conversations.id, {
+      onDelete: 'set null',
+    }),
+    title: text('title').notNull(),
+    objective: text('objective').notNull(),
+    output_kind: text('output_kind').notNull(),
+    status: text('status').notNull(),
+    stage: text('stage').notNull(),
+    budget_mode: text('budget_mode').notNull(),
+    budget_limit_usd: real('budget_limit_usd'),
+    budget_spent_usd: real('budget_spent_usd').notNull().default(0),
+    constraints_json: text('constraints_json').notNull().default('{}'),
+    plan_json: text('plan_json'),
+    draft_markdown: text('draft_markdown'),
+    final_markdown: text('final_markdown'),
+    started_at: integer('started_at'),
+    completed_at: integer('completed_at'),
+    created_at: integer('created_at').notNull(),
+    updated_at: integer('updated_at').notNull(),
+  },
+  (t) => ({
+    statusIdx: index('research_sessions_status_idx').on(t.status, t.updated_at),
+    convIdx: index('research_sessions_conv_idx').on(t.conversation_id, t.updated_at),
+  }),
+);
+
+export const research_tasks = sqliteTable(
+  'research_tasks',
+  {
+    id: text('id').primaryKey(),
+    research_session_id: text('research_session_id')
+      .notNull()
+      .references(() => research_sessions.id, { onDelete: 'cascade' }),
+    parent_task_id: text('parent_task_id'),
+    kind: text('kind').notNull(),
+    status: text('status').notNull(),
+    title: text('title').notNull(),
+    input_json: text('input_json').notNull(),
+    output_json: text('output_json'),
+    error_json: text('error_json'),
+    started_at: integer('started_at'),
+    finished_at: integer('finished_at'),
+    created_at: integer('created_at').notNull(),
+    updated_at: integer('updated_at').notNull(),
+  },
+  (t) => ({
+    sessionIdx: index('research_tasks_session_idx').on(t.research_session_id, t.created_at),
+    statusIdx: index('research_tasks_status_idx').on(t.status, t.updated_at),
+  }),
+);
+
+export const research_sources = sqliteTable(
+  'research_sources',
+  {
+    id: text('id').primaryKey(),
+    research_session_id: text('research_session_id')
+      .notNull()
+      .references(() => research_sessions.id, { onDelete: 'cascade' }),
+    source_type: text('source_type').notNull(),
+    title: text('title'),
+    locator: text('locator').notNull(),
+    snippet: text('snippet'),
+    credibility_score: real('credibility_score'),
+    included: integer('included', { mode: 'boolean' }).notNull().default(true),
+    metadata_json: text('metadata_json').notNull().default('{}'),
+    created_at: integer('created_at').notNull(),
+  },
+  (t) => ({
+    sessionIdx: index('research_sources_session_idx').on(t.research_session_id, t.created_at),
+    locatorIdx: index('research_sources_locator_idx').on(t.research_session_id, t.locator),
+  }),
+);
+
+export const research_claims = sqliteTable(
+  'research_claims',
+  {
+    id: text('id').primaryKey(),
+    research_session_id: text('research_session_id')
+      .notNull()
+      .references(() => research_sessions.id, { onDelete: 'cascade' }),
+    section_key: text('section_key').notNull(),
+    claim_text: text('claim_text').notNull(),
+    claim_kind: text('claim_kind').notNull(),
+    support_status: text('support_status').notNull(),
+    citations_json: text('citations_json').notNull().default('[]'),
+    created_at: integer('created_at').notNull(),
+    updated_at: integer('updated_at').notNull(),
+  },
+  (t) => ({
+    sessionIdx: index('research_claims_session_idx').on(t.research_session_id, t.updated_at),
+    supportIdx: index('research_claims_support_idx').on(t.support_status, t.updated_at),
+  }),
+);
+
 export const cost_records = sqliteTable(
   'cost_records',
   {
@@ -289,6 +387,7 @@ export const cost_records = sqliteTable(
     }),
     model_name_snapshot: text('model_name_snapshot').notNull().default(''),
     input_tokens: integer('input_tokens'),
+    cache_input_tokens: integer('cache_input_tokens'),
     output_tokens: integer('output_tokens'),
     call_count: integer('call_count').notNull().default(1),
     price_input_per_1m_snapshot: real('price_input_per_1m_snapshot'),

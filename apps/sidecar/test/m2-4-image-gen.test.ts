@@ -149,6 +149,7 @@ describe('M2.4 — image_generate via /v1/tools/invoke', () => {
       model_name: 'gpt-4o',
       capability: 'chat',
       display_name: 'GPT-4o',
+      supports_tools: false,
     });
     chatModelId = chatModel.id;
 

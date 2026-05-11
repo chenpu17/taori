@@ -322,11 +322,12 @@ test('generated image can be attached back into the composer and understood by a
   await expect(page.getByTestId('image-picker-dialog')).toHaveCount(0);
   await expect(page.getByTestId('msg-tool-images')).toBeVisible({ timeout: 30_000 });
 
+  await page.getByTestId('composer-input').fill('请重点看图中的主体构图');
   await page.getByTestId('tool-image-understand').click();
   await expect(page.getByTestId('attachment-thumb')).toHaveAttribute('data-kind', 'image');
   await expect(page.getByTestId('active-model')).toHaveValue(visionChatId);
   await expect(page.getByTestId('drop-error')).toContainText('已自动切换至视觉模型');
-  await expect(page.getByTestId('composer-input')).toHaveValue(/请理解这张图片/);
+  await expect(page.getByTestId('composer-input')).toHaveValue('请重点看图中的主体构图');
   await expect(page.getByTestId('composer-send')).toBeEnabled();
 
   await page.getByTestId('composer-send').click();

@@ -20,6 +20,7 @@ import {
   type UpstreamToolCatalog,
   withCapabilityToolInstruction,
 } from './upstream-tools.js';
+import { extractCachedPromptTokensFromOpenAiUsage } from './usage.js';
 import { zodToJsonSchema } from 'zod-to-json-schema';
 
 type DeepSeekToolCall = {
@@ -132,7 +133,11 @@ async function readJsonCompletion(args: {
   content: string | null;
   reasoningContent: string | null;
   toolCalls: DeepSeekToolCall[];
-  usage?: { prompt_tokens?: number; completion_tokens?: number };
+  usage?: {
+    prompt_tokens?: number;
+    completion_tokens?: number;
+    prompt_tokens_details?: { cached_tokens?: number | null };
+  };
   finishReason: string | null;
 }> {
   const res = await postDeepSeekJson(args);
@@ -153,7 +158,11 @@ async function readJsonCompletion(args: {
       };
       finish_reason?: string | null;
     }>;
-    usage?: { prompt_tokens?: number; completion_tokens?: number };
+    usage?: {
+      prompt_tokens?: number;
+      completion_tokens?: number;
+      prompt_tokens_details?: { cached_tokens?: number | null };
+    };
   };
   const choice = body.choices?.[0];
   return {
@@ -174,11 +183,13 @@ export async function executeDeepSeekToolLoop(args: {
 }): Promise<{
   text: string | null;
   promptTokens: number | null;
+  cacheInputTokens: number | null;
   completionTokens: number | null;
   finishReason?: string;
 }> {
   const conversationMessages = toDeepSeekMessages(args.initialMessages);
   let promptTokens: number | null = null;
+  let cacheInputTokens: number | null = null;
   let completionTokens: number | null = null;
   let finishReason: string | undefined;
   let finalText: string | null = null;
@@ -200,6 +211,7 @@ export async function executeDeepSeekToolLoop(args: {
         },
       });
       promptTokens = toolResponse.usage?.prompt_tokens ?? promptTokens;
+      cacheInputTokens = extractCachedPromptTokensFromOpenAiUsage(toolResponse.usage) ?? cacheInputTokens;
       completionTokens = toolResponse.usage?.completion_tokens ?? completionTokens;
       finishReason = toolResponse.finishReason ?? finishReason;
       if (toolResponse.toolCalls.length === 0) {
@@ -264,6 +276,7 @@ export async function executeDeepSeekToolLoop(args: {
         },
       });
       promptTokens = finalizeResponse.usage?.prompt_tokens ?? promptTokens;
+      cacheInputTokens = extractCachedPromptTokensFromOpenAiUsage(finalizeResponse.usage) ?? cacheInputTokens;
       completionTokens = finalizeResponse.usage?.completion_tokens ?? completionTokens;
       finishReason = finalizeResponse.finishReason ?? finishReason;
       finalText = finalizeResponse.content;
@@ -283,6 +296,7 @@ export async function executeDeepSeekToolLoop(args: {
       },
     });
     promptTokens = response.usage?.prompt_tokens ?? promptTokens;
+    cacheInputTokens = extractCachedPromptTokensFromOpenAiUsage(response.usage) ?? cacheInputTokens;
     completionTokens = response.usage?.completion_tokens ?? completionTokens;
     finishReason = response.finishReason ?? finishReason;
     finalText = response.content;
@@ -291,6 +305,7 @@ export async function executeDeepSeekToolLoop(args: {
   return {
     text: finalText,
     promptTokens,
+    cacheInputTokens,
     completionTokens,
     finishReason,
   };
@@ -392,6 +407,7 @@ export async function produceDeepSeekUpstreamStream(
       thinking,
     });
     let promptTokens = loopResult.promptTokens;
+    const cacheInputTokens = loopResult.cacheInputTokens;
     let completionTokens = loopResult.completionTokens;
     let finishReason = loopResult.finishReason;
     const finalText = loopResult.text;
@@ -461,6 +477,7 @@ export async function produceDeepSeekUpstreamStream(
           type: 'cost',
           message_id: ctx.messageId,
           input_tokens: promptTokens,
+          cache_input_tokens: cacheInputTokens,
           output_tokens: completionTokens,
           actual_usd: actualUsd,
           first_token_ms: firstTokenAt == null ? null : firstTokenAt - startedAt,
@@ -477,6 +494,7 @@ export async function produceDeepSeekUpstreamStream(
         finish_reason: finishReason ?? null,
         image_tool_finalized_without_model_text: imageToolFinalizedWithoutModelText,
         prompt_tokens: promptTokens,
+        cache_input_tokens: cacheInputTokens,
         completion_tokens: completionTokens,
         first_token_ms: firstTokenAt == null ? null : firstTokenAt - startedAt,
         duration_ms: Date.now() - startedAt,

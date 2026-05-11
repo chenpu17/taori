@@ -570,6 +570,210 @@ export const WorkflowRecipeApplyPreviewSchema = z.object({
 });
 export type WorkflowRecipeApplyPreview = z.infer<typeof WorkflowRecipeApplyPreviewSchema>;
 
+export const ResearchStatusSchema = z.enum([
+  'draft',
+  'running',
+  'paused',
+  'reviewing',
+  'completed',
+  'failed',
+  'cancelled',
+]);
+export type ResearchStatus = z.infer<typeof ResearchStatusSchema>;
+
+export const ResearchStageSchema = z.enum([
+  'scoping',
+  'planning',
+  'searching',
+  'synthesizing',
+  'drafting',
+  'verifying',
+  'finalized',
+]);
+export type ResearchStage = z.infer<typeof ResearchStageSchema>;
+
+export const ResearchBudgetModeSchema = z.enum(['fast', 'balanced', 'deep', 'custom']);
+export type ResearchBudgetMode = z.infer<typeof ResearchBudgetModeSchema>;
+
+export const ResearchOutputKindSchema = z.enum(['brief', 'report', 'comparison', 'decision']);
+export type ResearchOutputKind = z.infer<typeof ResearchOutputKindSchema>;
+
+export const ResearchConstraintsSchema = z.object({
+  time_range: z.string().max(160).nullable().optional(),
+  region: z.string().max(160).nullable().optional(),
+  language: z.string().max(80).nullable().optional(),
+  min_citations: z.number().int().min(0).max(100).nullable().optional(),
+  must_cover: z.array(z.string().min(1).max(120)).max(20).default([]),
+});
+export type ResearchConstraints = z.infer<typeof ResearchConstraintsSchema>;
+
+export const ResearchPlanQuestionSchema = z.object({
+  id: z.string().min(1).max(64),
+  question: z.string().min(1).max(240),
+  reason: z.string().min(1).max(240),
+});
+export type ResearchPlanQuestion = z.infer<typeof ResearchPlanQuestionSchema>;
+
+export const ResearchPlanStepSchema = z.object({
+  id: z.string().min(1).max(64),
+  title: z.string().min(1).max(120),
+  objective: z.string().min(1).max(300),
+  deliverable: z.string().min(1).max(200),
+});
+export type ResearchPlanStep = z.infer<typeof ResearchPlanStepSchema>;
+
+export const ResearchPlanSchema = z.object({
+  summary: z.string().min(1).max(1_000),
+  output_kind: ResearchOutputKindSchema,
+  budget_mode: ResearchBudgetModeSchema,
+  key_questions: z.array(ResearchPlanQuestionSchema).min(1).max(12),
+  stages: z.array(ResearchPlanStepSchema).min(1).max(10),
+  stop_conditions: z.array(z.string().min(1).max(240)).min(1).max(10),
+});
+export type ResearchPlan = z.infer<typeof ResearchPlanSchema>;
+
+export const ResearchTaskStatusSchema = z.enum([
+  'queued',
+  'running',
+  'completed',
+  'failed',
+  'skipped',
+]);
+export type ResearchTaskStatus = z.infer<typeof ResearchTaskStatusSchema>;
+
+export const ResearchTaskKindSchema = z.enum([
+  'search',
+  'fetch',
+  'read_file',
+  'summarize',
+  'outline',
+  'verify_citation',
+]);
+export type ResearchTaskKind = z.infer<typeof ResearchTaskKindSchema>;
+
+export const ResearchTaskSchema = z.object({
+  id: z.string(),
+  research_session_id: z.string(),
+  parent_task_id: z.string().nullable(),
+  kind: ResearchTaskKindSchema,
+  status: ResearchTaskStatusSchema,
+  title: z.string().min(1).max(160),
+  input: z.record(z.unknown()),
+  output: z.record(z.unknown()).nullable(),
+  error: z.record(z.unknown()).nullable(),
+  started_at: z.number().int().nullable(),
+  finished_at: z.number().int().nullable(),
+  created_at: z.number().int(),
+  updated_at: z.number().int(),
+});
+export type ResearchTask = z.infer<typeof ResearchTaskSchema>;
+
+export const ResearchSourceTypeSchema = z.enum(['web_page', 'file_chunk', 'manual_note']);
+export type ResearchSourceType = z.infer<typeof ResearchSourceTypeSchema>;
+
+export const ResearchSourceSchema = z.object({
+  id: z.string(),
+  research_session_id: z.string(),
+  source_type: ResearchSourceTypeSchema,
+  title: z.string().max(240).nullable(),
+  locator: z.string().min(1).max(1_000),
+  snippet: z.string().max(4_000).nullable(),
+  credibility_score: z.number().min(0).max(1).nullable(),
+  included: z.boolean(),
+  metadata: z.record(z.unknown()),
+  created_at: z.number().int(),
+});
+export type ResearchSource = z.infer<typeof ResearchSourceSchema>;
+
+export const ResearchClaimKindSchema = z.enum(['fact', 'inference', 'recommendation']);
+export type ResearchClaimKind = z.infer<typeof ResearchClaimKindSchema>;
+
+export const ResearchClaimSupportStatusSchema = z.enum([
+  'supported',
+  'weak',
+  'conflicted',
+  'unverified',
+]);
+export type ResearchClaimSupportStatus = z.infer<typeof ResearchClaimSupportStatusSchema>;
+
+export const ResearchClaimCitationSchema = z.object({
+  source_id: z.string(),
+  locator: z.string().max(240).nullable().optional(),
+  note: z.string().max(240).nullable().optional(),
+});
+export type ResearchClaimCitation = z.infer<typeof ResearchClaimCitationSchema>;
+
+export const ResearchClaimSchema = z.object({
+  id: z.string(),
+  research_session_id: z.string(),
+  section_key: z.string().min(1).max(80),
+  claim_text: z.string().min(1).max(2_000),
+  claim_kind: ResearchClaimKindSchema,
+  support_status: ResearchClaimSupportStatusSchema,
+  citations: z.array(ResearchClaimCitationSchema).max(20),
+  created_at: z.number().int(),
+  updated_at: z.number().int(),
+});
+export type ResearchClaim = z.infer<typeof ResearchClaimSchema>;
+
+export const ResearchSessionSchema = z.object({
+  id: z.string(),
+  conversation_id: z.string().nullable(),
+  title: z.string().min(1).max(160),
+  objective: z.string().min(1).max(4_000),
+  output_kind: ResearchOutputKindSchema,
+  status: ResearchStatusSchema,
+  stage: ResearchStageSchema,
+  budget_mode: ResearchBudgetModeSchema,
+  budget_limit_usd: z.number().nonnegative().max(1_000).nullable(),
+  budget_spent_usd: z.number().nonnegative(),
+  constraints: ResearchConstraintsSchema,
+  plan: ResearchPlanSchema.nullable(),
+  draft_markdown: z.string().nullable(),
+  final_markdown: z.string().nullable(),
+  started_at: z.number().int().nullable(),
+  completed_at: z.number().int().nullable(),
+  created_at: z.number().int(),
+  updated_at: z.number().int(),
+});
+export type ResearchSession = z.infer<typeof ResearchSessionSchema>;
+
+export const ResearchSessionCreateSchema = z.object({
+  conversation_id: z.string().nullable().optional(),
+  title: z.string().min(1).max(160),
+  objective: z.string().min(1).max(4_000),
+  output_kind: ResearchOutputKindSchema.default('report'),
+  budget_mode: ResearchBudgetModeSchema.default('balanced'),
+  budget_limit_usd: z.number().nonnegative().max(1_000).nullable().optional(),
+  constraints: ResearchConstraintsSchema.default({}),
+});
+export type ResearchSessionCreate = z.infer<typeof ResearchSessionCreateSchema>;
+
+export const ResearchSessionStartRequestSchema = z.object({
+  confirm: z.boolean().optional(),
+});
+export type ResearchSessionStartRequest = z.infer<typeof ResearchSessionStartRequestSchema>;
+
+export const ResearchSessionExportRequestSchema = z.object({
+  format: z.enum(['json', 'markdown']).default('json'),
+});
+export type ResearchSessionExportRequest = z.infer<typeof ResearchSessionExportRequestSchema>;
+
+export const ResearchSessionExportSchema = z.object({
+  filename: z.string(),
+  content_type: z.string(),
+  content: z.string(),
+});
+export type ResearchSessionExport = z.infer<typeof ResearchSessionExportSchema>;
+
+export const ResearchSessionDetailSchema = z.object({
+  session: ResearchSessionSchema,
+  tasks: z.array(ResearchTaskSchema),
+  sources: z.array(ResearchSourceSchema),
+  claims: z.array(ResearchClaimSchema),
+});
+export type ResearchSessionDetail = z.infer<typeof ResearchSessionDetailSchema>;
+
 export const BackupConflictStrategySchema = z.enum(['overwrite', 'skip', 'rename']);
 export type BackupConflictStrategy = z.infer<typeof BackupConflictStrategySchema>;
 
@@ -699,6 +903,7 @@ export const BackupCostRecordSchema = z.object({
   model_id: z.string().nullable(),
   model_name_snapshot: z.string(),
   input_tokens: z.number().int().nullable(),
+  cache_input_tokens: z.number().int().nullable().optional().default(null),
   output_tokens: z.number().int().nullable(),
   call_count: z.number().int(),
   price_input_per_1m_snapshot: z.number().nullable(),

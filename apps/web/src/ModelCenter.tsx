@@ -1499,6 +1499,7 @@ export function ModelCenter({
                         <div className="model-cell-actions">
                           <button
                             type="button"
+                            className="model-cell-actions__icon-btn"
                             onClick={() => void onMove(m, -1)}
                             disabled={isFirstInCap}
                             data-testid={`model-row-up-${m.id}`}
@@ -1509,6 +1510,7 @@ export function ModelCenter({
                           </button>
                           <button
                             type="button"
+                            className="model-cell-actions__icon-btn"
                             onClick={() => void onMove(m, 1)}
                             disabled={isLastInCap}
                             data-testid={`model-row-down-${m.id}`}
@@ -1519,25 +1521,28 @@ export function ModelCenter({
                           </button>
                           <button
                             type="button"
+                            className="model-cell-actions__primary"
                             onClick={() => void onSetDefault(m)}
                             disabled={isDefault || !m.enabled}
                             data-testid={`model-row-default-${m.id}`}
                             title={!m.enabled ? '停用模型不能设为默认' : undefined}
                           >
-                            {isDefault ? '已是默认' : m.enabled ? '设为默认' : '停用中'}
+                            {isDefault ? '默认中' : m.enabled ? '默认' : '停用中'}
                           </button>
                           <button
                             type="button"
+                            className="model-cell-actions__ghost"
                             onClick={() =>
                               setExpandedModelId((current) => (current === m.id ? null : m.id))
                             }
                             data-testid={`model-health-toggle-${m.id}`}
                           >
-                            {expandedModelId === m.id ? '收起健康' : '健康'}
+                            {expandedModelId === m.id ? '收起' : '健康'}
                           </button>
                           {(m.capability === 'chat' || m.capability === 'multimodal') && (
                             <button
                               type="button"
+                              className="model-cell-actions__ghost"
                               onClick={() => void onProbeModel(m)}
                               disabled={modelProbe?.modelId === m.id && modelProbe.status === 'running'}
                               data-testid={`model-tools-probe-${m.id}`}
@@ -1545,24 +1550,28 @@ export function ModelCenter({
                             >
                               {modelProbe?.modelId === m.id && modelProbe.status === 'running'
                                 ? '探测中'
-                                : '探测Tools'}
+                                : 'Tools'}
                             </button>
                           )}
                           <button
                             type="button"
+                            className="model-cell-actions__icon-btn"
                             onClick={() => setEditing(m)}
                             data-testid={`model-edit-${m.id}`}
+                            aria-label="编辑模型"
                             title="编辑模型（重命名 / 改价格 / 改能力）"
                           >
-                            编辑
+                            ✎
                           </button>
                           <button
                             type="button"
+                            className="model-cell-actions__icon-btn model-cell-actions__danger"
                             onClick={() => void onDelete(m)}
                             data-testid={`model-row-delete-${m.id}`}
+                            aria-label="删除模型"
                             title="删除模型"
                           >
-                            删除
+                            🗑
                           </button>
                         </div>
                       </td>

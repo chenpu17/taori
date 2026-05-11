@@ -48,10 +48,12 @@ test('Huawei MaaS onboarding imports chat, vision, image and video models with c
   await page.getByTestId('onb-submit').click();
 
   await expect(page.getByTestId('onb-pick')).toBeVisible({ timeout: 15_000 });
+  await expect(page.getByTestId('onb-finish')).toContainText('导入 0 个模型');
   for (const name of ['deepseek-v3.2', 'qwen2.5-vl-72b', 'qwen-image', 'Wan2.2-T2V-A14B']) {
     await expect(
       page.locator(`[data-testid="onb-candidate-check"][data-model-name="${name}"]`),
-    ).toBeChecked();
+    ).not.toBeChecked();
+    await page.locator(`[data-testid="onb-candidate-check"][data-model-name="${name}"]`).check();
   }
   await page.getByTestId('onb-finish').click();
 

@@ -20,7 +20,7 @@
 - `docs/product/` — 产品视角（用户、场景、价值、决策、Roadmap）
 - `docs/architecture/` — 技术架构视角（跨模块、系统级设计）
 - `docs/modules/inventory.md` — 模块清单（灰盒一览）
-- 单模块合同 → 跟代码走，放 `apps/<name>/MODULE.md` 或 `packages/<name>/MODULE.md`（M0 初始化时建立）
+- 单模块合同 → 跟代码走，核心模块已建立 `apps/<name>/MODULE.md` / `packages/<name>/MODULE.md`；新增模块或合同变化必须同步更新对应 `MODULE.md` 与 `docs/modules/inventory.md`
 
 阅读顺序（首次接入）：
 1. `docs/product/01-positioning.md` → 理解产品三主线
@@ -39,9 +39,18 @@
 
 ### 2.4 当前阶段
 
-- 状态：**M0 前**（仅产品 + 架构设计已完成，代码未启动）
-- 下一步：M0 骨架（pnpm workspace + Tauri + Sidecar + Renderer 三方互通）
-- 详见 `docs/product/07-mvp-roadmap.md`
+- 状态：代码已启动，M0 骨架已落地；后续版本功能持续迭代中。
+- 当前真实阶段以 `docs/modules/inventory.md` 的最近变化、各模块 `MODULE.md`、任务相关 product / architecture spec 与 proposal 为准。
+- 路线图仍参考 `docs/product/07-mvp-roadmap.md`，但执行判断必须结合已落地代码与最新模块清单。
+
+### 2.5 常用验证入口
+
+- 全量 Web 侧验证：`pnpm verify:web`
+- 类型检查：`pnpm typecheck`
+- Sidecar 单测：`pnpm test:sidecar`
+- Web E2E：`pnpm test:e2e`
+- 桌面壳 smoke：`pnpm verify:desktop` / `pnpm verify:desktop-ui`
+- 真实 Provider 旅程：`pnpm verify:real`（需要本地凭据与网络条件）
 
 ## 3. 触发条件提醒
 

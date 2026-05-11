@@ -35,6 +35,7 @@
 10. [v1.0 Agent Runtime 变更提案](./architecture/19-agent-runtime-v1-proposal.md) — 运行状态归属、恢复策略与真实模型验收
 11. [P1 Quick Compare / Stream Resume 变更提案](./architecture/20-p1-quick-compare-stream-resume-proposal.md) — 三模型轻量 fan-out 与断流续接状态归属
 12. [P2 轻量 RAG 预备层变更提案](./architecture/21-p2-lightweight-rag-prep-proposal.md) — 文件 chunk、FTS/BM25、file_search 与 embedding 预留
+13. [Standalone Sidecar Daemon 模式提案](./architecture/31-standalone-daemon-mode-proposal.md) — npm standalone 常驻后台、status/stop 与远程 host 绑定
 
 ### 我是模块作者
 - [模块清单](./modules/inventory.md) — 系统所有模块的灰盒一览

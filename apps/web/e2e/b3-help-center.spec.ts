@@ -98,3 +98,19 @@ test('help center: opens, shows pillars/FAQ, runs selfcheck, closes on ESC', asy
   await page.keyboard.press('Escape');
   await expect(page.getByTestId('help-center')).not.toBeVisible();
 });
+
+test('help center buttons stay legible and page exposes favicon', async ({ page }) => {
+  await page.goto('/');
+
+  await expect(page.locator('head link[rel="icon"]')).toHaveAttribute('href', '/favicon.svg');
+
+  await page.getByTestId('open-help').click();
+  const selfCheckButton = page.getByTestId('help-selfcheck-run');
+  const keychainButton = page.getByTestId('help-selfcheck-run-keychain');
+  const realDiagButton = page.getByTestId('help-realdiag-load');
+
+  await expect(selfCheckButton).toHaveCSS('color', 'rgb(255, 255, 255)');
+  await expect(selfCheckButton).not.toHaveCSS('background-image', 'none');
+  await expect(keychainButton).not.toHaveCSS('background-color', 'rgba(0, 0, 0, 0)');
+  await expect(realDiagButton).toHaveCSS('color', 'rgb(255, 255, 255)');
+});

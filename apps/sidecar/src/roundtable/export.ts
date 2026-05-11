@@ -58,6 +58,31 @@ export function renderRoundtableSummaryMarkdown(
   return renderSummary(summary).join('\n').trim();
 }
 
+export function renderRoundtableDecisionTemplate(args: {
+  topic: string;
+  summary: SummaryStorage | null;
+}): string {
+  const title = args.topic.trim() || '未命名决策';
+  return [
+    `请围绕新的决策问题“{{决策问题}}”输出一份结构化决策建议。可以参考下面这次历史圆桌沉淀出的分析框架，但不要机械复用旧结论；如果新场景不同，请明确指出差异。`,
+    '',
+    `## 历史圆桌来源`,
+    '',
+    `- 原问题：${title}`,
+    `- 使用方式：先对照旧框架，再基于新事实重新判断`,
+    '',
+    `## 可复用框架`,
+    '',
+    renderRoundtableSummaryMarkdown(args.summary),
+    '',
+    '## 输出要求',
+    '',
+    '1. 先给出新的共识与分歧',
+    '2. 明确本次风险与旧问题相比有哪些变化',
+    '3. 最后给出推荐决策与下一步',
+  ].join('\n').trim();
+}
+
 function renderSummary(summary: SummaryStorage | null): string[] {
   const out: string[] = [];
   if (!summary) {

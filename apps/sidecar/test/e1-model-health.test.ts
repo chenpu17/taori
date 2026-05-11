@@ -154,6 +154,13 @@ describe('E1 model health', () => {
         avg_duration_ms: number | null;
         last_failure_at: number | null;
         last_failure_classification: string | null;
+        failure_distribution_24h: Array<{ classification: string; failures: number }>;
+        failure_trend_24h: Array<{
+          bucket_start: number;
+          label: string;
+          failures: number;
+          classifications: Array<{ classification: string; failures: number }>;
+        }>;
       }>;
     };
 
@@ -165,9 +172,13 @@ describe('E1 model health', () => {
       failures_24h: 1,
       last_failure_classification: 'rate_limit',
     });
+    expect(alphaRow?.failure_distribution_24h).toEqual([
+      { classification: 'rate_limit', failures: 1 },
+    ]);
     expect(alphaRow?.avg_first_token_ms).toBe(210);
     expect(alphaRow?.avg_duration_ms).toBe(1_200);
     expect(alphaRow?.last_failure_at).toBe(now - 30 * 60 * 1000);
+    expect(alphaRow?.failure_trend_24h.some((bucket) => bucket.failures === 1)).toBe(true);
 
     const betaRow = body.rows.find((row) => row.model_id === beta.id);
     expect(betaRow).toEqual({
@@ -178,6 +189,8 @@ describe('E1 model health', () => {
       avg_duration_ms: null,
       last_failure_at: null,
       last_failure_classification: null,
+      failure_distribution_24h: [],
+      failure_trend_24h: [],
     });
   });
 

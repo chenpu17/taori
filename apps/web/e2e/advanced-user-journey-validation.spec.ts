@@ -234,16 +234,23 @@ test('first setup recovers from a user mistake and reaches first successful chat
   await page.getByTestId('onb-submit').click();
 
   await expect(page.getByTestId('onb-pick')).toBeVisible({ timeout: 15_000 });
+  await expect(page.getByTestId('onb-finish')).toContainText('导入 0 个模型');
   await expect(
     page.locator(
       '[data-testid="onb-candidate-check"][data-model-name="doubao-1-5-pro-32k-250115"]',
     ),
-  ).toBeChecked();
+  ).not.toBeChecked();
   await expect(
     page.locator(
       '[data-testid="onb-candidate-check"][data-model-name="doubao-seedream-3-0-t2i-250415"]',
     ),
-  ).toBeChecked();
+  ).not.toBeChecked();
+  await page
+    .locator('[data-testid="onb-candidate-check"][data-model-name="doubao-1-5-pro-32k-250115"]')
+    .check();
+  await page
+    .locator('[data-testid="onb-candidate-check"][data-model-name="doubao-seedream-3-0-t2i-250415"]')
+    .check();
   await page.getByTestId('onb-finish').click();
 
   await expect(page.getByTestId('chat-panel')).toBeVisible({ timeout: 15_000 });

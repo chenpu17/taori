@@ -39,6 +39,12 @@ import type {
   WorkflowRecipeImport,
   WorkflowRecipeApplyPreviewRequest,
   WorkflowRecipeApplyPreview,
+  ResearchSession,
+  ResearchSessionCreate,
+  ResearchSessionDetail,
+  ResearchSessionExport,
+  ResearchSessionExportRequest,
+  ResearchSessionStartRequest,
   BackupConflictStrategy,
   BackupExportResponse,
   BackupImportResponse,
@@ -473,6 +479,7 @@ export const api = {
             provider_name: string | null;
             provider_type: string | null;
             input_tokens: number | null;
+            cache_input_tokens: number | null;
             output_tokens: number | null;
             actual_cost_usd: number | null;
             success: boolean;
@@ -811,6 +818,44 @@ export const api = {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(input),
     }).then((r) => json<WorkflowRecipeApplyPreview>(r)),
+  listResearchSessions: () =>
+    authedFetch('/v1/research/sessions').then((r) =>
+      json<{ research_sessions: ResearchSession[] }>(r),
+    ),
+  createResearchSession: (input: ResearchSessionCreate) =>
+    authedFetch('/v1/research/sessions', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(input),
+    }).then((r) => json<ResearchSession>(r)),
+  getResearchSessionDetail: (id: string) =>
+    authedFetch(`/v1/research/sessions/${id}`).then((r) =>
+      json<ResearchSessionDetail>(r),
+    ),
+  startResearchSession: (id: string, input: ResearchSessionStartRequest = {}) =>
+    authedFetch(`/v1/research/sessions/${id}/start`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(input),
+    }).then((r) => json<ResearchSessionDetail>(r)),
+  pauseResearchSession: (id: string) =>
+    authedFetch(`/v1/research/sessions/${id}/pause`, {
+      method: 'POST',
+    }).then((r) => json<ResearchSessionDetail>(r)),
+  resumeResearchSession: (id: string) =>
+    authedFetch(`/v1/research/sessions/${id}/resume`, {
+      method: 'POST',
+    }).then((r) => json<ResearchSessionDetail>(r)),
+  cancelResearchSession: (id: string) =>
+    authedFetch(`/v1/research/sessions/${id}/cancel`, {
+      method: 'POST',
+    }).then((r) => json<ResearchSessionDetail>(r)),
+  exportResearchSession: (id: string, input: ResearchSessionExportRequest) =>
+    authedFetch(`/v1/research/sessions/${id}/export`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(input),
+    }).then((r) => json<ResearchSessionExport>(r)),
   clearAllData: () =>
     authedFetch('/v1/admin/clear-all-data', { method: 'POST' }).then((r) =>
       json<{

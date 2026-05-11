@@ -8,7 +8,10 @@ import './styles/markdown.css';
 // palette on hard reload. The attribute drives the CSS variables in styles.css.
 applyTheme(readStoredTheme());
 
-if (typeof window !== 'undefined' && !window.__TAURI_INTERNALS__) {
+const viteSidecarUrl = (import.meta as ImportMeta & { env: Record<string, string> }).env
+  .VITE_SIDECAR_URL;
+
+if (typeof window !== 'undefined' && !window.__TAURI_INTERNALS__ && !viteSidecarUrl) {
   window.__TAORI_BROWSER_BOOTSTRAP__ = {
     url: window.location.origin,
     authMode: 'cookie',

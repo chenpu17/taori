@@ -20,7 +20,7 @@ test('model-center: provider chips render and tabs filter rows', async ({ page }
   await expect(page.getByTestId('model-center')).toBeVisible();
 
   await expect(
-    page.getByTestId('model-center-providers').locator('.provider-chip'),
+    page.getByTestId('model-center-providers').locator('.provider-nav__item'),
   ).toHaveCount(1);
 
   // 6 capability tabs render.
@@ -68,12 +68,86 @@ test('model-center: "+ 添加 Provider" reopens onboarding wizard', async ({ pag
   await expect(page.getByTestId('onboarding')).toBeVisible();
 });
 
+test('model-center: provider detail surfaces guidance in a focused foldout layout', async ({ page }) => {
+  const env = readSidecarEnv();
+  await resetSidecar(env);
+  const providerRes = await authedFetch(env, '/v1/providers', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      name: 'DeepSeek 官方',
+      type: 'deepseek',
+      base_url: 'https://api.deepseek.com',
+      api_key: 'sk-test',
+    }),
+  });
+  expect(providerRes.ok).toBeTruthy();
+  const provider = (await providerRes.json()) as { id: string };
+  const modelRes = await authedFetch(env, '/v1/models', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      provider_id: provider.id,
+      model_name: 'deepseek-v4-flash',
+      capability: 'chat',
+      display_name: 'DeepSeek V4 Flash',
+      is_default_for: 'chat',
+      price_input_per_1m: 0.5,
+      price_output_per_1m: 2,
+      supports_tools: true,
+    }),
+  });
+  expect(modelRes.ok).toBeTruthy();
+
+  await page.goto('/');
+  await page.getByTestId('open-model-center').click();
+  await page.getByTestId(`provider-nav-item-${provider.id}`).click();
+  const detail = page.getByTestId(`provider-detail-${provider.id}`);
+  await expect(detail).toContainText('国内直连');
+  await expect(detail).toContainText('DeepSeek 官方直连');
+  await detail.getByText('展开运营洞察').click();
+  await expect(detail).toContainText('默认 fallback');
+  await detail.getByTestId(`provider-detail-test-${provider.id}`).click();
+  await expect(page.getByTestId(`provider-detail-test-result-${provider.id}`)).toBeVisible();
+  await detail.getByTestId(`provider-detail-library-${provider.id}`).click();
+  await expect(page.getByTestId('import-drawer')).toBeVisible();
+  await page.getByTestId('import-drawer').getByLabel('关闭').click();
+  await expect(page.getByTestId('import-drawer')).toHaveCount(0);
+  await detail.getByTestId(`provider-menu-edit-${provider.id}`).click();
+  await expect(page.getByTestId('provider-editor')).toBeVisible();
+});
+
 test('model-center: "+ 导入模型" opens ImportDrawer with provider + capability prefilled', async ({
   page,
 }) => {
   const env = readSidecarEnv();
   await resetSidecar(env);
-  await seedDefaultModel(env);
+  const providerRes = await authedFetch(env, '/v1/providers', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      name: 'Import Ready Provider',
+      type: 'custom',
+      base_url: 'https://example.invalid/v1',
+      api_key: 'sk-import-ready',
+    }),
+  });
+  expect(providerRes.ok).toBeTruthy();
+  const provider = (await providerRes.json()) as { id: string };
+  const modelRes = await authedFetch(env, '/v1/models', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      provider_id: provider.id,
+      model_name: 'mock-model',
+      capability: 'chat',
+      display_name: 'Mock chat',
+      is_default_for: 'chat',
+      price_input_per_1m: 0.5,
+      price_output_per_1m: 1.5,
+    }),
+  });
+  expect(modelRes.ok).toBeTruthy();
   await page.goto('/');
   await page.getByTestId('open-model-center').click();
   await page.getByTestId('model-center-tab-chat').click();
@@ -187,7 +261,8 @@ test('model-center: provider library refresh, bulk enable, and import disabled c
       `model-row-${user.id}`,
     );
 
-    await page.getByTestId(`provider-chip-library-${provider.id}`).click();
+    await page.getByTestId(`provider-nav-item-${provider.id}`).click();
+    await page.getByTestId(`provider-detail-library-${provider.id}`).click();
     await expect(page.getByTestId('import-drawer')).toBeVisible();
     await expect(page.getByTestId('import-drawer-capability')).toHaveValue('all');
     await page.getByTestId('import-drawer-refresh').click();
@@ -218,7 +293,7 @@ test('model-center: provider library refresh, bulk enable, and import disabled c
     const tech = modelsAfterImport.models.find((m) => m.model_name === 'mock-tech');
     expect(tech?.enabled).toBe(false);
 
-    await page.getByTestId(`provider-chip-library-${provider.id}`).click();
+    await page.getByTestId(`provider-detail-library-${provider.id}`).click();
     await expect(page.getByTestId('import-drawer')).toBeVisible();
     await page.getByTestId('import-drawer-status').selectOption('disabled');
     await expect(page.getByTestId('import-drawer-row-mock-tech')).toBeVisible();
@@ -325,7 +400,8 @@ test('model-center: OpenAI-compatible PackyAPI refresh shows gpt-image models', 
     await page.goto('/');
     await page.getByTestId('open-model-center').click();
     await expect(page.getByTestId('model-center')).toBeVisible();
-    await page.getByTestId(`provider-chip-library-${provider.id}`).click();
+    await page.getByTestId(`provider-nav-item-${provider.id}`).click();
+    await page.getByTestId(`provider-detail-library-${provider.id}`).click();
     await expect(page.getByTestId('import-drawer')).toBeVisible();
     await page.getByTestId('import-drawer-refresh').click();
     await expect(page.getByTestId('import-drawer-row-gpt-image-1')).toBeVisible();
@@ -390,8 +466,7 @@ test('model-center: provider edit and scoped catalog sync update managed model p
     await page.getByTestId('open-model-center').click();
     await expect(page.getByTestId('model-center')).toBeVisible();
 
-    await page.getByTestId(`provider-chip-more-${provider.id}`).click();
-    await expect(page.getByTestId(`provider-chip-menu-${provider.id}`)).toBeVisible();
+    await page.getByTestId(`provider-nav-item-${provider.id}`).click();
     await page.getByTestId(`provider-menu-edit-${provider.id}`).click();
     await expect(page.getByTestId('provider-editor')).toBeVisible();
     await page.getByTestId('provider-editor-name').fill('Renamed Provider');
@@ -399,7 +474,7 @@ test('model-center: provider edit and scoped catalog sync update managed model p
     await page.getByTestId('provider-editor-enabled').uncheck();
     await page.getByTestId('provider-editor-save').click();
     await expect(page.getByTestId('provider-editor')).toHaveCount(0);
-    await expect(page.getByTestId(`provider-chip-${provider.id}`)).toContainText('Renamed Provider');
+    await expect(page.getByTestId(`provider-nav-item-${provider.id}`)).toContainText('Renamed Provider');
 
     const providerAfter = (await (await authedFetch(env, '/v1/providers')).json()) as {
       providers: Array<{ id: string; name: string; enabled: boolean }>;
@@ -409,7 +484,7 @@ test('model-center: provider edit and scoped catalog sync update managed model p
       enabled: false,
     });
 
-    await page.getByTestId(`provider-chip-library-${provider.id}`).click();
+    await page.getByTestId(`provider-detail-library-${provider.id}`).click();
     await expect(page.getByTestId('import-drawer')).toBeVisible();
     await page.getByTestId('import-drawer-refresh').click();
     await expect(page.getByTestId(`import-drawer-diff-${model.id}`)).toBeVisible();
@@ -489,10 +564,10 @@ test('model-center: deleting a provider removes its models from the chat selecto
 
   await page.getByTestId('open-model-center').click();
   await expect(page.getByTestId('model-center')).toBeVisible();
-  await page.getByTestId(`provider-chip-more-${first.id}`).click();
+  await page.getByTestId(`provider-nav-item-${first.id}`).click();
   page.once('dialog', (d) => void d.accept());
-  await page.getByTestId(`provider-menu-delete-${first.id}`).click();
-  await expect(page.getByTestId(`provider-chip-${first.id}`)).toHaveCount(0);
+  await page.getByTestId(`provider-detail-delete-${first.id}`).click();
+  await expect(page.getByTestId(`provider-nav-item-${first.id}`)).toHaveCount(0);
 
   const modelsRes = await authedFetch(env, '/v1/models');
   const rows = ((await modelsRes.json()) as { models: Array<{ id: string }> }).models;

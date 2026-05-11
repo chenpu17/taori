@@ -2,7 +2,7 @@
 
 ## 定位
 
-Taori React Renderer，负责聊天、控制中心、模型中心、工具配置、成本可视化与圆桌交互。
+ Taori React Renderer，负责聊天、控制中心、模型中心、深度研究工作台、成本可视化与圆桌交互。
 
 ## 主要接口
 
@@ -42,3 +42,6 @@ Taori React Renderer，负责聊天、控制中心、模型中心、工具配置
 - 聊天头部的“模板市场”把内置工作流、已启用 Workflow Recipe 与用户自定义 Prompt 模板统一收敛为本地模板发现入口；支持搜索、预览、按来源筛选，并保持一键套用 / 填写变量后套用闭环。
 - Settings 新增全局 thinking 开关（`thinking_enabled`）；ModelCenter 的模型编辑器新增“跟随全局 / 总是开启 / 总是关闭”三态覆盖，并通过 `PATCH /v1/models/:id` 持久化到单模型 `thinking_enabled`。
 - standalone 浏览器模式下，Renderer 不再要求预先注入 Bearer 才能工作：`sidecar.ts` 可读取同源 bootstrap，所有普通 REST 与聊天流请求默认携带 `credentials: include`，由 Sidecar 的 HttpOnly cookie 会话完成鉴权；Tauri 与开发环境仍兼容 Bearer 模式。
+- 聊天消息内的成本摘要不再只显示 `$`：Renderer 会在消息气泡中直接展示 `in / cache / out` token 指标，并继续保留详情卡与 Run Timeline 的成本明细。
+- ModelCenter 的模型矩阵行操作区改为紧凑布局：默认/健康/Tools 使用短文案，编辑/删除改为 icon button，降低表格 padding 与操作区宽度，优先提升同屏信息密度。
+- Control Center 新增“深度研究”分区与顶部快捷入口：Renderer 可创建 research session、预览计划、确认启动、暂停/恢复/取消，并查看任务 / 来源 / 结论占位与 Markdown 草稿。

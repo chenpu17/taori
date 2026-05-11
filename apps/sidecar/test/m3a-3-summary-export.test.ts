@@ -23,6 +23,7 @@ import {
   ProvidersRepo,
   ModelsRepo,
   ConversationsRepo,
+  PromptTemplatesRepo,
   RoundtablesRepo,
   RoundtableMessagesRepo,
   CostsRepo,
@@ -45,6 +46,7 @@ interface Ctx {
   rtMsg: RoundtableMessagesRepo;
   costs: CostsRepo;
   conv: ConversationsRepo;
+  templates: PromptTemplatesRepo;
   runEvents: RunEventsRepo;
   keystore: MemoryStore;
 }
@@ -82,6 +84,7 @@ async function makeCtx(): Promise<Ctx> {
     rtMsg: new RoundtableMessagesRepo(db),
     costs: new CostsRepo(db),
     conv: new ConversationsRepo(db),
+    templates: new PromptTemplatesRepo(db),
     runEvents: new RunEventsRepo(db),
     keystore,
   };
@@ -652,5 +655,115 @@ describe('M3.A.3 — GET /v1/roundtable/:id/export', () => {
       headers: { authorization: `Bearer ${bearer}` },
     });
     expect(res.statusCode).toBe(404);
+  });
+
+  it('POST /template creates a prompt template from completed summary', async () => {
+    const { id } = await seed(ctx, {
+      seedMessages: true,
+      status: 'completed',
+      summary: VALID_SUMMARY_JSON,
+    });
+
+    const res = await ctx.app.inject({
+      method: 'POST',
+      url: `/v1/roundtable/${id}/template`,
+      headers: { authorization: `Bearer ${bearer}` },
+    });
+
+    expect(res.statusCode).toBe(201);
+    expect(res.json().ok).toBe(true);
+    expect(res.json().template.name).toContain('圆桌模板');
+    expect(res.json().template.content).toContain('{{决策问题}}');
+    expect(ctx.templates.list()).toHaveLength(1);
+  });
+
+  it('GET /history returns recent completed associated roundtables only', async () => {
+    const provider = ctx.providers.create({
+      name: 'History Provider',
+      type: 'openai',
+      base_url: 'https://api.example.com/v1',
+      api_key: 'sk-test',
+    });
+    const model = ctx.models.create({
+      provider_id: provider.id,
+      model_name: 'history-model',
+      capability: 'chat',
+      display_name: 'History Model',
+      price_input_per_1m: 1,
+      price_output_per_1m: 2,
+    });
+    const origin = ctx.conv.create({ type: 'chat', title: 'origin' });
+    const makeParticipants = () => ([
+      {
+        model_id: model.id,
+        role_label: '综合视角',
+        persona_prompt: 'You analyse holistically.',
+        display_name: 'History Model',
+      },
+      {
+        model_id: model.id,
+        role_label: '批判视角',
+        persona_prompt: 'You point out risks.',
+        display_name: 'History Model',
+      },
+    ]);
+
+    const oldRt = ctx.rt.insert({
+      conversation_id: ctx.conv.create({ type: 'roundtable' }).id,
+      topic: '旧决策',
+      mode: 'fast',
+      participants: makeParticipants(),
+      summarizer_model_id: model.id,
+      origin_conversation_id: origin.id,
+      analyzer_fallback: true,
+      status: 'completed',
+      current_round: 1,
+      estimated_cost_usd_low: 0.01,
+      estimated_cost_usd_high: 0.02,
+    });
+    ctx.rt.setSummary(oldRt.id, VALID_SUMMARY_JSON);
+
+    const currentRt = ctx.rt.insert({
+      conversation_id: ctx.conv.create({ type: 'roundtable' }).id,
+      topic: '当前决策',
+      mode: 'deep',
+      participants: makeParticipants(),
+      summarizer_model_id: model.id,
+      origin_conversation_id: origin.id,
+      analyzer_fallback: true,
+      status: 'completed',
+      current_round: 2,
+      estimated_cost_usd_low: 0.02,
+      estimated_cost_usd_high: 0.03,
+    });
+    ctx.rt.setSummary(currentRt.id, {
+      ...VALID_SUMMARY_JSON,
+      recommended_decision: '当前方案',
+    });
+
+    ctx.rt.insert({
+      conversation_id: ctx.conv.create({ type: 'roundtable' }).id,
+      topic: '失败决策',
+      mode: 'fast',
+      participants: makeParticipants(),
+      summarizer_model_id: model.id,
+      origin_conversation_id: origin.id,
+      analyzer_fallback: true,
+      status: 'failed',
+      current_round: 1,
+      estimated_cost_usd_low: 0.01,
+      estimated_cost_usd_high: 0.02,
+    });
+
+    const res = await ctx.app.inject({
+      method: 'GET',
+      url: `/v1/roundtable/${currentRt.id}/history?limit=5`,
+      headers: { authorization: `Bearer ${bearer}` },
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect(res.json().items).toHaveLength(1);
+    expect(res.json().items[0].topic).toBe('旧决策');
+    expect(res.json().items[0].recommended_decision).toBe(VALID_SUMMARY_JSON.recommended_decision);
   });
 });

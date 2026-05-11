@@ -6,7 +6,7 @@
  * configuration or verify persisted state; all product behavior is exercised
  * through the Web UI.
  */
-import { test, expect, type Page } from '@playwright/test';
+import { test, expect, type Locator, type Page } from '@playwright/test';
 import {
   authedFetch,
   readSidecarEnv,
@@ -87,6 +87,42 @@ async function suppressTips(page: Page): Promise<void> {
     localStorage.setItem('tip_cost_first_seen', 'true');
     localStorage.setItem('tip_roundtable_first_seen', 'true');
   });
+}
+
+async function expectHorizontallyWithinViewport(page: Page, locator: Locator): Promise<void> {
+  const box = await locator.boundingBox();
+  expect(box).toBeTruthy();
+  const viewport = page.viewportSize();
+  expect(viewport).toBeTruthy();
+  expect(box!.x).toBeGreaterThanOrEqual(0);
+  expect(box!.x + box!.width).toBeLessThanOrEqual(viewport!.width);
+}
+
+async function expectPageHasNoHorizontalOverflow(page: Page): Promise<void> {
+  const overflow = await page.evaluate(() => {
+    const doc = document.documentElement;
+    return Math.max(doc.scrollWidth, document.body.scrollWidth) - doc.clientWidth;
+  });
+  expect(overflow).toBeLessThanOrEqual(1);
+}
+
+async function expectElementHasNoHorizontalOverflow(locator: Locator): Promise<void> {
+  const overflow = await locator.evaluate((el) => el.scrollWidth - el.clientWidth);
+  expect(overflow).toBeLessThanOrEqual(1);
+}
+
+async function seedBrokenProvider(name = 'Broken Ops Provider'): Promise<string> {
+  const res = await authedFetch(env, '/v1/providers', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      name,
+      type: 'custom',
+      base_url: 'https://broken-provider.invalid/v1',
+    }),
+  });
+  expect(res.ok).toBeTruthy();
+  return ((await res.json()) as { id: string }).id;
 }
 
 async function sendChat(page: Page, modelId: string, text: string): Promise<void> {
@@ -247,4 +283,163 @@ test('settings and tools journey: budget gate and image tool toggle affect the n
   await page.getByTestId('composer-send').click();
   await expect(page.getByTestId('image-picker-dialog')).toBeVisible({ timeout: 10_000 });
   await page.getByTestId('image-picker-cancel').click();
+});
+
+test('small viewport control center journey keeps budget, provider-risk, and focused costs readable', async ({
+  page,
+}) => {
+  test.setTimeout(120_000);
+  const providerId = await seedProvider('Ops Small Viewport Mock');
+  const chatId = await seedModel(providerId, {
+    model_name: 'mock-small-chat',
+    display_name: 'Small Viewport Chat',
+    capability: 'chat',
+    is_default_for: 'chat',
+    supports_tools: true,
+    price_input_per_1m: 1.2,
+    price_output_per_1m: 2.4,
+  });
+  await seedModel(providerId, {
+    model_name: 'mock-small-image',
+    display_name: 'Small Viewport Image',
+    capability: 'image',
+    is_default_for: 'image',
+    price_per_call: 0.04,
+  });
+  await seedBrokenProvider();
+
+  await suppressTips(page);
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.goto('/');
+  await expect(page.getByTestId('chat-panel')).toBeVisible({ timeout: 10_000 });
+
+  await sendChat(page, chatId, '生成一条会在控制中心看到预算与成本归因的基线消息');
+  const realtimeRes = await authedFetch(env, '/v1/costs/realtime');
+  const realtime = (await realtimeRes.json()) as { data: { month_usd: number } };
+  const monthlyBudget = Math.max(realtime.data.month_usd / 2, 0.000001);
+  await authedFetch(env, '/v1/memories', {
+    method: 'PUT',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      scope: 'global',
+      scope_id: null,
+      key: 'monthly_budget_usd',
+      value: String(monthlyBudget),
+    }),
+  });
+  await authedFetch(env, '/v1/memories?scope=global&key=monthly_budget_alert_state', {
+    method: 'DELETE',
+  });
+
+  await page.reload();
+  await expect(page.getByTestId('chat-panel')).toBeVisible({ timeout: 10_000 });
+  await page.getByTestId('open-settings').click();
+
+  const controlCenter = page.getByTestId('control-center');
+  await expect(controlCenter).toBeVisible();
+  await page.getByTestId('control-center-nav-overview').click();
+  await expect(page.getByTestId('control-center-overview')).toBeVisible();
+  await expect(page.getByTestId('control-budget-alerts')).toContainText('本月预算已超出');
+  await expect(page.getByTestId('control-provider-risk-queue')).toContainText('补 Provider Key');
+  await expect(page.getByTestId('control-cost-attribution-overview')).toBeVisible();
+  await expectHorizontallyWithinViewport(page, controlCenter);
+  await expectElementHasNoHorizontalOverflow(controlCenter);
+  await expectPageHasNoHorizontalOverflow(page);
+
+  const providerRiskQueue = page.getByTestId('control-provider-risk-queue');
+  await providerRiskQueue.getByRole('button', { name: '看成本影响' }).first().click();
+  const costDashboard = page.getByTestId('cost-dashboard-panel');
+  await expect(costDashboard).toBeVisible();
+  const firstProviderCard = page.getByTestId('cost-dashboard-provider-card').first();
+  await expect(firstProviderCard).toBeVisible();
+  await firstProviderCard.getByRole('button', { name: /只看这个 Provider|当前聚焦中/ }).click();
+  await expect(page.getByTestId('cost-dashboard-provider-focus-banner')).toBeVisible();
+  await expect(
+    page.locator('[data-testid="cost-dashboard-provider-card"][data-focused="1"]').first(),
+  ).toBeVisible();
+  await expectHorizontallyWithinViewport(page, costDashboard);
+  await expectPageHasNoHorizontalOverflow(page);
+
+  await page
+    .locator('[data-testid="cost-dashboard-provider-card"][data-focused="1"]')
+    .first()
+    .getByRole('button', { name: '去模型中心' })
+    .click();
+  const modelCenter = page.getByTestId('model-center');
+  await expect(modelCenter).toBeVisible();
+  await expectHorizontallyWithinViewport(page, modelCenter);
+  await expectElementHasNoHorizontalOverflow(modelCenter);
+  await expectPageHasNoHorizontalOverflow(page);
+});
+
+test('control center search journey keeps overview shortcuts and runtime monitor coherent', async ({
+  page,
+}) => {
+  test.setTimeout(120_000);
+  const providerId = await seedProvider('Ops Search Journey Mock');
+  const chatId = await seedModel(providerId, {
+    model_name: 'mock-search-chat',
+    display_name: 'Search Journey Chat',
+    capability: 'chat',
+    is_default_for: 'chat',
+    supports_tools: true,
+    price_input_per_1m: 0.8,
+    price_output_per_1m: 1.6,
+  });
+  await seedModel(providerId, {
+    model_name: 'mock-search-image',
+    display_name: 'Search Journey Image',
+    capability: 'image',
+    is_default_for: 'image',
+    price_per_call: 0.03,
+  });
+
+  await suppressTips(page);
+  await page.goto('/');
+  await expect(page.getByTestId('chat-panel')).toBeVisible({ timeout: 10_000 });
+  await sendChat(page, chatId, '先生成一条让控制中心监控、工具与成本面板都有数据的消息');
+
+  await page.getByTestId('open-settings').click();
+  const controlCenter = page.getByTestId('control-center');
+  await expect(controlCenter).toBeVisible();
+
+  const search = page.getByTestId('control-center-search');
+  await search.fill('监控');
+  await expect(page.getByTestId('control-runtime-section')).toBeVisible({ timeout: 10_000 });
+  await expect(page.getByTestId('control-runtime-cpu-detail')).toBeVisible();
+  await expect(page.getByTestId('control-runtime-mode-detail')).toBeVisible();
+  await expect(page.getByTestId('control-center-search-empty')).toHaveCount(0);
+
+  await search.fill('工具');
+  await expect(page.getByTestId('settings-tools')).toBeVisible({ timeout: 10_000 });
+  await expect(page.getByTestId('tool-toggle-builtin.image_generate')).toBeVisible();
+
+  await search.fill('zzzz-control-center-empty');
+  await expect(page.getByTestId('control-center-search-empty')).toBeVisible();
+
+  await search.fill('');
+  await page.getByTestId('control-center-nav-overview').click();
+  await expect(page.getByTestId('control-center-overview')).toBeVisible();
+
+  await page.getByTestId('control-center-open-costs').click();
+  await expect(page.getByTestId('cost-dashboard-panel')).toBeVisible();
+  await expect(page.getByTestId('cost-dashboard-total')).toBeVisible();
+
+  await page.getByTestId('control-center-nav-overview').click();
+  await page.getByTestId('control-center-open-tools').click();
+  await expect(page.getByTestId('settings-tools')).toBeVisible();
+
+  await page.getByTestId('control-center-nav-overview').click();
+  await page.getByTestId('control-center-open-models').click();
+  await expect(page.getByTestId('model-center')).toBeVisible();
+
+  await page.getByTestId('control-center-nav-overview').click();
+  await page.getByTestId('control-center-open-monitor').click();
+  await expect(page.getByTestId('control-runtime-section')).toBeVisible();
+  await expectHorizontallyWithinViewport(page, controlCenter);
+  await expectElementHasNoHorizontalOverflow(controlCenter);
+  await expectPageHasNoHorizontalOverflow(page);
+
+  await page.keyboard.press('Escape');
+  await expect(page.getByTestId('control-center')).toHaveCount(0);
 });

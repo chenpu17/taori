@@ -19,6 +19,7 @@ import {
   buildUpstreamTools,
   withCapabilityToolInstruction,
 } from './upstream-tools.js';
+import { extractCachedPromptTokensFromProviderMetadata } from './usage.js';
 
 export const IMAGE_TOOL_FINAL_TEXT = '图片已生成。';
 const IMAGE_TOOL_FINAL_GRACE_MS = 1500;
@@ -217,8 +218,12 @@ export async function produceUpstreamStream(
     const usage = imageToolFinalizedWithoutModelText
       ? undefined
       : await result.usage.catch(() => undefined);
+    const providerMetadata = imageToolFinalizedWithoutModelText
+      ? undefined
+      : await result.experimental_providerMetadata.catch(() => undefined);
     const promptTokens = typeof usage?.promptTokens === 'number' ? usage.promptTokens : null;
     const completionTokens = typeof usage?.completionTokens === 'number' ? usage.completionTokens : null;
+    const cacheInputTokens = extractCachedPromptTokensFromProviderMetadata(providerMetadata);
     let actualUsd: number | null = null;
     try {
       const c = calculateCostUsd({
@@ -310,6 +315,7 @@ export async function produceUpstreamStream(
           type: 'cost',
           message_id: ctx.messageId,
           input_tokens: promptTokens,
+          cache_input_tokens: cacheInputTokens,
           output_tokens: completionTokens,
           actual_usd: actualUsd,
           first_token_ms: firstTokenAt == null ? null : firstTokenAt - startedAt,
@@ -326,6 +332,7 @@ export async function produceUpstreamStream(
         finish_reason: finishReason ?? null,
         image_tool_finalized_without_model_text: imageToolFinalizedWithoutModelText,
         prompt_tokens: promptTokens,
+        cache_input_tokens: cacheInputTokens,
         completion_tokens: completionTokens,
         first_token_ms: firstTokenAt == null ? null : firstTokenAt - startedAt,
         duration_ms: Date.now() - startedAt,

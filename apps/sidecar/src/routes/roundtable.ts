@@ -15,6 +15,7 @@ import { z } from 'zod';
 import {
   TaoriError,
   CreateRoundtableRequestSchema,
+  SummarySchema,
   makeId,
   type AnalyzerOutput,
 } from '@taori/shared';
@@ -24,8 +25,10 @@ import {
   MemoriesRepo,
   MessagesRepo,
   ModelsRepo,
+  PromptTemplatesRepo,
   ProvidersRepo,
   RunEventsRepo,
+  type RoundtableRow,
   type RunEventInsert,
   RoundtableMessagesRepo,
   RoundtablesRepo,
@@ -47,7 +50,11 @@ import {
 } from '../roundtable/cost-estimate.js';
 import { runRound } from '../roundtable/round-runner.js';
 import { runSummary } from '../roundtable/summarizer.js';
-import { renderRoundtableMarkdown, renderRoundtableSummaryMarkdown } from '../roundtable/export.js';
+import {
+  renderRoundtableDecisionTemplate,
+  renderRoundtableMarkdown,
+  renderRoundtableSummaryMarkdown,
+} from '../roundtable/export.js';
 import { throwIfBudgetBlockedOrNeedsConfirmation } from '../cost/budget-guard.js';
 
 type RoundtableRunEventInput = Omit<RunEventInsert, 'run_id' | 'conversation_id' | 'message_id'> & {
@@ -128,6 +135,7 @@ export function registerRoundtableRoute(
   const rtRepo = new RoundtablesRepo(deps.db);
   const rtMsgRepo = new RoundtableMessagesRepo(deps.db);
   const messagesRepo = new MessagesRepo(deps.db);
+  const promptTemplatesRepo = new PromptTemplatesRepo(deps.db);
   const runEventsRepo = new RunEventsRepo(deps.db);
   // M3.A.6 — In-memory in-flight tracker. The DB `status` column is a coarse
   // FSM that lingers in 'round1' / 'round2' / 'summarizing' even after the
@@ -167,6 +175,23 @@ export function registerRoundtableRoute(
       });
     }
     return m;
+  };
+
+  const summarizeHistoryItem = (row: RoundtableRow) => {
+    const summary = row?.summary;
+    const structured = SummarySchema.safeParse(summary).success
+      ? SummarySchema.parse(summary)
+      : null;
+    return {
+      id: row!.id,
+      topic: row!.topic,
+      mode: row!.mode,
+      created_at: row!.created_at,
+      recommended_decision: structured?.recommended_decision ?? null,
+      consensus: structured?.consensus ?? [],
+      risks: structured?.risks ?? [],
+      divergence_topics: structured?.divergence.map((item) => item.topic) ?? [],
+    };
   };
 
   app.post('/v1/roundtable', async (req, reply) => {
@@ -296,7 +321,7 @@ export function registerRoundtableRoute(
         },
       });
       const analyzerResult = await runAnalyzer(
-        { keystore: deps.keystore, log: req.log },
+        { keystore: deps.keystore, memoriesRepo, log: req.log },
         {
           topic: body.topic,
           requestedMode,
@@ -567,6 +592,65 @@ export function registerRoundtableRoute(
     );
     return { roundtable: rt, messages, total_cost_usd };
   });
+
+  app.get<{ Params: { id: string }; Querystring: { limit?: string } }>(
+    '/v1/roundtable/:id/history',
+    async (req) => {
+      const rt = rtRepo.get(req.params.id);
+      if (!rt) {
+        throw new TaoriError({
+          code: 'not_found',
+          message: `Roundtable ${req.params.id} not found`,
+        });
+      }
+      const baseConversationId = rt.origin_conversation_id ?? rt.conversation_id;
+      const limit = Math.max(1, Math.min(8, Number.parseInt(req.query.limit ?? '4', 10) || 4));
+      const items = rtRepo
+        .listByAssociatedConversation(baseConversationId)
+        .filter((item) =>
+          item.id !== rt.id
+          && item.status === 'completed'
+          && item.summary
+          && !(typeof item.summary === 'object' && 'fallback' in item.summary && item.summary.fallback === true),
+        )
+        .sort((a, b) => b.created_at - a.created_at)
+        .slice(0, limit)
+        .map(summarizeHistoryItem);
+      return {
+        roundtable_id: rt.id,
+        items,
+      };
+    },
+  );
+
+  app.post<{ Params: { id: string } }>(
+    '/v1/roundtable/:id/template',
+    async (req, reply) => {
+      const rt = rtRepo.get(req.params.id);
+      if (!rt) {
+        throw new TaoriError({
+          code: 'not_found',
+          message: `Roundtable ${req.params.id} not found`,
+        });
+      }
+      if (rt.status !== 'completed' || !rt.summary) {
+        throw new TaoriError({
+          code: 'conflict',
+          message: '仅已完成且有总结的圆桌可以保存为模板',
+        });
+      }
+      const template = promptTemplatesRepo.create({
+        name: `圆桌模板：${rt.topic.slice(0, 40)}`,
+        description: `由圆桌《${rt.topic.slice(0, 60)}》的结论生成，可复用其决策分析框架。`,
+        content: renderRoundtableDecisionTemplate({
+          topic: rt.topic,
+          summary: rt.summary,
+        }),
+      });
+      reply.code(201);
+      return { ok: true, template };
+    },
+  );
 
   /**
    * POST /v1/roundtable/:id/cancel — user-initiated cancel.
@@ -1042,6 +1126,7 @@ export function registerRoundtableRoute(
                 rtRepo,
                 rtMsgRepo,
                 keystore: deps.keystore,
+                memoriesRepo,
                 runEvents,
                 log: req.log,
               },
@@ -1640,6 +1725,7 @@ export function registerRoundtableRoute(
             rtRepo,
             rtMsgRepo,
             keystore: deps.keystore,
+            memoriesRepo,
             runEvents,
             log: req.log,
           },

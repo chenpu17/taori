@@ -12,6 +12,8 @@ export interface QuickCompareUiOutput {
   outputId: string;
   index: number;
   modelId: string;
+  toolNames: string[];
+  costRecordId: string | null;
   content: string;
   status: 'streaming' | 'complete' | 'failed';
   error?: string;
@@ -33,6 +35,8 @@ export interface QuickCompareUiState {
   running: boolean;
   error: string | null;
   outputs: QuickCompareUiOutput[];
+  requestText?: string;
+  requestedToolIntent?: boolean;
 }
 
 export type ChatMessage = AiMessage & {
@@ -168,6 +172,8 @@ export function applyQuickCompareAnnotation(
       outputId: ann.output_id,
       index: ann.index,
       modelId: ann.model_id,
+      toolNames: ann.tool_names ?? [],
+      costRecordId: null,
       content: '',
       status: 'streaming',
       firstTokenMs: null,
@@ -178,12 +184,14 @@ export function applyQuickCompareAnnotation(
     const current = outputs.get(ann.output_id) ?? {
       outputId: ann.output_id,
       index: ann.index,
-      modelId: ann.model_id,
-      content: '',
-      status: 'streaming' as const,
-      firstTokenMs: null,
-      durationMs: null,
-      toolTraces: [],
+        modelId: ann.model_id,
+        toolNames: [],
+        costRecordId: null,
+        content: '',
+        status: 'streaming' as const,
+        firstTokenMs: null,
+        durationMs: null,
+        toolTraces: [],
     };
     outputs.set(ann.output_id, { ...current, content: current.content + ann.text_chunk });
   } else if (ann.type === 'qc.participant_done') {
@@ -192,6 +200,8 @@ export function applyQuickCompareAnnotation(
       outputId: ann.output_id,
       index: ann.index,
       modelId: ann.model_id,
+      toolNames: current?.toolNames ?? [],
+      costRecordId: ann.cost_record_id ?? current?.costRecordId ?? null,
       content: ann.content,
       status: 'complete',
       error: current?.error,
@@ -205,6 +215,8 @@ export function applyQuickCompareAnnotation(
       outputId: ann.output_id,
       index: ann.index,
       modelId: ann.model_id,
+      toolNames: current?.toolNames ?? [],
+      costRecordId: current?.costRecordId ?? null,
       content: current?.content ?? '',
       status: 'failed',
       error: ann.message,
@@ -216,12 +228,14 @@ export function applyQuickCompareAnnotation(
     const current = outputs.get(ann.output_id) ?? {
       outputId: ann.output_id,
       index: ann.index,
-      modelId: ann.model_id,
-      content: '',
-      status: 'streaming' as const,
-      firstTokenMs: null,
-      durationMs: null,
-      toolTraces: [],
+        modelId: ann.model_id,
+        toolNames: [],
+        costRecordId: null,
+        content: '',
+        status: 'streaming' as const,
+        firstTokenMs: null,
+        durationMs: null,
+        toolTraces: [],
     };
     const traces = new Map(current.toolTraces.map((trace) => [trace.callId, trace]));
     const next = traces.get(ann.call_id) ?? {
@@ -247,6 +261,7 @@ export function applyQuickCompareAnnotation(
   }
 
   return {
+    ...state,
     compareId,
     running,
     error: state.error,

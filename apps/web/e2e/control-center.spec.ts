@@ -23,7 +23,7 @@ test('control center unifies settings, models, tools and costs behind one naviga
 
   await page.getByTestId('settings-tab-tools').click();
   await expect(page.getByTestId('settings-tools')).toBeVisible();
-  await expect(page.getByTestId('settings-tool-builtin.web_search')).toBeVisible();
+  await expect(page.getByTestId('settings-search-builtin')).toBeVisible();
 
   await page.getByTestId('control-center-nav-costs').click();
   await expect(page.getByTestId('cost-dashboard-panel')).toBeVisible();
@@ -65,7 +65,26 @@ test('control center overview surfaces model and tool health summaries', async (
   await page.getByTestId('open-settings').click();
   await page.getByTestId('control-center-nav-overview').click();
   await expect(page.getByTestId('control-center-overview')).toBeVisible();
+  await expect(page.getByTestId('control-budget-overview')).toBeVisible();
+  const providerRiskQueue = page.getByTestId('control-provider-risk-queue');
+  await expect(providerRiskQueue).toContainText('缺少可用 Key');
+  await expect(providerRiskQueue).toContainText('补 Provider Key');
+  await expect(page.getByTestId('control-cost-attribution-overview')).toBeVisible();
   await expect(page.getByTestId('control-health-overview')).toBeVisible();
+  await expect(page.getByTestId('control-health-wall-actions')).toContainText('失败率偏高');
+  await page.getByTestId('control-health-wall-action-cost-risky').click();
+  await expect(page.getByTestId('cost-dashboard-panel')).toBeVisible();
+  await expect(page.getByTestId('cost-dashboard-model-focus-banner')).toBeVisible();
+  await page.getByTestId('cost-dashboard-model-focus-open-models').click();
+  await expect(page.getByTestId('model-center')).toBeVisible();
+  await page.getByTestId('control-center-nav-overview').click();
+  await page.getByTestId('control-health-wall-action-cost-risky').click();
+  await expect(page.getByTestId('cost-dashboard-model-focus-banner')).toBeVisible();
+  await page.getByTestId('cost-dashboard-model-focus-open-provider').click();
+  await expect(page.getByTestId('cost-dashboard-provider-focus-banner')).toBeVisible();
+  await expect(page.locator('[data-testid="cost-dashboard-provider-card"][data-focused="1"]').first()).toBeVisible();
+  await page.getByTestId('control-center-nav-overview').click();
+  await page.getByTestId('control-center-nav-overview').click();
   await expect(page.getByTestId('control-model-health-calls')).toHaveText('2');
   await expect(page.getByTestId('control-model-health-failures')).toHaveText('1');
   await expect(page.getByTestId('control-model-health-affected')).toHaveText('1');
@@ -76,6 +95,15 @@ test('control center overview surfaces model and tool health summaries', async (
   await expect(page.getByTestId('control-tool-health-affected')).toHaveText('0');
   await expect(page.getByTestId('control-tool-health-last-failure')).toHaveText('无');
 
+  await providerRiskQueue.getByRole('button', { name: '看成本影响' }).first().click();
+  await expect(page.getByTestId('cost-dashboard-panel')).toBeVisible();
+  await expect(page.getByTestId('cost-dashboard-provider-focus-banner')).toBeVisible();
+  const focusedProviderCard = page.locator('[data-testid="cost-dashboard-provider-card"][data-focused="1"]').first();
+  await expect(focusedProviderCard).toBeVisible();
+  await focusedProviderCard.getByRole('button', { name: '去模型中心' }).click();
+  await expect(page.getByTestId('model-center')).toBeVisible();
+
+  await page.getByTestId('control-center-nav-overview').click();
   await page.getByTestId('control-health-open-models').click();
   await expect(page.getByTestId('model-center')).toBeVisible();
 });

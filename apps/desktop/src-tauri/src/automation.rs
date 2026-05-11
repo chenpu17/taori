@@ -6,6 +6,7 @@
 
 #[cfg(debug_assertions)]
 mod debug {
+    use crate::{handle_desktop_shell_action, DesktopShellAction};
     use std::{
         collections::HashMap,
         net::SocketAddr,
@@ -24,6 +25,7 @@ use axum::{
     use serde::{Deserialize, Serialize};
     use subtle::ConstantTimeEq;
     use tauri::{AppHandle, Manager};
+    use tauri_plugin_clipboard_manager::ClipboardExt;
     use tokio::{net::TcpListener, sync::oneshot, task::JoinHandle};
 
     #[derive(Clone)]
@@ -38,6 +40,11 @@ use axum::{
     struct EvalIn {
         script: String,
         timeout_ms: Option<u64>,
+    }
+
+    #[derive(Deserialize)]
+    struct ClipboardTextIn {
+        text: String,
     }
 
     #[derive(Deserialize)]
@@ -86,7 +93,9 @@ use axum::{
         };
         let router = Router::new()
             .route("/health", get(health))
+            .route("/v1/clipboard/text", post(set_clipboard_text))
             .route("/v1/eval", post(eval))
+            .route("/v1/desktop-action/:action", post(desktop_action))
             .route("/v1/result/:id", post(result))
             .with_state(state);
 
@@ -204,6 +213,43 @@ use axum::{
         (StatusCode::OK, Json(serde_json::json!({ "ok": true }))).into_response()
     }
 
+    async fn desktop_action(
+        State(state): State<AutomationState>,
+        headers: HeaderMap,
+        Path(action): Path<String>,
+    ) -> impl IntoResponse {
+        if let Err(e) = check_auth(&state, &headers) {
+            return err_resp(e.0, e.1);
+        }
+        let Some(action) = parse_desktop_action(&action) else {
+            return err_resp(StatusCode::BAD_REQUEST, "unknown desktop action");
+        };
+        if let Err(err) = handle_desktop_shell_action(&state.app, action, "automation") {
+            return err_resp(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                &format!("desktop action failed: {err:#}"),
+            );
+        }
+        (StatusCode::OK, Json(serde_json::json!({ "ok": true }))).into_response()
+    }
+
+    async fn set_clipboard_text(
+        State(state): State<AutomationState>,
+        headers: HeaderMap,
+        Json(body): Json<ClipboardTextIn>,
+    ) -> impl IntoResponse {
+        if let Err(e) = check_auth(&state, &headers) {
+            return err_resp(e.0, e.1);
+        }
+        if let Err(err) = state.app.clipboard().write_text(body.text) {
+            return err_resp(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                &format!("set clipboard text failed: {err}"),
+            );
+        }
+        (StatusCode::OK, Json(serde_json::json!({ "ok": true }))).into_response()
+    }
+
     fn check_auth(state: &AutomationState, headers: &HeaderMap) -> Result<(), (StatusCode, &'static str)> {
         check_auth_or_body_bearer(state, headers, None)
     }
@@ -241,6 +287,19 @@ use axum::{
             })),
         )
             .into_response()
+    }
+
+    fn parse_desktop_action(action: &str) -> Option<DesktopShellAction> {
+        match action {
+            "toggle-window" => Some(DesktopShellAction::ToggleWindow),
+            "show-window" => Some(DesktopShellAction::ShowWindow),
+            "new-chat" => Some(DesktopShellAction::NewChat),
+            "open-settings" => Some(DesktopShellAction::OpenSettings),
+            "open-help" => Some(DesktopShellAction::OpenHelp),
+            "import-clipboard" => Some(DesktopShellAction::ImportClipboard),
+            "quit" => Some(DesktopShellAction::Quit),
+            _ => None,
+        }
     }
 
     fn make_request_id() -> String {

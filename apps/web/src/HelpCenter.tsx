@@ -215,6 +215,7 @@ export function HelpCenter({
             </div>
             <button
               type="button"
+              className="help-center__action"
               data-testid="help-selfcheck-run"
               onClick={() => runSelfCheck(false)}
               disabled={check.state === 'running'}
@@ -223,6 +224,7 @@ export function HelpCenter({
             </button>
             <button
               type="button"
+              className="help-center__action help-center__action--secondary"
               data-testid="help-selfcheck-run-keychain"
               onClick={() => runSelfCheck(true)}
               disabled={check.state === 'running'}
@@ -294,6 +296,7 @@ export function HelpCenter({
             </div>
             <button
               type="button"
+              className="help-center__action"
               data-testid="help-realdiag-load"
               onClick={() => void loadRealDiagnostics()}
               disabled={realDiag.state === 'running'}

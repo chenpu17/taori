@@ -26,6 +26,7 @@ const SIDECAR_URL = `http://127.0.0.1:${SIDECAR_PORT}`;
 const START_TIMEOUT_MS = Number(process.env.TAORI_DESKTOP_UI_START_TIMEOUT_MS ?? 120_000);
 const CHAT_TIMEOUT_MS = Number(process.env.TAORI_DESKTOP_UI_CHAT_TIMEOUT_MS ?? 180_000);
 const RUN_REAL_CHAT = process.env.TAORI_DESKTOP_UI_REAL_CHAT === '1';
+const EXPECT_CONTROL_CONFIGURED = RUN_REAL_CHAT;
 
 fs.mkdirSync(ARTIFACT_DIR, { recursive: true });
 const desktopLogPath = artifactPath('desktop-dev.log');
@@ -219,7 +220,7 @@ async function startDesktopDev() {
       state.controlReady &&
       state.automationReady &&
       state.sidecarReady &&
-      state.controlConfigured &&
+      (!EXPECT_CONTROL_CONFIGURED || state.controlConfigured) &&
       state.rendererHealth
     ) {
       writeJsonArtifact('startup-state.json', state);
@@ -284,6 +285,52 @@ async function automationEval(script, timeoutMs = 30_000) {
       fail(`automation eval failed with ${res.status}`, { status: res.status, body, script: script.slice(0, 800) });
     }
     return body?.value;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+async function automationDesktopAction(action, timeoutMs = 15_000) {
+  if (!state.automationUrl) fail('automation channel URL is not available', { state });
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), timeoutMs + 2_000);
+  try {
+    const res = await fetch(`${state.automationUrl}/v1/desktop-action/${encodeURIComponent(action)}`, {
+      method: 'POST',
+      signal: controller.signal,
+      headers: {
+        Authorization: `Bearer ${BEARER}`,
+      },
+    });
+    const body = await res.json().catch(() => null);
+    if (!res.ok) {
+      fail(`automation desktop action failed with ${res.status}`, { status: res.status, body, action });
+    }
+    return body;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+async function automationClipboardText(text, timeoutMs = 15_000) {
+  if (!state.automationUrl) fail('automation channel URL is not available', { state });
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), timeoutMs + 2_000);
+  try {
+    const res = await fetch(`${state.automationUrl}/v1/clipboard/text`, {
+      method: 'POST',
+      signal: controller.signal,
+      headers: {
+        Authorization: `Bearer ${BEARER}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ text }),
+    });
+    const body = await res.json().catch(() => null);
+    if (!res.ok) {
+      fail(`automation clipboard update failed with ${res.status}`, { status: res.status, body });
+    }
+    return body;
   } finally {
     clearTimeout(timeout);
   }
@@ -456,7 +503,7 @@ async function runUiJourney(model = null) {
     healthText: q('open-settings') ? 'ready' : document.body.innerText.slice(0, 500),
   };`);
 
-  await ui(`await clickTestId('open-settings', 120000);`, 125_000);
+  await automationDesktopAction('open-settings', 20_000);
   await ui(`await waitFor(() => visible(q('control-center')), 'control center', 10000);`);
   await ui(`await clickTestId('settings-tab-general');`, 15_000).catch(() => null);
   await ui(`
@@ -487,12 +534,32 @@ async function runUiJourney(model = null) {
   if (!imported) fail('UI-imported conversation is not visible through sidecar list', { title, importVisible });
   const importedMessages = await jsonFetch(`/v1/conversations/${encodeURIComponent(imported.id)}/messages`);
 
+  await automationDesktopAction('new-chat', 20_000);
+  await ui(`
+    await waitFor(() => visible(q('chat-panel')), 'chat panel after desktop new-chat', 10000);
+    await waitFor(() => !Array.from(document.querySelectorAll('.msg.assistant')).some((el) => (el.textContent || '').includes(${JSON.stringify(`${RUN_ID} Imported content`)})), 'imported message hidden after desktop new-chat', 10000);
+    return {
+      activeTitle: document.querySelector('.conv-item.active')?.textContent || null,
+      assistantCount: document.querySelectorAll('.msg.assistant').length,
+    };
+  `, 15_000);
+
+  const clipboardText = `${RUN_ID} desktop clipboard capture`;
+  await automationClipboardText(clipboardText, 20_000);
+  await automationDesktopAction('import-clipboard', 20_000);
+  await ui(`
+    const input = await waitFor(() => q('composer-input'), 'composer input after clipboard import', 10000);
+    await waitFor(() => (input.value || '').includes(${JSON.stringify(clipboardText)}), 'clipboard text imported into composer', 10000);
+    return { value: input.value };
+  `, 15_000);
+
   if (!RUN_REAL_CHAT) {
     const result = {
       mode: 'ui_only',
       requested_conversation_id: requestedConversationId,
       imported_conversation: imported,
       message_count: importedMessages.messages?.length ?? 0,
+      clipboard_text: clipboardText,
     };
     writeJsonArtifact('ui-journey.json', result);
     writeJsonArtifact('ui-journey-messages.json', importedMessages);

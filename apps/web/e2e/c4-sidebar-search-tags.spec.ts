@@ -158,13 +158,16 @@ test('C4 user can pin, tag, search, and batch-delete sidebar conversations', asy
   // 5) Batch select + delete the two non-pinned conversations.
   await page.getByTestId('batch-enter').click();
   await expect(page.getByTestId('batch-cancel')).toBeVisible();
+  await page.getByTestId('batch-select-all').click();
+  await expect(page.getByTestId('batch-count')).toContainText('已选 3');
+  await expect(page.getByTestId('batch-select-all')).toContainText('清空选择');
 
-  // Select the 2 unpinned items (anything not equal to oldestId).
+  // Uncheck the pinned one so only the 2 unpinned conversations remain selected.
   const allItems = await page.locator('[data-testid="conv-item"]').all();
   for (const item of allItems) {
     const id = await item.getAttribute('data-conv-id');
-    if (id !== oldestId) {
-      await item.getByTestId('conv-select').check();
+    if (id === oldestId) {
+      await item.getByTestId('conv-select').uncheck();
     }
   }
   await expect(page.getByTestId('batch-count')).toContainText('已选 2');

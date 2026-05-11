@@ -39,6 +39,8 @@ import { closeAllMcpSessions } from './mcp/client.js';
 import type { MemoryProvider } from './memory/provider.js';
 import { registerTemplatesPersonasRoute } from './routes/templates-personas.js';
 import { registerWorkflowRecipesRoute } from './routes/workflow-recipes.js';
+import { registerResearchRoute } from './routes/research.js';
+import { ResearchRunner } from './research/task-runner.js';
 import { scheduleCatalogSync } from './catalog/index.js';
 import { CapabilityBus } from './bus/index.js';
 import { createFileReadTool } from './bus/builtins/file_read.js';
@@ -46,7 +48,7 @@ import { createFileSearchTool } from './bus/builtins/file_search.js';
 import { createImageGenerateTool } from './bus/builtins/image_generate.js';
 import { createWebFetchTool, createWebFetchToolWithDeps } from './bus/builtins/web_fetch.js';
 import { createWebSearchTool, createWebSearchToolWithDeps } from './bus/builtins/web_search.js';
-import { CostsRepo, FilesRepo, FileChunksRepo, ProvidersRepo, ModelsRepo, MessagesRepo, ConversationsRepo, MemoriesRepo } from './db/repos/index.js';
+import { CostsRepo, FilesRepo, FileChunksRepo, ProvidersRepo, ModelsRepo, MessagesRepo, ConversationsRepo, MemoriesRepo, ResearchRepo } from './db/repos/index.js';
 import path from 'node:path';
 
 export interface BuildServerArgs {
@@ -618,6 +620,9 @@ export function buildServer(args: BuildServerArgs): FastifyInstance {
   registerAdminRoute(app, argsWithBus);
   registerTemplatesPersonasRoute(app, argsWithBus);
   registerWorkflowRecipesRoute(app, argsWithBus);
+  const researchRepo = new ResearchRepo(args.db);
+  const researchRunner = new ResearchRunner({ repo: researchRepo, bus, log: app.log });
+  registerResearchRoute(app, { ...argsWithBus, researchRunner });
 
   registerToolsRoute(app, { bus, memories, costs });
   registerMcpRoute(app, { ...argsWithBus, bus });

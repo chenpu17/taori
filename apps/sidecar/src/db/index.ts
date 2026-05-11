@@ -128,6 +128,7 @@ CREATE TABLE IF NOT EXISTS cost_records (
   model_id TEXT REFERENCES models(id) ON DELETE SET NULL,
   model_name_snapshot TEXT NOT NULL DEFAULT '',
   input_tokens INTEGER,
+  cache_input_tokens INTEGER,
   output_tokens INTEGER,
   call_count INTEGER NOT NULL DEFAULT 1,
   price_input_per_1m_snapshot REAL,
@@ -251,6 +252,76 @@ CREATE TABLE IF NOT EXISTS workflow_recipes (
   updated_at INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS workflow_recipes_enabled_idx ON workflow_recipes(enabled, updated_at);
+
+CREATE TABLE IF NOT EXISTS research_sessions (
+  id TEXT PRIMARY KEY,
+  conversation_id TEXT REFERENCES conversations(id) ON DELETE SET NULL,
+  title TEXT NOT NULL,
+  objective TEXT NOT NULL,
+  output_kind TEXT NOT NULL,
+  status TEXT NOT NULL,
+  stage TEXT NOT NULL,
+  budget_mode TEXT NOT NULL,
+  budget_limit_usd REAL,
+  budget_spent_usd REAL NOT NULL DEFAULT 0,
+  constraints_json TEXT NOT NULL DEFAULT '{}',
+  plan_json TEXT,
+  draft_markdown TEXT,
+  final_markdown TEXT,
+  started_at INTEGER,
+  completed_at INTEGER,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS research_sessions_status_idx ON research_sessions(status, updated_at);
+CREATE INDEX IF NOT EXISTS research_sessions_conv_idx ON research_sessions(conversation_id, updated_at);
+
+CREATE TABLE IF NOT EXISTS research_tasks (
+  id TEXT PRIMARY KEY,
+  research_session_id TEXT NOT NULL REFERENCES research_sessions(id) ON DELETE CASCADE,
+  parent_task_id TEXT,
+  kind TEXT NOT NULL,
+  status TEXT NOT NULL,
+  title TEXT NOT NULL,
+  input_json TEXT NOT NULL,
+  output_json TEXT,
+  error_json TEXT,
+  started_at INTEGER,
+  finished_at INTEGER,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS research_tasks_session_idx ON research_tasks(research_session_id, created_at);
+CREATE INDEX IF NOT EXISTS research_tasks_status_idx ON research_tasks(status, updated_at);
+
+CREATE TABLE IF NOT EXISTS research_sources (
+  id TEXT PRIMARY KEY,
+  research_session_id TEXT NOT NULL REFERENCES research_sessions(id) ON DELETE CASCADE,
+  source_type TEXT NOT NULL,
+  title TEXT,
+  locator TEXT NOT NULL,
+  snippet TEXT,
+  credibility_score REAL,
+  included INTEGER NOT NULL DEFAULT 1,
+  metadata_json TEXT NOT NULL DEFAULT '{}',
+  created_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS research_sources_session_idx ON research_sources(research_session_id, created_at);
+CREATE INDEX IF NOT EXISTS research_sources_locator_idx ON research_sources(research_session_id, locator);
+
+CREATE TABLE IF NOT EXISTS research_claims (
+  id TEXT PRIMARY KEY,
+  research_session_id TEXT NOT NULL REFERENCES research_sessions(id) ON DELETE CASCADE,
+  section_key TEXT NOT NULL,
+  claim_text TEXT NOT NULL,
+  claim_kind TEXT NOT NULL,
+  support_status TEXT NOT NULL,
+  citations_json TEXT NOT NULL DEFAULT '[]',
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS research_claims_session_idx ON research_claims(research_session_id, updated_at);
+CREATE INDEX IF NOT EXISTS research_claims_support_idx ON research_claims(support_status, updated_at);
 
 CREATE TABLE IF NOT EXISTS roundtables (
   id TEXT PRIMARY KEY,
@@ -405,6 +476,9 @@ CREATE UNIQUE INDEX IF NOT EXISTS memories_scope_key_uniq_v2
   }
   if (!costCols.some((c) => c.name === 'first_token_ms')) {
     sqlite.exec(`ALTER TABLE cost_records ADD COLUMN first_token_ms INTEGER`);
+  }
+  if (!costCols.some((c) => c.name === 'cache_input_tokens')) {
+    sqlite.exec(`ALTER TABLE cost_records ADD COLUMN cache_input_tokens INTEGER`);
   }
   const qcOutputCols = sqlite
     .prepare(`PRAGMA table_info(quick_compare_outputs)`)

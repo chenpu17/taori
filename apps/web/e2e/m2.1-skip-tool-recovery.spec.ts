@@ -92,7 +92,7 @@ async function addFailingMcpServerFromUi(page: Page): Promise<void> {
   await page.getByTestId('mcp-server-command').fill(process.execPath);
   await page.getByTestId('mcp-server-args').fill(mcpScriptPath);
   await page.getByTestId('mcp-server-add').click();
-  await expect(page.locator('[data-testid^="mcp-server-mcp_"]').first()).toContainText('健康：ok', {
+  await expect(page.locator('[data-testid^="mcp-server-mcp_"]').first()).toContainText('健康：正常', {
     timeout: 20_000,
   });
   await expect(page.locator('[data-testid^="settings-tool-mcp."]').first()).toBeVisible({

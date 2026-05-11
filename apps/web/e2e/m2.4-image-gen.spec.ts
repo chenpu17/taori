@@ -15,6 +15,16 @@ import { readSidecarEnv, resetSidecar, authedFetch } from './_helpers';
 let env: ReturnType<typeof readSidecarEnv>;
 let imageModelId: string;
 let chatModelId: string;
+let providerId: string;
+
+async function suppressTips(page: import('@playwright/test').Page): Promise<void> {
+  await page.addInitScript(() => {
+    localStorage.setItem('tip_image_first_seen', 'true');
+    localStorage.setItem('tip_fallback_first_seen', 'true');
+    localStorage.setItem('tip_cost_first_seen', 'true');
+    localStorage.setItem('tip_roundtable_first_seen', 'true');
+  });
+}
 
 test.beforeEach(async () => {
   env = readSidecarEnv();
@@ -30,6 +40,7 @@ test.beforeEach(async () => {
     }),
   });
   const provider = (await pr.json()) as { id: string };
+  providerId = provider.id;
   const cm = await authedFetch(env, '/v1/models', {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
@@ -39,6 +50,7 @@ test.beforeEach(async () => {
       capability: 'chat',
       display_name: 'Chat 4o',
       is_default_for: 'chat',
+      supports_tools: false,
     }),
   });
   chatModelId = ((await cm.json()) as { id: string }).id;
@@ -153,6 +165,119 @@ test('M2.4 explicit image command → picker opens → force=success → assista
   expect(download.suggestedFilename()).toMatch(/\.(png|jpg|jpeg|webp)$/i);
   await lightbox.getByTestId('image-lightbox-close').click();
   await expect(lightbox).toHaveCount(0);
+});
+
+test('M2.4 image cost confirm can switch to a cheaper image model', async ({ page }) => {
+  await suppressTips(page);
+  await page.route('**/v1/tools/invoke', async (route) => {
+    const headers = {
+      ...route.request().headers(),
+      'x-test-force-image-result': 'success',
+    };
+    await route.continue({ headers });
+  });
+
+  const cheaper = await authedFetch(env, '/v1/models', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      provider_id: providerId,
+      model_name: 'dall-e-mini',
+      capability: 'image',
+      display_name: 'DALL-E Mini',
+      price_per_call: 0.01,
+    }),
+  });
+  expect(cheaper.ok).toBeTruthy();
+
+  await page.goto('/');
+  await expect(page.getByTestId('chat-panel')).toBeVisible({ timeout: 10_000 });
+
+  await page.getByTestId('composer-input').fill('/image switch to cheaper');
+  await page.getByTestId('composer-send').click();
+  const dialog = page.getByTestId('image-picker-dialog');
+  await expect(dialog).toBeVisible({ timeout: 10_000 });
+  await dialog.getByTestId(`image-model-radio-${imageModelId}`).check();
+  await dialog.getByTestId('image-picker-submit').click();
+
+  const confirm = page.getByTestId('cost-confirm-dialog');
+  await expect(confirm).toBeVisible({ timeout: 10_000 });
+  await expect(confirm.getByTestId('cost-confirm-cheaper')).toBeEnabled();
+  await confirm.getByTestId('cost-confirm-cheaper').click();
+
+  await expect(page.getByTestId('image-generation-progress')).toBeVisible({ timeout: 10_000 });
+  await expect(dialog).toBeHidden({ timeout: 10_000 });
+  await expect(page.locator('.msg.assistant').last()).toContainText(/Generated with|DALL-E/i, {
+    timeout: 10_000,
+  });
+  await expect(page.getByTestId('msg-tool-images')).toBeVisible({ timeout: 10_000 });
+});
+
+test('M2.4 daily hard budget blocks the next image generation and hides cheaper action', async ({ page }) => {
+  await suppressTips(page);
+  await page.route('**/v1/tools/invoke', async (route) => {
+    const headers = {
+      ...route.request().headers(),
+      'x-test-force-image-result': 'success',
+    };
+    await route.continue({ headers });
+  });
+
+  await page.goto('/');
+  await expect(page.getByTestId('chat-panel')).toBeVisible({ timeout: 10_000 });
+
+  await page.getByTestId('composer-input').fill('/image first budgeted image');
+  await page.getByTestId('composer-send').click();
+  const firstDialog = page.getByTestId('image-picker-dialog');
+  await expect(firstDialog).toBeVisible({ timeout: 10_000 });
+  await firstDialog.getByTestId('image-picker-submit').click();
+  const firstConfirm = page.getByTestId('cost-confirm-dialog');
+  await expect(firstConfirm).toBeVisible({ timeout: 10_000 });
+  await firstConfirm.getByTestId('cost-confirm-continue').click();
+  await expect(page.locator('.msg.assistant').last()).toContainText(/Generated with|DALL-E/i, {
+    timeout: 10_000,
+  });
+
+  const realtimeRes = await authedFetch(env, '/v1/costs/realtime');
+  const realtime = (await realtimeRes.json()) as { data: { today_usd: number } };
+  const dailyBudget = Math.max(realtime.data.today_usd / 2, 0.000001);
+  await authedFetch(env, '/v1/memories', {
+    method: 'PUT',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      scope: 'global',
+      scope_id: null,
+      key: 'daily_budget_usd',
+      value: String(dailyBudget),
+    }),
+  });
+  await authedFetch(env, '/v1/memories', {
+    method: 'PUT',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      scope: 'global',
+      scope_id: null,
+      key: 'daily_budget_hard_limit',
+      value: 'true',
+    }),
+  });
+  await authedFetch(env, '/v1/memories?scope=global&key=daily_budget_alert_state', {
+    method: 'DELETE',
+  });
+
+  await page.reload();
+  await expect(page.getByTestId('chat-panel')).toBeVisible({ timeout: 10_000 });
+
+  await page.getByTestId('composer-input').fill('/image blocked by daily budget');
+  await page.getByTestId('composer-send').click();
+
+  const budgetConfirm = page.getByTestId('cost-confirm-dialog');
+  await expect(budgetConfirm).toBeVisible({ timeout: 10_000 });
+  await expect(budgetConfirm).toContainText('今日预算已达');
+  await expect(budgetConfirm.getByTestId('cost-confirm-continue')).toHaveCount(0);
+  await expect(budgetConfirm.getByTestId('cost-confirm-cheaper')).toHaveCount(0);
+  await budgetConfirm.getByTestId('cost-confirm-cancel').click();
+  await expect(budgetConfirm).toHaveCount(0);
 });
 
 test('M2.4 explicit /image command opens picker', async ({ page }) => {

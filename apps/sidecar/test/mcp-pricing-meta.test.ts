@@ -161,7 +161,11 @@ describe('MCP stdio + pricing_meta', () => {
       url: `/v1/mcp/servers/${created.server.id}/refresh`,
       headers: authHeaders(),
     });
-    const toolName = (refreshRes.json() as { tools: Array<{ name: string }> }).tools[0]!.name;
+    expect(refreshRes.statusCode).toBe(200);
+    const refreshBody = refreshRes.json() as { ok: boolean; tools: Array<{ name: string }> };
+    expect(refreshBody.ok).toBe(true);
+    expect(refreshBody.tools.length).toBeGreaterThan(0);
+    const toolName = refreshBody.tools[0]!.name;
 
     const invokeRes = await app.inject({
       method: 'POST',
@@ -178,6 +182,65 @@ describe('MCP stdio + pricing_meta', () => {
     };
     expect(body.data.ok).toBe(false);
     expect(body.data.error.classification).toBe('mcp_crashed');
+  });
+
+  it('exposes MCP runtime tools and recent logs, and supports restart', async () => {
+    const scriptPath = path.join(tmpDir, 'logging-mcp-server.mjs');
+    fs.writeFileSync(scriptPath, loggingMcpServerSource());
+
+    const createRes = await app.inject({
+      method: 'POST',
+      url: '/v1/mcp/servers',
+      headers: authHeaders({ 'content-type': 'application/json' }),
+      payload: JSON.stringify({
+        name: 'Logging MCP',
+        command: process.execPath,
+        args: [scriptPath],
+      }),
+    });
+    expect(createRes.statusCode).toBe(201);
+    const created = createRes.json() as { server: { id: string } };
+
+    const refreshRes = await app.inject({
+      method: 'POST',
+      url: `/v1/mcp/servers/${created.server.id}/refresh`,
+      headers: authHeaders(),
+    });
+    expect(refreshRes.statusCode).toBe(200);
+
+    const runtimeRes = await app.inject({
+      method: 'GET',
+      url: `/v1/mcp/servers/${created.server.id}/runtime`,
+      headers: authHeaders(),
+    });
+    expect(runtimeRes.statusCode).toBe(200);
+    const runtimeBody = runtimeRes.json() as {
+      ok: boolean;
+      session_running: boolean;
+      tools: Array<{ name: string }>;
+      logs: Array<{ message: string }>;
+    };
+    expect(runtimeBody.ok).toBe(true);
+    expect(runtimeBody.session_running).toBe(true);
+    expect(runtimeBody.tools.some((tool) => tool.name.endsWith('.echo'))).toBe(true);
+    expect(runtimeBody.logs.some((entry) => entry.message.includes('mock stderr ready'))).toBe(true);
+
+    const restartRes = await app.inject({
+      method: 'POST',
+      url: `/v1/mcp/servers/${created.server.id}/restart`,
+      headers: authHeaders(),
+    });
+    expect(restartRes.statusCode).toBe(200);
+
+    const runtimeAfterRestartRes = await app.inject({
+      method: 'GET',
+      url: `/v1/mcp/servers/${created.server.id}/runtime`,
+      headers: authHeaders(),
+    });
+    const runtimeAfterRestart = runtimeAfterRestartRes.json() as {
+      logs: Array<{ message: string }>;
+    };
+    expect(runtimeAfterRestart.logs.some((entry) => entry.message.includes('session closed'))).toBe(true);
   });
 
   it('persists pricing_meta through model create and update', async () => {
@@ -313,6 +376,53 @@ process.stdin.on('data', (chunk) => {
     const payload = buffer.slice(start, end).toString('utf8');
     buffer = buffer.slice(end);
     handle(JSON.parse(payload));
+  }
+});
+`;
+}
+
+function loggingMcpServerSource(): string {
+  return `
+let buffer = Buffer.alloc(0);
+function send(id, result) {
+  const payload = Buffer.from(JSON.stringify({ jsonrpc: '2.0', id, result }), 'utf8');
+  process.stdout.write('Content-Length: ' + payload.byteLength + '\\r\\n\\r\\n');
+  process.stdout.write(payload);
+}
+function handle(message) {
+  if (!message.id) return;
+  if (message.method === 'initialize') {
+    console.error('mock stderr ready');
+    send(message.id, { protocolVersion: '2024-11-05', capabilities: { tools: {} }, serverInfo: { name: 'mock', version: '1' } });
+  } else if (message.method === 'tools/list') {
+    console.error('tools listed');
+    send(message.id, {
+      tools: [
+        {
+          name: 'echo',
+          description: 'Echo text',
+          inputSchema: { type: 'object', properties: {}, additionalProperties: true }
+        }
+      ]
+    });
+  } else {
+    send(message.id, {});
+  }
+}
+process.stdin.on('data', (chunk) => {
+  buffer = Buffer.concat([buffer, chunk]);
+  while (true) {
+    const idx = buffer.indexOf('\\r\\n\\r\\n');
+    if (idx === -1) break;
+    const head = buffer.slice(0, idx).toString('utf8');
+    const match = /Content-Length:\\s*(\\d+)/i.exec(head);
+    if (!match) throw new Error('Missing content length');
+    const length = Number(match[1]);
+    const start = idx + 4;
+    if (buffer.length < start + length) break;
+    const body = buffer.slice(start, start + length).toString('utf8');
+    buffer = buffer.slice(start + length);
+    handle(JSON.parse(body));
   }
 });
 `;
