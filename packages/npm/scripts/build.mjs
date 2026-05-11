@@ -7,9 +7,12 @@ import { build } from 'esbuild';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const outdir = path.resolve(__dirname, '..', 'dist');
+const pkgJsonPath = path.resolve(__dirname, '..', 'package.json');
 const entry = path.resolve(__dirname, '..', '..', '..', 'apps', 'sidecar', 'src', 'cli.ts');
 const outfile = path.join(outdir, 'cli.cjs');
 const requestedEngine = process.env.TAORI_BUNDLE_ENGINE?.trim().toLowerCase() ?? '';
+const packageJson = JSON.parse(fs.readFileSync(pkgJsonPath, 'utf8'));
+const cliVersion = String(packageJson.version ?? '0.0.0');
 
 fs.rmSync(outdir, { recursive: true, force: true });
 fs.mkdirSync(outdir, { recursive: true });
@@ -26,6 +29,9 @@ function buildWithEsbuild() {
     banner: {
       js: '#!/usr/bin/env node',
     },
+    define: {
+      'process.env.TAORI_CLI_VERSION': JSON.stringify(cliVersion),
+    },
   });
 }
 
@@ -40,6 +46,7 @@ function tryBuildWithBun({ required }) {
       '--format=cjs',
       '--external=better-sqlite3',
       '--banner=#!/usr/bin/env node',
+      `--define=process.env.TAORI_CLI_VERSION='\"${cliVersion}\"'`,
     ],
     {
       stdio: 'inherit',
