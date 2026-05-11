@@ -68,6 +68,7 @@ export function toChatMessage(m: {
   status?: string | null;
   error?: string | null;
   created_at?: number;
+  annotations?: Array<Record<string, unknown>>;
 }): ChatMessage {
   return {
     id: m.id,
@@ -77,6 +78,8 @@ export function toChatMessage(m: {
     status: m.status ?? null,
     error: m.error ?? null,
     created_at: m.created_at,
+    // Cast needed: ai-sdk's JSONValue[] vs our Record<string,unknown>[] — runtime compatible.
+    annotations: m.annotations as import('@ai-sdk/react').Message['annotations'],
   };
 }
 

@@ -5085,10 +5085,17 @@ function ChatPanel({
           const msgMeta = m as ChatMessage;
           const anns =
             ((m as { annotations?: Array<Record<string, unknown>> }).annotations ?? []);
-          const annMessageId = anns.find((a) => a?.type === 'cost')?.message_id as
-            | string
-            | undefined;
-          const cost = annMessageId ? costByMsg[annMessageId] : undefined;
+          const costAnn = anns.find((a) => a?.type === 'cost') as Record<string, unknown> | undefined;
+          const annMessageId = costAnn?.message_id as string | undefined;
+          // Prefer live streaming state; fall back to annotation embedded in historical message.
+          const cost: MessageCost | undefined = annMessageId
+            ? costByMsg[annMessageId] ?? (costAnn ? {
+                input_tokens: typeof costAnn.input_tokens === 'number' ? costAnn.input_tokens : null,
+                cache_input_tokens: typeof costAnn.cache_input_tokens === 'number' ? costAnn.cache_input_tokens : null,
+                output_tokens: typeof costAnn.output_tokens === 'number' ? costAnn.output_tokens : null,
+                actual_usd: typeof costAnn.actual_usd === 'number' ? costAnn.actual_usd : null,
+              } : undefined)
+            : undefined;
           const toolTraceSteps = m.role === 'assistant'
             ? toolTraceStepsFromAnnotations(anns)
             : [];

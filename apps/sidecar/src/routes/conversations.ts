@@ -157,6 +157,13 @@ export function registerConversationsRoute(
         });
       }
       const rows = msgRepo.listByConversation(req.params.id);
+      // Build a map of message_id → cost record for assistant messages.
+      const costRows = costsRepo.listByConversation(req.params.id);
+      const costByMsgId = new Map(
+        costRows
+          .filter((c) => c.source_type === 'message' && c.source_id)
+          .map((c) => [c.source_id!, c]),
+      );
       // Strip raw base64 payloads but expose image attachment metadata
       // (file_id, mime, width, height) so the renderer can lazy-fetch images.
       const messages = rows.map((r) => {
@@ -168,6 +175,19 @@ export function registerConversationsRoute(
         const imageAttachments = parsedAttachments
           .filter((a) => a.kind === 'image' && a.file_id)
           .map(({ file_id, mime, width, height }) => ({ file_id, mime, width, height }));
+        // Attach cost annotation so the frontend can display token/cost info
+        // for historical messages without requiring a live stream.
+        const costRecord = r.role === 'assistant' ? costByMsgId.get(r.id) : undefined;
+        const annotations = costRecord
+          ? [{
+              type: 'cost',
+              message_id: r.id,
+              input_tokens: costRecord.input_tokens ?? null,
+              cache_input_tokens: costRecord.cache_input_tokens ?? null,
+              output_tokens: costRecord.output_tokens ?? null,
+              actual_usd: costRecord.actual_cost_usd ?? null,
+            }]
+          : [];
         return {
           id: r.id,
           conversation_id: r.conversation_id,
@@ -179,6 +199,7 @@ export function registerConversationsRoute(
           created_at: r.created_at,
           attachments_count: parsedAttachments.length,
           image_attachments: imageAttachments,
+          annotations,
         };
       });
       return { conversation: conv, messages };

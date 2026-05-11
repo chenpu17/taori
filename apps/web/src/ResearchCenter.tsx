@@ -460,7 +460,7 @@ export function ResearchCenter(): JSX.Element {
                   </button>
                   <button
                     type="button"
-                    className="research-center__secondary-btn"
+                    className="research-center__confirm-btn"
                     disabled={actionBusy != null || !detail.session.plan}
                     onClick={() => void runAction('confirm')}
                     data-testid="research-action-confirm"

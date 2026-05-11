@@ -2659,6 +2659,29 @@ header h1::before {
   gap: var(--sp-4);
   min-width: 0;
 }
+@media (max-width: 960px) {
+  .research-center__layout {
+    grid-template-columns: 1fr;
+  }
+  .research-center__detail-grid {
+    grid-template-columns: 1fr;
+  }
+  .research-center__meta-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+@media (max-width: 640px) {
+  .research-center__action-row {
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    padding-bottom: 4px;
+    -webkit-overflow-scrolling: touch;
+  }
+  .research-center__action-row > button {
+    flex-shrink: 0;
+    white-space: nowrap;
+  }
+}
 .research-center__sidebar,
 .research-center__detail,
 .research-center__detail-stack {
@@ -2804,8 +2827,23 @@ header h1::before {
   color: #fff;
 }
 .research-center__secondary-btn {
-  background: color-mix(in srgb, var(--brand) 10%, var(--surface));
-  color: var(--fg);
+  background: color-mix(in srgb, var(--brand) 14%, var(--surface));
+  color: var(--brand);
+  border-color: color-mix(in srgb, var(--brand) 45%, var(--border));
+  font-weight: 500;
+}
+.research-center__confirm-btn {
+  background: linear-gradient(135deg, #059669, #10b981);
+  color: #fff;
+  border-color: #059669;
+  font-weight: 500;
+}
+.research-center__confirm-btn:hover:not(:disabled) {
+  background: linear-gradient(135deg, #047857, #059669);
+}
+.research-center__confirm-btn:disabled {
+  opacity: 0.56;
+  cursor: not-allowed;
 }
 .research-center__ghost-btn {
   background: transparent;
@@ -2819,9 +2857,16 @@ header h1::before {
 .research-center__primary-btn:disabled,
 .research-center__secondary-btn:disabled,
 .research-center__ghost-btn:disabled,
-.research-center__danger-btn:disabled {
+.research-center__danger-btn:disabled,
+.research-center__confirm-btn:disabled {
   opacity: 0.56;
   cursor: not-allowed;
+}
+.research-center__primary-btn:hover:not(:disabled) {
+  filter: brightness(1.06);
+}
+.research-center__ghost-btn:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--surface-2) 70%, transparent);
 }
 .research-center__plan h4,
 .research-center__subsection h4 {
