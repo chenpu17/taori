@@ -399,6 +399,7 @@ export function ResearchCenter(): JSX.Element {
                     key={session.id}
                     type="button"
                     className={`research-center__session-row ${session.id === selectedId ? 'active' : ''}`}
+                    data-status={session.status}
                     onClick={() => setSelectedId(session.id)}
                     data-testid={`research-session-row-${session.id}`}
                   >
