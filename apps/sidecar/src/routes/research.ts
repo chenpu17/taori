@@ -64,31 +64,29 @@ export function registerResearchRoute(app: FastifyInstance, deps: ResearchRouteD
         message: `Conversation ${body.conversation_id} not found`,
       });
     }
-    // Create session with an immediate template plan so the UI can show the
-    // confirm button right away. Async AI planning will update the plan if it
-    // produces something better.
+    // Create session with no plan yet — AI planning runs async.
+    // The UI shows "AI 正在规划中…" until a plan arrives.
     const session = repo.create(body);
-    const templatePlan = buildResearchPlan({
-      title: session.title,
-      objective: session.objective,
-      outputKind: session.output_kind,
-      budgetMode: session.budget_mode,
-      constraints: session.constraints,
-    });
-    repo.update(session.id, { plan: templatePlan, stage: 'planning' });
-    // Kick off async AI planning — fire-and-forget; overwrites plan when done
+    repo.update(session.id, { stage: 'planning' });
+    // Kick off async AI planning; fall back to template plan if AI fails.
     setImmediate(() => {
+      const fallbackPlan = () => buildResearchPlan({
+        title: session.title,
+        objective: session.objective,
+        outputKind: session.output_kind,
+        budgetMode: session.budget_mode,
+        constraints: session.constraints,
+      });
       void generateAIPlan(session, plannerDeps).then((plan) => {
-        if (plan) {
-          repo.update(session.id, { plan });
-        }
+        repo.update(session.id, { plan: plan ?? fallbackPlan() });
       }).catch((err: unknown) => {
         app.log.error({ err }, 'Background AI planning failed');
+        repo.update(session.id, { plan: fallbackPlan() });
       });
     });
-    const withPlan = repo.getDetail(session.id)?.session ?? session;
+    const withSession = repo.getDetail(session.id)?.session ?? session;
     reply.code(201);
-    return withPlan;
+    return withSession;
   });
 
   app.get<{ Params: { id: string } }>('/v1/research/sessions/:id', async (req) => {

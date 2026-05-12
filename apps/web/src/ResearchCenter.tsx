@@ -313,16 +313,16 @@ export function ResearchCenter({
     [isControlled, setSelectedId],
   );
 
-  const loadDetail = useCallback(async (id: string) => {
-    setDetailLoading(true);
-    setError(null);
+  const loadDetail = useCallback(async (id: string, silent = false) => {
+    if (!silent) setDetailLoading(true);
+    if (!silent) setError(null);
     try {
       const res = await api.getResearchSessionDetail(id);
       setDetail(res);
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      if (!silent) setError(e instanceof Error ? e.message : String(e));
     } finally {
-      setDetailLoading(false);
+      if (!silent) setDetailLoading(false);
     }
   }, []);
 
@@ -356,16 +356,16 @@ export function ResearchCenter({
 
   useEffect(() => {
     if (!selectedId) return;
-    // Poll while running (tasks in progress) or while still in reviewing state
-    // (AI plan might arrive and update the plan after initial template was set)
+    // Poll while running (tasks in progress) or while reviewing without a plan
+    // yet (waiting for async AI planning to finish).
     const isRunning = detail?.session.status === 'running';
-    const isReviewing = detail?.session.status === 'reviewing';
-    if (!isRunning && !isReviewing) return;
+    const isReviewingNoPlan = detail?.session.status === 'reviewing' && !detail.session.plan;
+    if (!isRunning && !isReviewingNoPlan) return;
     const handle = window.setInterval(() => {
-      void loadDetail(selectedId);
+      void loadDetail(selectedId, true); // silent: no flicker or scroll reset
     }, 2_000);
     return () => window.clearInterval(handle);
-  }, [detail?.session.status, loadDetail, selectedId]);
+  }, [detail?.session.plan, detail?.session.status, loadDetail, selectedId]);
 
   const selectedSession = useMemo(
     () => sessions?.find((item) => item.id === selectedId) ?? null,

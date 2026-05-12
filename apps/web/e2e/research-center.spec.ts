@@ -62,7 +62,7 @@ test('research center supports chatlike plan preview, lifecycle, and export', as
   );
   await expect(page.getByTestId('research-plan-preview')).toBeVisible({ timeout: 10_000 });
   await expect(page.getByTestId('research-center')).toContainText('待确认');
-  await expect(page.getByTestId('research-action-confirm')).toBeVisible();
+  await expect(page.getByTestId('research-action-confirm')).toBeVisible({ timeout: 30_000 });
   await expect(page.getByTestId(/sidebar-research-row-rs_/).first()).toBeVisible();
   const previewBox = await page.getByTestId('research-plan-preview').boundingBox();
   const dockBox = await page.getByTestId('research-followup-dock').boundingBox();
