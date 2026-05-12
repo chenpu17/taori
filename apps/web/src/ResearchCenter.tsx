@@ -694,73 +694,77 @@ export function ResearchCenter({
     </details>
   );
 
+  const renderComposerControls = () => (
+    <div className="research-center__composer-controls">
+      <span className="research-center__pill research-center__pill--active">深度研究</span>
+      <label className="research-center__inline-select">
+        <span>产出</span>
+        <select
+          value={outputKind}
+          onChange={(e) => setOutputKind(e.target.value as ResearchOutputKind)}
+          data-testid="research-input-output-kind"
+        >
+          {Object.entries(OUTPUT_KIND_LABELS).map(([key, label]) => (
+            <option key={key} value={key}>
+              {label}
+            </option>
+          ))}
+        </select>
+      </label>
+      <label className="research-center__inline-select">
+        <span>深度</span>
+        <select
+          value={budgetMode}
+          onChange={(e) => setBudgetMode(e.target.value as ResearchBudgetMode)}
+          data-testid="research-input-budget-mode"
+        >
+          {Object.entries(BUDGET_MODE_LABELS).map(([key, label]) => (
+            <option key={key} value={key}>
+              {label}
+            </option>
+          ))}
+        </select>
+      </label>
+      {availableModels.length > 0 ? (
+        <label className="research-center__inline-select">
+          <span>模型</span>
+          <select
+            value={preferredModelId}
+            onChange={(e) => setPreferredModelId(e.target.value)}
+            data-testid="research-input-model"
+          >
+            <option value="">系统默认</option>
+            {availableModels.map((m) => (
+              <option key={m.id} value={m.id}>
+                {m.display_name}
+              </option>
+            ))}
+          </select>
+        </label>
+      ) : null}
+      {availableSearchTools.length > 1 ? (
+        <label className="research-center__inline-select">
+          <span>搜索</span>
+          <select
+            value={preferredSearchTool}
+            onChange={(e) => setPreferredSearchTool(e.target.value)}
+            data-testid="research-input-search-tool"
+          >
+            <option value="">系统默认</option>
+            {availableSearchTools.map((t) => (
+              <option key={t.name} value={t.name}>
+                {t.name.replace('builtin.', '').replace(/_/g, ' ')}
+              </option>
+            ))}
+          </select>
+        </label>
+      ) : null}
+    </div>
+  );
+
   const renderComposerFooter = (buttonLabel: string) => (
     <div className="research-center__composer-footer">
-      <div className="research-center__composer-controls">
-        <span className="research-center__pill research-center__pill--active">深度研究</span>
-        <label className="research-center__inline-select">
-          <span>产出</span>
-          <select
-            value={outputKind}
-            onChange={(e) => setOutputKind(e.target.value as ResearchOutputKind)}
-            data-testid="research-input-output-kind"
-          >
-            {Object.entries(OUTPUT_KIND_LABELS).map(([key, label]) => (
-              <option key={key} value={key}>
-                {label}
-              </option>
-            ))}
-          </select>
-        </label>
-        <label className="research-center__inline-select">
-          <span>深度</span>
-          <select
-            value={budgetMode}
-            onChange={(e) => setBudgetMode(e.target.value as ResearchBudgetMode)}
-            data-testid="research-input-budget-mode"
-          >
-            {Object.entries(BUDGET_MODE_LABELS).map(([key, label]) => (
-              <option key={key} value={key}>
-                {label}
-              </option>
-            ))}
-          </select>
-        </label>
-        {availableModels.length > 0 ? (
-          <label className="research-center__inline-select">
-            <span>模型</span>
-            <select
-              value={preferredModelId}
-              onChange={(e) => setPreferredModelId(e.target.value)}
-              data-testid="research-input-model"
-            >
-              <option value="">系统默认</option>
-              {availableModels.map((m) => (
-                <option key={m.id} value={m.id}>
-                  {m.display_name}
-                </option>
-              ))}
-            </select>
-          </label>
-        ) : null}
-        {availableSearchTools.length > 1 ? (
-          <label className="research-center__inline-select">
-            <span>搜索</span>
-            <select
-              value={preferredSearchTool}
-              onChange={(e) => setPreferredSearchTool(e.target.value)}
-              data-testid="research-input-search-tool"
-            >
-              <option value="">系统默认</option>
-              {availableSearchTools.map((t) => (
-                <option key={t.name} value={t.name}>
-                  {t.name.replace('builtin.', '').replace(/_/g, ' ')}
-                </option>
-              ))}
-            </select>
-          </label>
-        ) : null}
-      </div>
+      {renderComposerControls()}
       <button
         type="button"
         className="research-center__primary-btn"
@@ -1180,7 +1184,7 @@ export function ResearchCenter({
                 返回起始页
               </button>
             </div>
-            <div className="research-center__composer-input-shell">
+            <div className="research-center__composer-input-shell research-center__composer-input-shell--with-action">
               <textarea
                 value={objective}
                 onChange={(e) => setObjectiveValue(e.target.value)}
@@ -1188,8 +1192,19 @@ export function ResearchCenter({
                 placeholder="继续追问，Taori 会基于当前结果生成一份新的研究计划…"
                 data-testid="research-input-objective"
               />
+              <button
+                type="button"
+                className="research-center__input-send-btn"
+                disabled={startDisabled}
+                onClick={() => void handleQuickStart()}
+                data-testid="research-quick-start"
+              >
+                {actionBusy === 'quick-start' ? '生成中…' : '生成新计划'}
+              </button>
             </div>
-            {renderComposerFooter('生成新计划')}
+            <div className="research-center__followup-controls">
+              {renderComposerControls()}
+            </div>
             {renderAdvancedOptions()}
           </section>
         </div>

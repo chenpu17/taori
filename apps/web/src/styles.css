@@ -3717,6 +3717,41 @@ header h1::before {
     inset 0 0 0 1px color-mix(in srgb, var(--brand) 14%, transparent),
     0 0 0 4px color-mix(in srgb, var(--brand) 10%, transparent);
 }
+.research-center__composer-input-shell--with-action {
+  position: relative;
+}
+.research-center__composer-input-shell--with-action textarea {
+  padding-bottom: 52px;
+}
+.research-center__input-send-btn {
+  position: absolute;
+  bottom: 14px;
+  right: 14px;
+  padding: 8px 18px;
+  border-radius: 999px;
+  border: 1px solid color-mix(in srgb, var(--brand) 60%, var(--border));
+  background: linear-gradient(135deg, color-mix(in srgb, var(--brand) 88%, white 12%), color-mix(in srgb, var(--brand-2) 82%, white 18%));
+  color: #fff;
+  font: inherit;
+  font-size: 14px;
+  font-weight: 500;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.research-center__input-send-btn:disabled {
+  opacity: 0.56;
+  cursor: not-allowed;
+}
+.research-center__input-send-btn:hover:not(:disabled) {
+  filter: brightness(1.06);
+}
+.research-center__followup-controls {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+  padding: 2px 2px;
+}
 .research-center__composer-card textarea,
 .research-center__composer-dock textarea {
   width: 100%;
