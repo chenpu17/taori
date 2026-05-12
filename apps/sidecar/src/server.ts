@@ -632,7 +632,15 @@ export function buildServer(args: BuildServerArgs): FastifyInstance {
   registerTemplatesPersonasRoute(app, argsWithBus);
   registerWorkflowRecipesRoute(app, argsWithBus);
   const researchRepo = new ResearchRepo(args.db);
-  const researchRunner = new ResearchRunner({ repo: researchRepo, bus, memories, log: app.log });
+  const researchRunner = new ResearchRunner({
+    repo: researchRepo,
+    bus,
+    memories,
+    modelsRepo: new ModelsRepo(args.db),
+    providersRepo: new ProvidersRepo(args.db),
+    keystore: args.keystore,
+    log: app.log,
+  });
   registerResearchRoute(app, { ...argsWithBus, researchRunner });
 
   registerToolsRoute(app, { bus, memories, costs });

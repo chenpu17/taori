@@ -22,6 +22,7 @@
  * session.budget_spent_usd cumulatively so the UI doesn't need to join.
  */
 
+import { generateText } from 'ai';
 import type {
   ResearchClaim,
   ResearchPlan,
@@ -30,8 +31,10 @@ import type {
   ResearchTask,
 } from '@taori/shared';
 import type { CapabilityBus } from '../bus/index.js';
-import type { MemoriesRepo } from '../db/repos/index.js';
+import type { MemoriesRepo, ModelsRepo, ProvidersRepo } from '../db/repos/index.js';
 import type { ResearchRepo } from '../db/repos/index.js';
+import type { KeyStore } from '../keystore.js';
+import { createChatModel } from '../providers/chat-model.js';
 import { pickPreferredSearchToolName } from '../search/tool-selection.js';
 
 const SEARCH_RESULTS_PER_TASK = 5;
@@ -43,6 +46,9 @@ export interface ResearchRunnerDeps {
   repo: ResearchRepo;
   bus: CapabilityBus;
   memories?: MemoriesRepo;
+  modelsRepo?: ModelsRepo;
+  providersRepo?: ProvidersRepo;
+  keystore?: KeyStore;
   log?: { info?: (msg: unknown, extra?: unknown) => void; warn?: (msg: unknown, extra?: unknown) => void; error?: (msg: unknown, extra?: unknown) => void };
 }
 
@@ -313,6 +319,40 @@ export class ResearchRunner {
     const plan = session.plan;
     if (!plan) return;
     const sources = this.deps.repo.listSources(session.id);
+
+    // Attempt LLM synthesis when model deps are available
+    if (this.deps.modelsRepo && this.deps.providersRepo) {
+      try {
+        const picked = await pickSynthesisModel(
+          session,
+          this.deps.modelsRepo,
+          this.deps.providersRepo,
+          this.deps.keystore ?? null,
+          this.deps.memories ?? null,
+        );
+        if (picked) {
+          const { model: chatModel } = createChatModel({
+            provider: picked.provider,
+            model: picked.model,
+            apiKey: picked.apiKey,
+          });
+          const prompt = buildSynthesisPrompt(session, plan, sources);
+          const { text } = await generateText({
+            model: chatModel,
+            prompt,
+            maxTokens: 4096,
+          });
+          if (text && text.trim().length > 100) {
+            this.deps.repo.update(session.id, { draft_markdown: text.trim() });
+            return;
+          }
+        }
+      } catch (err) {
+        this.deps.log?.warn?.({ err, sessionId: session.id }, 'research.llm_synthesis_failed');
+      }
+    }
+
+    // Fallback: template-based draft
     const draft = buildDraft(session, plan, sources);
     this.deps.repo.update(session.id, { draft_markdown: draft });
   }
@@ -345,6 +385,101 @@ export class ResearchRunner {
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
+
+// ─── LLM synthesis helpers ────────────────────────────────────────────────────
+
+async function pickSynthesisModel(
+  session: ResearchSession,
+  modelsRepo: ModelsRepo,
+  providersRepo: ProvidersRepo,
+  keystore: KeyStore | null,
+  memories: MemoriesRepo | null,
+): Promise<{ model: import('@taori/shared').Model; provider: import('@taori/shared').Provider; apiKey: string } | null> {
+  // Priority: per-session override → memories default → first available chat model
+  const candidateId = session.preferred_model_id
+    ?? (memories?.getEffective(null, 'default_model_id') ?? null);
+
+  let model = candidateId ? modelsRepo.get(candidateId) : null;
+  if (!model?.enabled || !model.provider_id) {
+    model = modelsRepo.defaultFor('chat') ?? modelsRepo.pickCheapestActive('chat', '__none__');
+  }
+  if (!model?.provider_id) return null;
+
+  const provider = providersRepo.get(model.provider_id);
+  if (!provider) return null;
+
+  let apiKey = '';
+  if (provider.api_key_ref && keystore) {
+    try {
+      apiKey = (await keystore.read(provider.api_key_ref)) ?? '';
+    } catch {
+      // key unavailable
+    }
+  }
+
+  return { model, provider, apiKey };
+}
+
+function buildSynthesisPrompt(
+  session: ResearchSession,
+  plan: ResearchPlan,
+  sources: ResearchSource[],
+): string {
+  const kindLabel: Record<string, string> = {
+    report: '综合研究报告',
+    brief: '简报（摘要 + 关键事实 + 风险 + 下一步行动）',
+    comparison: '对比分析（各方案横向对比 + 建议）',
+    decision: '决策建议（结论 + 依据 + 可选路径 + 执行建议）',
+  };
+  const structureGuide: Record<string, string> = {
+    report: '## 核心结论\n## 详细分析\n## 风险与不确定性\n## 建议与后续步骤',
+    brief: '## 摘要\n## 关键事实\n## 风险\n## 下一步行动',
+    comparison: '## 结论\n## 对比维度\n## 各方案分析\n## 风险\n## 选择建议',
+    decision: '## 结论（推荐方向）\n## 决策依据\n## 可选路径\n## 风险与前提\n## 执行建议',
+  };
+  const kind = plan.output_kind ?? 'report';
+
+  const questionsText = plan.key_questions.length > 0
+    ? plan.key_questions.map((q, i) => `${i + 1}. ${q.question}`).join('\n')
+    : '（无预设问题，请依据收集资料自行分析）';
+
+  const sourcesText = sources.map((s, i) => {
+    const title = (s.title ?? s.locator).slice(0, 200);
+    const snippet = (s.snippet ?? '').slice(0, 600).replace(/\s+/g, ' ');
+    return `[${i + 1}] 标题：${title}\n    来源：${s.locator}\n    摘要：${snippet || '（无摘要）'}`;
+  }).join('\n\n');
+
+  return `你是一名专业研究分析师。请基于以下研究目标和收集到的资料，撰写一份完整的研究报告。
+
+【研究主题】${session.title}
+【研究目标】${session.objective}
+【输出格式】${kindLabel[kind] ?? kindLabel.report}
+【研究计划摘要】${plan.summary}
+
+【关键研究问题】
+${questionsText}
+
+【收集的资料（共 ${sources.length} 条）】
+${sourcesText}
+
+---
+
+请严格按照以下结构撰写 Markdown 报告（中文），结构：
+
+# ${session.title}
+
+${structureGuide[kind] ?? structureGuide.report}
+
+## 参考来源
+
+要求：
+- 每个论断需标注引用来源，格式为 [[序号]](来源URL)，例如 [[1]](https://example.com)
+- 内容详实、逻辑严谨，避免泛泛而谈
+- 如有信息不足或相互矛盾，请在报告末尾注明
+- 不要重复罗列资料原文，而是基于资料进行分析、归纳和判断`;
+}
+
+
 
 function scoreCredibility(url: string): number {
   try {

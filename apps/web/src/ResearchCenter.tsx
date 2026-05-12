@@ -588,7 +588,7 @@ export function ResearchCenter({
     return '研究线索会在执行中持续累积。';
   }, [detail]);
 
-  const visibleSources = detail?.sources.slice(0, 4) ?? [];
+  const visibleSources = detail?.sources ?? [];
   const hasCollectedEvidence = (detail?.sources.length ?? 0) > 0;
   const showEvidencePanel =
     Boolean(detail?.session.plan) || visibleSources.length > 0;
@@ -1015,13 +1015,8 @@ export function ResearchCenter({
                               rel="noreferrer noopener"
                               className="research-center__source-title"
                             >
-                              {source.title ?? source.locator}
+                              {(source.title ?? source.locator).slice(0, 80)}
                             </a>
-                            {source.snippet ? (
-                              <p className="research-center__source-snippet">
-                                {source.snippet.slice(0, 160)}
-                              </p>
-                            ) : null}
                             <div className="research-center__source-meta">
                               <span>{safeHostname(source.locator)}</span>
                             </div>
