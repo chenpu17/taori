@@ -2,6 +2,11 @@ import { tool } from 'ai';
 import { z } from 'zod';
 import { safeAiToolName, type CapabilityBus } from '../bus/index.js';
 import type { FilesRepo } from '../db/repos/index.js';
+import {
+  applyPreferredSearchToolSelection as applyPreferredSearchToolSelectionFromBus,
+  isSearchToolLike as isSearchToolLikeFromBus,
+  pickPreferredSearchToolName as pickPreferredSearchToolNameFromBus,
+} from '../search/tool-selection.js';
 
 export interface UpstreamToolContext {
   messageId: string;
@@ -50,37 +55,18 @@ export interface UpstreamToolCatalog {
 }
 
 export function isSearchToolLike(name: string, description?: string | null): boolean {
-  if (name === 'builtin.web_search') return true;
-  if (name === 'builtin.file_search') return false;
-  const haystack = `${name} ${description ?? ''}`.toLowerCase();
-  return /(^|[\s._-])(search|websearch|retrieval)([\s._-]|$)/.test(haystack) || /搜索|检索/.test(haystack);
+  return isSearchToolLikeFromBus(name, description);
 }
 
 export function pickPreferredSearchToolName(ctx: UpstreamToolContext, names: string[]): string | null {
-  const candidates = names.filter((name) => {
-    const descriptor = ctx.bus?.get(name);
-    return descriptor ? isSearchToolLike(descriptor.name, descriptor.description) : false;
-  });
-  if (candidates.length === 0) return null;
-  if (ctx.defaultSearchToolName && candidates.includes(ctx.defaultSearchToolName)) {
-    return ctx.defaultSearchToolName;
-  }
-  if (candidates.includes('builtin.web_search')) {
-    return 'builtin.web_search';
-  }
-  return candidates[0] ?? null;
+  return pickPreferredSearchToolNameFromBus(ctx.bus, ctx.defaultSearchToolName, names);
 }
 
 export function applyPreferredSearchToolSelection(
   ctx: UpstreamToolContext,
   names: string[],
 ): string[] {
-  const selected = pickPreferredSearchToolName(ctx, names);
-  if (!selected) return names;
-  return names.filter((name) => {
-    const descriptor = ctx.bus?.get(name);
-    return !descriptor || !isSearchToolLike(descriptor.name, descriptor.description) || name === selected;
-  });
+  return applyPreferredSearchToolSelectionFromBus(ctx.bus, ctx.defaultSearchToolName, names);
 }
 
 export function withCapabilityToolInstruction(

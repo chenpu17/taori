@@ -24,6 +24,7 @@ import type {
   ModelHealthRow,
   Persona,
   PromptTemplate,
+  ResearchSession,
   Provider,
   RecoverRunRequest,
   RunEvent,
@@ -919,25 +920,10 @@ function Workspace({
   const [cmdPaletteOpen, setCmdPaletteOpen] = useState<boolean>(false);
   const [roundtableLaunchSeq, setRoundtableLaunchSeq] = useState(0);
   const [timelineFocus, setTimelineFocus] = useState<RunTimelineFocusTarget | null>(null);
-
-  // 2026-05 UI shell: workspace mode (chat vs deep research).
-  // Stored in localStorage so user's last view is restored on reload.
-  const [workspaceMode, setWorkspaceMode] = useState<'chat' | 'research'>(() => {
-    if (typeof window === 'undefined') return 'chat';
-    try {
-      const raw = window.localStorage.getItem('taori.workspace.mode');
-      return raw === 'research' ? 'research' : 'chat';
-    } catch {
-      return 'chat';
-    }
-  });
-  useEffect(() => {
-    try {
-      window.localStorage.setItem('taori.workspace.mode', workspaceMode);
-    } catch {
-      // ignore
-    }
-  }, [workspaceMode]);
+  const [researchSessions, setResearchSessions] = useState<ResearchSession[]>([]);
+  const [activeResearchId, setActiveResearchId] = useState<string | null>(null);
+  const [activeSurface, setActiveSurface] = useState<'chat' | 'research'>('chat');
+  const [researchObjectiveDraft, setResearchObjectiveDraft] = useState('');
 
   useEffect(() => {
     const t = setTimeout(() => setDebouncedQuery(searchQuery), 200);
@@ -1046,23 +1032,38 @@ function Workspace({
     }
   }, [debouncedQuery]);
 
+  const refreshResearchSessions = useCallback(async () => {
+    try {
+      const { research_sessions } = await api.listResearchSessions();
+      setResearchSessions(research_sessions);
+    } catch {
+      /* non-fatal */
+    }
+  }, []);
+
   useEffect(() => {
     void refreshConversations();
   }, [refreshConversations]);
 
   useEffect(() => {
+    void refreshResearchSessions();
+  }, [refreshResearchSessions]);
+
+  useEffect(() => {
     const onDataChanged = (): void => {
       void refreshConversations();
+      void refreshResearchSessions();
     };
     window.addEventListener('taori:data-changed', onDataChanged);
     return () => window.removeEventListener('taori:data-changed', onDataChanged);
-  }, [refreshConversations]);
+  }, [refreshConversations, refreshResearchSessions]);
 
   useEffect(() => {
     if (cmdPaletteOpen) {
       void refreshConversations();
+      void refreshResearchSessions();
     }
-  }, [cmdPaletteOpen, refreshConversations]);
+  }, [cmdPaletteOpen, refreshConversations, refreshResearchSessions]);
 
   // B1 — Global Cmd+K / Ctrl+K listener
   useEffect(() => {
@@ -1077,6 +1078,9 @@ function Workspace({
   }, []);
 
   const onNewChat = useCallback((): void => {
+    setActiveSurface('chat');
+    setActiveResearchId(null);
+    setResearchObjectiveDraft('');
     setActiveConvId(null);
     setChatKey((n) => n + 1);
   }, []);
@@ -1120,11 +1124,18 @@ function Workspace({
   }, [onNewChat, onOpenHelp, onOpenSettings]);
 
   const onSelectConv = (id: string): void => {
-    if (id === activeConvId) return;
+    if (id === activeConvId && activeSurface === 'chat') return;
+    setActiveSurface('chat');
     setTimelineFocus(null);
     setActiveConvId(id);
     setChatKey((n) => n + 1);
   };
+
+  const onSelectResearch = useCallback((id: string): void => {
+    setActiveSurface('research');
+    setActiveResearchId(id);
+    setResearchObjectiveDraft('');
+  }, []);
 
   useEffect(() => {
     const onFocusRun = (event: Event): void => {
@@ -1253,14 +1264,16 @@ function Workspace({
   );
 
   return (
-    <div className="workspace" data-workspace-mode={workspaceMode}>
+    <div className="workspace" data-workspace-mode={activeSurface}>
       <Sidebar
-        workspaceMode={workspaceMode}
-        onWorkspaceModeChange={setWorkspaceMode}
         conversations={conversations}
+        researchSessions={researchSessions}
         activeId={activeConvId}
+        activeResearchId={activeResearchId}
+        activeSurface={activeSurface}
         onNew={onNewChat}
         onSelect={onSelectConv}
+        onSelectResearch={onSelectResearch}
         onDelete={(id) => void onDeleteConv(id)}
         onRename={(id, t) => void onRenameConv(id, t)}
         searchQuery={searchQuery}
@@ -1277,8 +1290,14 @@ function Workspace({
         onBatchDelete={() => void onBatchDelete()}
       />
       <main className="workspace-main">
-        {workspaceMode === 'research' ? (
-          <ResearchCenter />
+        {activeSurface === 'research' ? (
+          <ResearchCenter
+            selectedId={activeResearchId}
+            onSelectedIdChange={(id) => setActiveResearchId(id)}
+            objectiveDraft={researchObjectiveDraft}
+            onObjectiveDraftChange={setResearchObjectiveDraft}
+            onSessionsChanged={refreshResearchSessions}
+          />
         ) : (
           <ChatPanel
             key={chatKey}
@@ -1305,7 +1324,14 @@ function Workspace({
             roundtableLaunchSeq={roundtableLaunchSeq}
             timelineFocus={timelineFocus}
             onTimelineFocusConsumed={() => setTimelineFocus(null)}
+            onOpenResearch={(objective) => {
+              setActiveSurface('research');
+              setActiveResearchId(null);
+              setResearchObjectiveDraft(objective);
+              void refreshResearchSessions();
+            }}
             onLoopbackToConversation={(id) => {
+              setActiveSurface('chat');
               setActiveConvId(id);
               setTimelineFocus(null);
               void refreshConversations();
@@ -1378,6 +1404,7 @@ function parseTags(raw: string | null): string[] {
 
 interface ConvRowCallbacks {
   onSelect: (id: string) => void;
+  onSelectResearch: (id: string) => void;
   onDelete: (id: string) => void;
   onRename: (id: string, current: string | null) => void;
   onTogglePin: (id: string, next: boolean) => void;
@@ -1385,12 +1412,18 @@ interface ConvRowCallbacks {
   batchMode: boolean;
   selectedIds: Set<string>;
   onToggleSelected: (id: string) => void;
+  activeSurface: 'chat' | 'research';
+  activeResearchId: string | null;
   // tag editor state lifted into Sidebar so only one row edits at a time.
   editingTagsForId: string | null;
   setEditingTagsForId: (id: string | null) => void;
   tagDraft: string;
   setTagDraft: (s: string) => void;
 }
+
+type SidebarHistoryItem =
+  | (ConversationSummary & { kind: 'conversation'; key: string })
+  | (ResearchSession & { kind: 'research'; key: string });
 
 function escapeRegExp(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -1412,40 +1445,67 @@ function renderHighlightedText(text: string, query: string): JSX.Element | strin
   );
 }
 
-function renderConvRow(
-  c: ConversationSummary,
+function researchStatusLabel(status: ResearchSession['status']): string {
+  if (status === 'running') return '研究中';
+  if (status === 'completed') return '已完成';
+  if (status === 'paused') return '已暂停';
+  if (status === 'failed') return '失败';
+  if (status === 'cancelled') return '已取消';
+  if (status === 'reviewing') return '待确认';
+  return '草稿';
+}
+
+function researchStageLabel(stage: ResearchSession['stage']): string {
+  if (stage === 'scoping') return '澄清';
+  if (stage === 'planning') return '计划';
+  if (stage === 'searching') return '检索';
+  if (stage === 'synthesizing') return '整理';
+  if (stage === 'drafting') return '草稿';
+  if (stage === 'verifying') return '校验';
+  return '完成';
+}
+
+function renderHistoryRow(
+  item: SidebarHistoryItem,
   active: boolean,
   searchQuery: string,
   cb: ConvRowCallbacks,
 ): JSX.Element {
-  const tags = parseTags(c.tags);
-  const isEditingTags = cb.editingTagsForId === c.id;
-  const checked = cb.selectedIds.has(c.id);
-  const title = c.title?.trim() || '未命名对话';
-  const metaType = conversationTypeLabel(c.type);
-  const metaTime = conversationTimeLabel(c.updated_at);
+  const isConversation = item.kind === 'conversation';
+  const tags = isConversation ? parseTags(item.tags) : [];
+  const isEditingTags = isConversation && cb.editingTagsForId === item.id;
+  const checked = isConversation && cb.selectedIds.has(item.id);
+  const title = item.title?.trim() || (isConversation ? '未命名对话' : '未命名研究');
+  const metaType = isConversation ? conversationTypeLabel(item.type) : '深度研究';
+  const metaTime = conversationTimeLabel(item.updated_at);
+  const metaSecondary = isConversation
+    ? metaTime
+    : `${researchStatusLabel(item.status)} · ${researchStageLabel(item.stage)}`;
+  const testId = isConversation ? 'conv-item' : `sidebar-research-row-${item.id}`;
   return (
     <li
-      key={c.id}
-      className={`conv-item${active ? ' active' : ''}${c.pinned ? ' pinned' : ''}`}
-      data-testid="conv-item"
-      data-conv-id={c.id}
-      data-conv-pinned={c.pinned ? 'true' : 'false'}
+      key={item.key}
+      className={`conv-item${active ? ' active' : ''}${isConversation && item.pinned ? ' pinned' : ''}${isConversation ? '' : ' conv-item--research'}`}
+      data-testid={testId}
+      data-conv-id={item.id}
+      data-conv-pinned={isConversation && item.pinned ? 'true' : 'false'}
+      data-history-kind={item.kind}
       aria-current={active ? 'true' : undefined}
       onClick={(e) => {
         const target = e.target as HTMLElement;
-        if (target.closest('.conv-actions, input, .conv-tags')) return;
-        if (cb.batchMode) cb.onToggleSelected(c.id);
-        else cb.onSelect(c.id);
+        if (isConversation && target.closest('.conv-actions, input, .conv-tags')) return;
+        if (isConversation && cb.batchMode) cb.onToggleSelected(item.id);
+        else if (isConversation) cb.onSelect(item.id);
+        else cb.onSelectResearch(item.id);
       }}
     >
-      {cb.batchMode && (
+      {isConversation && cb.batchMode && (
         <input
           type="checkbox"
           className="conv-select"
           data-testid="conv-select"
           checked={checked}
-          onChange={() => cb.onToggleSelected(c.id)}
+          onChange={() => cb.onToggleSelected(item.id)}
           aria-label="选择对话"
         />
       )}
@@ -1453,56 +1513,61 @@ function renderConvRow(
         className="conv-title"
         title={title}
       >
-        {c.pinned ? <span className="conv-title-prefix" aria-hidden="true">📌</span> : null}
-        <span className={`conv-title-text${c.title?.trim() ? '' : ' is-placeholder'}`}>
+        {isConversation && item.pinned ? <span className="conv-title-prefix" aria-hidden="true">📌</span> : null}
+        {!isConversation ? <span className="conv-title-prefix conv-title-prefix--research" aria-hidden="true">🔎</span> : null}
+        <span className={`conv-title-text${item.title?.trim() ? '' : ' is-placeholder'}`}>
           {renderHighlightedText(title, searchQuery)}
         </span>
       </span>
-      <span className="conv-actions" onClick={(e) => e.stopPropagation()}>
-        <button
-          type="button"
-          onClick={() => cb.onTogglePin(c.id, !c.pinned)}
-          aria-label={c.pinned ? 'unpin' : 'pin'}
-          data-testid="conv-pin"
-          title={c.pinned ? '取消置顶' : '置顶'}
-        >
-          {c.pinned ? '★' : '☆'}
-        </button>
-        <button
-          type="button"
-          onClick={() => {
-            cb.setEditingTagsForId(c.id);
-            cb.setTagDraft(tags.join(', '));
-          }}
-          aria-label="tags"
-          data-testid="conv-tag-edit"
-          title="编辑标签"
-        >
-          🏷
-        </button>
-        <button
-          type="button"
-          onClick={() => cb.onRename(c.id, c.title)}
-          aria-label="rename"
-          data-testid="conv-rename"
-        >
-          ✎
-        </button>
-        <button
-          type="button"
-          onClick={() => cb.onDelete(c.id)}
-          aria-label="delete"
-          data-testid="conv-delete"
-        >
-          🗑
-        </button>
-      </span>
+      {isConversation ? (
+        <span className="conv-actions" onClick={(e) => e.stopPropagation()}>
+          <button
+            type="button"
+            onClick={() => cb.onTogglePin(item.id, !item.pinned)}
+            aria-label={item.pinned ? 'unpin' : 'pin'}
+            data-testid="conv-pin"
+            title={item.pinned ? '取消置顶' : '置顶'}
+          >
+            {item.pinned ? '★' : '☆'}
+          </button>
+          <button
+            type="button"
+            onClick={() => {
+              cb.setEditingTagsForId(item.id);
+              cb.setTagDraft(tags.join(', '));
+            }}
+            aria-label="tags"
+            data-testid="conv-tag-edit"
+            title="编辑标签"
+          >
+            🏷
+          </button>
+          <button
+            type="button"
+            onClick={() => cb.onRename(item.id, item.title)}
+            aria-label="rename"
+            data-testid="conv-rename"
+          >
+            ✎
+          </button>
+          <button
+            type="button"
+            onClick={() => cb.onDelete(item.id)}
+            aria-label="delete"
+            data-testid="conv-delete"
+          >
+            🗑
+          </button>
+        </span>
+      ) : null}
       <div className="conv-meta" aria-hidden="true">
-        <span className={`conv-meta-type${c.type === 'roundtable' ? ' is-roundtable' : ''}`}>{metaType}</span>
+        <span className={`conv-meta-type${isConversation && item.type === 'roundtable' ? ' is-roundtable' : ''}${isConversation ? '' : ' is-research'}`}>{metaType}</span>
+        <span className="conv-meta-sep">·</span>
+        <span className="conv-meta-time">{metaSecondary}</span>
         <span className="conv-meta-sep">·</span>
         <span className="conv-meta-time">{metaTime}</span>
       </div>
-      {(tags.length > 0 || isEditingTags) && (
+      {isConversation && (tags.length > 0 || isEditingTags) && (
         <div className="conv-tags" data-testid="conv-tags">
           {!isEditingTags &&
             tags.map((t) => (
@@ -1527,7 +1592,7 @@ function renderConvRow(
                       .map((s) => s.trim())
                       .filter((s) => s.length > 0)
                       .slice(0, 3);
-                    cb.onSetTags(c.id, next);
+                    cb.onSetTags(item.id, next);
                     cb.setEditingTagsForId(null);
                   } else if (e.key === 'Escape') {
                     cb.setEditingTagsForId(null);
@@ -1543,7 +1608,7 @@ function renderConvRow(
                     .map((s) => s.trim())
                     .filter((s) => s.length > 0)
                     .slice(0, 3);
-                  cb.onSetTags(c.id, next);
+                  cb.onSetTags(item.id, next);
                   cb.setEditingTagsForId(null);
                 }}
               >
@@ -1564,27 +1629,34 @@ function renderConvRow(
   );
 }
 
-function renderGroupedConversations(
-  conversations: ConversationSummary[],
+function renderGroupedHistory(
+  items: SidebarHistoryItem[],
+  activeSurface: 'chat' | 'research',
   activeId: string | null,
+  activeResearchId: string | null,
   searchQuery: string,
   cb: ConvRowCallbacks,
 ): JSX.Element[] {
   const out: JSX.Element[] = [];
-  const pinned = conversations.filter((c) => c.pinned);
-  const rest = conversations.filter((c) => !c.pinned);
+  const pinned = items.filter((item) => item.kind === 'conversation' && item.pinned);
+  const rest = items.filter((item) => !(item.kind === 'conversation' && item.pinned));
   if (pinned.length > 0) {
     out.push(
       <li key="g:pinned" className="conv-group-head" aria-hidden="true">
         📌 已置顶
       </li>,
     );
-    for (const c of pinned) out.push(renderConvRow(c, c.id === activeId, searchQuery, cb));
+    for (const item of pinned) {
+      const active = item.kind === 'conversation'
+        ? activeSurface === 'chat' && item.id === activeId
+        : activeSurface === 'research' && item.id === activeResearchId;
+      out.push(renderHistoryRow(item, active, searchQuery, cb));
+    }
   }
   const now = Date.now();
   let curLabel: string | null = null;
-  for (const c of rest) {
-    const label = bucketLabel(c.updated_at, now);
+  for (const item of rest) {
+    const label = bucketLabel(item.updated_at, now);
     if (label !== curLabel) {
       curLabel = label;
       out.push(
@@ -1593,18 +1665,23 @@ function renderGroupedConversations(
         </li>,
       );
     }
-    out.push(renderConvRow(c, c.id === activeId, searchQuery, cb));
+    const active = item.kind === 'conversation'
+      ? activeSurface === 'chat' && item.id === activeId
+      : activeSurface === 'research' && item.id === activeResearchId;
+    out.push(renderHistoryRow(item, active, searchQuery, cb));
   }
   return out;
 }
 
 function Sidebar({
-  workspaceMode,
-  onWorkspaceModeChange,
   conversations,
+  researchSessions,
   activeId,
+  activeResearchId,
+  activeSurface,
   onNew,
   onSelect,
+  onSelectResearch,
   onDelete,
   onRename,
   searchQuery,
@@ -1620,12 +1697,14 @@ function Sidebar({
   onClearSelected,
   onBatchDelete,
 }: {
-  workspaceMode: 'chat' | 'research';
-  onWorkspaceModeChange: (mode: 'chat' | 'research') => void;
   conversations: ConversationSummary[];
+  researchSessions: ResearchSession[];
   activeId: string | null;
+  activeResearchId: string | null;
+  activeSurface: 'chat' | 'research';
   onNew: () => void;
   onSelect: (id: string) => void;
+  onSelectResearch: (id: string) => void;
   onDelete: (id: string) => void;
   onRename: (id: string, current: string | null) => void;
   searchQuery: string;
@@ -1643,10 +1722,45 @@ function Sidebar({
 }): JSX.Element {
   const [editingTagsForId, setEditingTagsForId] = useState<string | null>(null);
   const [tagDraft, setTagDraft] = useState<string>('');
+  const normalizedQuery = searchQuery.trim().toLocaleLowerCase();
+  const filteredResearchSessions = normalizedQuery
+    ? researchSessions.filter((session) => {
+        const haystack = `${session.title}\n${session.objective}`.toLocaleLowerCase();
+        return haystack.includes(normalizedQuery);
+      })
+    : researchSessions;
+  const historyItems = useMemo<SidebarHistoryItem[]>(
+    () =>
+      [
+        ...conversations.map((conversation) => ({
+          ...conversation,
+          kind: 'conversation' as const,
+          key: `conversation:${conversation.id}`,
+        })),
+        ...filteredResearchSessions.map((session) => ({
+          ...session,
+          kind: 'research' as const,
+          key: `research:${session.id}`,
+        })),
+      ].sort((a, b) => {
+        const aPinned = a.kind === 'conversation' && a.pinned ? 1 : 0;
+        const bPinned = b.kind === 'conversation' && b.pinned ? 1 : 0;
+        if (aPinned !== bPinned) return bPinned - aPinned;
+        return b.updated_at - a.updated_at;
+      }),
+    [conversations, filteredResearchSessions],
+  );
+  const visibleConversationIds = new Set(
+    historyItems
+      .filter((item): item is Extract<SidebarHistoryItem, { kind: 'conversation' }> => item.kind === 'conversation')
+      .map((item) => item.id),
+  );
   const allVisibleSelected =
-    conversations.length > 0 && conversations.every((conversation) => selectedIds.has(conversation.id));
+    visibleConversationIds.size > 0 &&
+    Array.from(visibleConversationIds).every((id) => selectedIds.has(id));
   const cb: ConvRowCallbacks = {
     onSelect,
+    onSelectResearch,
     onDelete,
     onRename,
     onTogglePin,
@@ -1654,106 +1768,74 @@ function Sidebar({
     batchMode,
     selectedIds,
     onToggleSelected,
+    activeSurface,
+    activeResearchId,
     editingTagsForId,
     setEditingTagsForId,
     tagDraft,
     setTagDraft,
   };
   return (
-    <aside className="sidebar" data-testid="sidebar" data-mode={workspaceMode}>
-      <nav className="workspace-tabs" data-testid="workspace-tabs" aria-label="工作区">
-        <button
-          type="button"
-          className={`workspace-tab ${workspaceMode === 'chat' ? 'active' : ''}`}
-          data-testid="workspace-tab-chat"
-          aria-pressed={workspaceMode === 'chat'}
-          onClick={() => onWorkspaceModeChange('chat')}
-        >
-          <span className="workspace-tab__icon" aria-hidden>💬</span>
-          <span>对话</span>
-        </button>
-        <button
-          type="button"
-          className={`workspace-tab ${workspaceMode === 'research' ? 'active' : ''}`}
-          data-testid="workspace-tab-research"
-          aria-pressed={workspaceMode === 'research'}
-          onClick={() => onWorkspaceModeChange('research')}
-        >
-          <span className="workspace-tab__icon" aria-hidden>🔎</span>
-          <span>深度研究</span>
-        </button>
-      </nav>
-      {workspaceMode === 'research' ? (
-        <div className="sidebar-research-hint" data-testid="sidebar-research-hint">
-          <p>正在使用 <strong>深度研究</strong>。</p>
-          <p className="sidebar-research-hint__sub">
-            研究任务列表与工作台位于右侧主面板。需要回到日常对话时，点击上方"对话"。
-          </p>
-        </div>
-      ) : (
-        <>
-          <button type="button" className="new-chat" onClick={onNew} data-testid="sidebar-new">
-            🆕 新对话
+    <aside className="sidebar" data-testid="sidebar" data-mode={activeSurface}>
+      <button type="button" className="new-chat" onClick={onNew} data-testid="sidebar-new">
+        🆕 新对话
+      </button>
+      <div className="sidebar-search">
+        <input
+          type="search"
+          className="conv-search"
+          data-testid="conv-search"
+          placeholder="搜索最近记录…"
+          value={searchQuery}
+          onChange={(e) => onSearchQueryChange(e.target.value)}
+        />
+      </div>
+      <div className="sidebar-batch-bar">
+        {batchMode ? (
+          <>
+            <span className="batch-count" data-testid="batch-count">
+              已选 {selectedIds.size}
+            </span>
+            <button
+              type="button"
+              data-testid="batch-select-all"
+              onClick={allVisibleSelected ? onClearSelected : onSelectAllVisible}
+              disabled={visibleConversationIds.size === 0}
+            >
+              {allVisibleSelected ? '清空选择' : '全选当前对话'}
+            </button>
+            <button
+              type="button"
+              data-testid="batch-delete"
+              onClick={onBatchDelete}
+              disabled={selectedIds.size === 0}
+            >
+              批量删除
+            </button>
+            <button type="button" data-testid="batch-cancel" onClick={onExitBatch}>
+              取消
+            </button>
+          </>
+        ) : (
+          <button
+            type="button"
+            data-testid="batch-enter"
+            className="batch-enter"
+            onClick={onEnterBatch}
+            disabled={visibleConversationIds.size === 0}
+            title="批量选择"
+          >
+            ☑ 批量
           </button>
-          <div className="sidebar-search">
-            <input
-              type="search"
-              className="conv-search"
-              data-testid="conv-search"
-              placeholder="搜索对话标题或内容…"
-              value={searchQuery}
-              onChange={(e) => onSearchQueryChange(e.target.value)}
-            />
-          </div>
-          <div className="sidebar-batch-bar">
-            {batchMode ? (
-              <>
-                <span className="batch-count" data-testid="batch-count">
-                  已选 {selectedIds.size}
-                </span>
-                <button
-                  type="button"
-                  data-testid="batch-select-all"
-                  onClick={allVisibleSelected ? onClearSelected : onSelectAllVisible}
-                  disabled={conversations.length === 0}
-                >
-                  {allVisibleSelected ? '清空选择' : '全选当前列表'}
-                </button>
-                <button
-                  type="button"
-                  data-testid="batch-delete"
-                  onClick={onBatchDelete}
-                  disabled={selectedIds.size === 0}
-                >
-                  批量删除
-                </button>
-                <button type="button" data-testid="batch-cancel" onClick={onExitBatch}>
-                  取消
-                </button>
-              </>
-            ) : (
-              <button
-                type="button"
-                data-testid="batch-enter"
-                className="batch-enter"
-                onClick={onEnterBatch}
-                disabled={conversations.length === 0}
-                title="批量选择"
-              >
-                ☑ 批量
-              </button>
-            )}
-          </div>
-        </>
-      )}
-      {workspaceMode === 'chat' && (
+        )}
+      </div>
       <ul className="conv-list" data-testid="conv-list">
-        {conversations.length === 0 ? (
+        {historyItems.length === 0 ? (
           <li className="conv-empty">
             {searchQuery ? (
               <EmptyState
-                title="没有匹配的对话"
-                hint="试试换个关键词，或清空搜索查看全部对话。"
+                title="没有匹配的记录"
+                hint="试试换个关键词，或清空搜索查看全部内容。"
                 icon="⌕"
                 compact
                 tone="muted"
@@ -1761,8 +1843,8 @@ function Sidebar({
               />
             ) : (
               <EmptyState
-                title="暂无对话"
-                hint="试试上方“新对话”开始第一轮交流。"
+                title="暂无对话记录"
+                hint="试试上方“新对话”开始第一轮交流，也可以从输入框直接发消息或发起深度研究。"
                 icon="💬"
                 compact
                 testId="conv-empty-default"
@@ -1770,10 +1852,9 @@ function Sidebar({
             )}
           </li>
         ) : (
-          renderGroupedConversations(conversations, activeId, searchQuery, cb)
+          renderGroupedHistory(historyItems, activeSurface, activeId, activeResearchId, searchQuery, cb)
         )}
       </ul>
-      )}
     </aside>
   );
 }
@@ -1793,6 +1874,7 @@ function ChatPanel({
   onOpenSettings,
   onOpenModelCenter,
   onOpenTools,
+  onOpenResearch,
   externalOverlayOpen,
   roundtableLaunchSeq,
   timelineFocus,
@@ -1813,6 +1895,7 @@ function ChatPanel({
   onOpenSettings: () => void;
   onOpenModelCenter: () => void;
   onOpenTools: () => void;
+  onOpenResearch: (objective: string) => void;
   externalOverlayOpen: boolean;
   roundtableLaunchSeq: number;
   timelineFocus: RunTimelineFocusTarget | null;
@@ -5062,20 +5145,28 @@ function ChatPanel({
         )}
         {!historyLoading && messages.length === 0 && (
           <div className="starter" data-testid="starter">
-            <h2 className="starter-title">准备开始一段新对话</h2>
-            <p className="starter-sub">挑一个起步提示，或直接在下方输入你的想法</p>
-            <div className="starter-grid">
+            <h2 className="starter-title">你今天在想些什么？</h2>
+            <p className="starter-sub">直接输入问题，或选择一个更轻量的起步方式。</p>
+            <div className="starter-actions">
+              <button
+                type="button"
+                className="starter-chip starter-chip--primary"
+                data-testid="starter-open-research"
+                onClick={() => onOpenResearch('')}
+              >
+                🔎 深度研究
+              </button>
               {STARTER_PROMPTS.map((p, i) => (
                 <button
                   key={p.title}
                   type="button"
-                  className="starter-card"
+                  className="starter-chip"
                   data-testid={`starter-prompt-${i}`}
                   onClick={() => setInput(p.text)}
+                  title={p.desc}
                 >
-                  <span className="starter-icon" aria-hidden="true">{p.icon}</span>
-                  <span className="starter-card-title">{p.title}</span>
-                  <span className="starter-card-desc">{p.desc}</span>
+                  <span aria-hidden="true">{p.icon}</span>
+                  <span>{p.title}</span>
                 </button>
               ))}
             </div>
@@ -5855,7 +5946,7 @@ function ChatPanel({
           name="prompt"
           value={input}
           onChange={handleInputChange}
-          placeholder="给 sidecar 发一条消息试试，或拖入图片…"
+          placeholder="有什么问题，尽管问"
           autoFocus
           data-testid="composer-input"
           disabled={isLoading}
@@ -5927,6 +6018,19 @@ function ChatPanel({
               onClick={() => setQuickComparePickerOpen(true)}
             >
               ⚡ 对比
+            </button>
+            <button
+              type="button"
+              data-testid="composer-deep-research"
+              className="roundtable-btn research-btn"
+              title="把当前问题作为研究目标，进入深度研究视图"
+              onClick={() => {
+                const objective = input.trim();
+                onOpenResearch(objective);
+                if (objective) setInput('');
+              }}
+            >
+              🔎 研究
             </button>
             <button
               type="button"

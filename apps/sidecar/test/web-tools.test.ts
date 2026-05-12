@@ -7,6 +7,7 @@ import { buildServer } from '../src/server.js';
 import { ControlClient } from '../src/control/client.js';
 import { MemoryStore } from '../src/keystore.js';
 import { openDb, type Db } from '../src/db/index.js';
+import { MemoriesRepo } from '../src/db/repos/index.js';
 import { __test__ as webSearchTest } from '../src/bus/builtins/web_search.js';
 
 const bearer = 'test_bearer_web_tools';
@@ -149,6 +150,223 @@ describe('builtin web tools', () => {
     expect(fetchMock).toHaveBeenCalledTimes(2);
     expect(String(fetchMock.mock.calls[0]?.[0])).toContain('html.duckduckgo.com/html/');
     expect(String(fetchMock.mock.calls[1]?.[0])).toContain('duckduckgo.com/html/');
+  });
+
+  it('web_search surfaces DuckDuckGo anti-bot blocks as actionable errors', async () => {
+    await app.close();
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () =>
+        new Response(
+          '<html><body><div class=\"anomaly-modal\">Unfortunately, bots use DuckDuckGo too.</div></body></html>',
+          {
+            status: 200,
+            headers: { 'content-type': 'text/html; charset=utf-8' },
+          },
+        ),
+      ),
+    );
+    app = await makeApp(db, dbPath);
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/v1/tools/invoke',
+      headers: { authorization: `Bearer ${bearer}`, 'content-type': 'application/json' },
+      payload: JSON.stringify({
+        name: 'builtin.web_search',
+        input: { query: 'blocked search' },
+      }),
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect(res.json().data.ok).toBe(false);
+    expect(res.json().data.error.message).toContain('DuckDuckGo blocked the automated search');
+  });
+
+  it('web_search falls back to Exa when DuckDuckGo is blocked', async () => {
+    await app.close();
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(new Response(
+        '<html><body><div class="anomaly-modal">Unfortunately, bots use DuckDuckGo too.</div></body></html>',
+        { status: 200, headers: { 'content-type': 'text/html; charset=utf-8' } },
+      ))
+      .mockResolvedValueOnce(new Response(
+        '<html><body><div class="anomaly-modal">Unfortunately, bots use DuckDuckGo too.</div></body></html>',
+        { status: 200, headers: { 'content-type': 'text/html; charset=utf-8' } },
+      ))
+      .mockResolvedValueOnce(new Response([
+        'event: message',
+        'data: {"result":{"content":[{"text":"Title: Exa Rescue\\nURL: https://example.com/exa-rescue\\nDescription: Exa fallback snippet"}]}}',
+      ].join('\n'), {
+        status: 200,
+        headers: { 'content-type': 'text/event-stream; charset=utf-8' },
+      }));
+    vi.stubGlobal('fetch', fetchMock);
+    app = await makeApp(db, dbPath);
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/v1/tools/invoke',
+      headers: { authorization: `Bearer ${bearer}`, 'content-type': 'application/json' },
+      payload: JSON.stringify({
+        name: 'builtin.web_search',
+        input: { query: 'blocked search rescue' },
+      }),
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect(res.json().data.ok).toBe(true);
+    expect(res.json().data.output.engine).toBe('exa');
+    expect(res.json().data.output.fallback_from).toBe('duckduckgo');
+    expect(res.json().data.output.results[0]).toEqual({
+      title: 'Exa Rescue',
+      url: 'https://example.com/exa-rescue',
+      snippet: 'Exa fallback snippet',
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+  });
+
+  it('web_search uses Exa when configured via memory', async () => {
+    await app.close();
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => new Response([
+        'event: message',
+        'data: {"result":{"content":[{"text":"Title: Exa Result\\nURL: https://example.com/exa\\nDescription: Exa snippet"}]}}',
+      ].join('\n'), {
+        status: 200,
+        headers: { 'content-type': 'text/event-stream; charset=utf-8' },
+      })),
+    );
+    new MemoriesRepo(db).set('global', null, 'builtin_web_search_engine', 'exa');
+    app = await makeApp(db, dbPath);
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/v1/tools/invoke',
+      headers: { authorization: `Bearer ${bearer}`, 'content-type': 'application/json' },
+      payload: JSON.stringify({
+        name: 'builtin.web_search',
+        input: { query: 'exa search' },
+      }),
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect(res.json().data.ok).toBe(true);
+    expect(res.json().data.output.engine).toBe('exa');
+    expect(res.json().data.output.results[0]).toEqual({
+      title: 'Exa Result',
+      url: 'https://example.com/exa',
+      snippet: 'Exa snippet',
+    });
+  });
+
+  it('web_search uses Bocha when configured via memory', async () => {
+    await app.close();
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(new Response('', {
+        status: 200,
+        headers: { 'mcp-session-id': 'bocha-session-1' },
+      }))
+      .mockResolvedValueOnce(new Response([
+        'data: {"result":{"content":[{"text":"Title: Bocha Result\\nURL: https://example.com/bocha\\nDescription: Bocha snippet"}]}}',
+      ].join('\n'), {
+        status: 200,
+        headers: { 'content-type': 'text/event-stream; charset=utf-8' },
+      }));
+    vi.stubGlobal('fetch', fetchMock);
+    const memories = new MemoriesRepo(db);
+    memories.set('global', null, 'builtin_web_search_engine', 'bocha');
+    memories.set('global', null, 'builtin_web_search_bocha_api_key', 'sk-bocha-test');
+    app = await makeApp(db, dbPath);
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/v1/tools/invoke',
+      headers: { authorization: `Bearer ${bearer}`, 'content-type': 'application/json' },
+      payload: JSON.stringify({
+        name: 'builtin.web_search',
+        input: { query: 'bocha search' },
+      }),
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect(res.json().data.ok).toBe(true);
+    expect(res.json().data.output.engine).toBe('bocha');
+    expect(res.json().data.output.results[0]).toEqual({
+      title: 'Bocha Result',
+      url: 'https://example.com/bocha',
+      snippet: 'Bocha snippet',
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it('web_search rejects bocha without API key', async () => {
+    await app.close();
+    new MemoriesRepo(db).set('global', null, 'builtin_web_search_engine', 'bocha');
+    app = await makeApp(db, dbPath);
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/v1/tools/invoke',
+      headers: { authorization: `Bearer ${bearer}`, 'content-type': 'application/json' },
+      payload: JSON.stringify({
+        name: 'builtin.web_search',
+        input: { query: 'bocha search' },
+      }),
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect(res.json().data.ok).toBe(false);
+    expect(res.json().data.error.classification).toBe('validation_error');
+  });
+
+  it('web_search falls back to Exa when Bocha returns an invalid key error', async () => {
+    await app.close();
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(new Response('', {
+        status: 200,
+        headers: { 'mcp-session-id': 'bocha-session-1' },
+      }))
+      .mockResolvedValueOnce(new Response([
+        'data: {"result":{"content":[{"text":"Bocha AI Search API HTTP error occurred: 401 Invalid API KEY"}]}}',
+      ].join('\n'), {
+        status: 200,
+        headers: { 'content-type': 'text/event-stream; charset=utf-8' },
+      }))
+      .mockResolvedValueOnce(new Response([
+        'event: message',
+        'data: {"result":{"content":[{"text":"Title: Exa Rescue\\nURL: https://example.com/exa-after-bocha\\nDescription: Exa fallback snippet"}]}}',
+      ].join('\n'), {
+        status: 200,
+        headers: { 'content-type': 'text/event-stream; charset=utf-8' },
+      }));
+    vi.stubGlobal('fetch', fetchMock);
+    const memories = new MemoriesRepo(db);
+    memories.set('global', null, 'builtin_web_search_engine', 'bocha');
+    memories.set('global', null, 'builtin_web_search_bocha_api_key', 'sk-bocha-bad');
+    app = await makeApp(db, dbPath);
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/v1/tools/invoke',
+      headers: { authorization: `Bearer ${bearer}`, 'content-type': 'application/json' },
+      payload: JSON.stringify({
+        name: 'builtin.web_search',
+        input: { query: 'bocha fallback search' },
+      }),
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect(res.json().data.ok).toBe(true);
+    expect(res.json().data.output.engine).toBe('exa');
+    expect(res.json().data.output.fallback_from).toBe('bocha');
+    expect(res.json().data.output.results[0]).toEqual({
+      title: 'Exa Rescue',
+      url: 'https://example.com/exa-after-bocha',
+      snippet: 'Exa fallback snippet',
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(3);
   });
 });
 

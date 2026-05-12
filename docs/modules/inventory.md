@@ -47,6 +47,9 @@ Scope: Taori 全系统
   - `apps/web`：聊天消息把 token 指标直接显示在 `$` 附近；ModelCenter 模型矩阵操作区做紧凑化整理，缩短高频按钮文案并收敛编辑/删除为 icon button；Control Center 新增“深度研究”工作台入口
   - `apps/sidecar` / `packages/shared`：深度研究第一切片已落地，新增 `research_sessions / tasks / sources / claims` contract、SQLite 持久化、确定性 planner 与 `/v1/research/sessions*` 资源路由
   - `docs/product` / `docs/architecture`：新增深度研究方案，并完成首批实现收口，明确其与普通聊天 / Workflow Recipe / Roundtable / 轻量 RAG 的边界，以及状态机、持久化、预算与引用校验设计
+- 2026-05-11 [深度研究交互再收敛]：
+  - `apps/web`：深度研究 UI 从三栏工作台继续收敛为更接近 OpenAI 的单列对话式研究流：启动页保留大输入框；进入研究后用“用户请求气泡 + 研究卡片 + 结果卡片”推进，计划、进度、导出与继续追问集中在同一列，证据与风险折叠进次级面板
+  - `apps/web/e2e`：`research-center.spec.ts` 改为覆盖“计划预览 → 确认执行 → 单列研究流 → 暂停/恢复/导出/取消”主路径
 - 2026-05-10 [thinking 配置]：新增“全局默认 + 单模型覆盖”的模型 thinking 开关：
   - `packages/shared`：`Model*` / backup contract 新增 `thinking_enabled: boolean | null`
   - `apps/sidecar`：`models.thinking_enabled` 落库，并在聊天、Quick Compare、Roundtable、自动记忆抽取与模型探测中统一解析；当前按 provider 差异适配 OpenRouter `reasoning`、DeepSeek `thinking`、GPT-5/o 系列 `reasoning_effort`
@@ -232,8 +235,8 @@ C3（Prompt 模板 & Persona 预设）已实现：
   - 新增托管远程搜索桥接语义：`mcp_servers` 中可保存“搏查搜索”这类受控配置，运行时由 sidecar 解析成内部 proxy 命令，不再要求 Renderer 暴露 `npx mcp-remote`。
   - 新增全局记忆键 `default_search_tool`；普通聊天、Quick Compare 与 Roundtable 在构建工具目录时只保留一个首选搜索工具，首选不可用时自动回退到 `builtin.web_search` 或当前首个可用搜索工具。
 - `apps/web`
-  - 控制中心工具页重构为“搜索工具 / 其他内置工具 / 高级 MCP Bridge”三段；搏查搜索改成产品化接入卡片，自定义 stdio/bridge 收敛到高级区。
-  - 新增“默认搜索工具”设置，用户可显式指定当前会话体系优先暴露的联网搜索入口。
+  - 控制中心工具页改为“搜索 / 内置工具 / 高级 MCP”分区导航，避免把搜索、普通工具与自定义 bridge 挤在同一长列表里。
+  - 搜索区收敛“默认搜索来源 + 内置搜索引擎 + 搏查共享凭据”；搏查 API Key 同时服务内置搏查搜索与可选托管 Bridge，避免两套配置彼此打架。
 - 架构提案
   - 详见 `docs/architecture/32-managed-search-tools-proposal.md`
 - 验证

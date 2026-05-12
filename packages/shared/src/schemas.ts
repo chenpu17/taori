@@ -731,6 +731,8 @@ export const ResearchSessionSchema = z.object({
   plan: ResearchPlanSchema.nullable(),
   draft_markdown: z.string().nullable(),
   final_markdown: z.string().nullable(),
+  preferred_model_id: z.string().nullable(),
+  preferred_search_tool: z.string().nullable(),
   started_at: z.number().int().nullable(),
   completed_at: z.number().int().nullable(),
   created_at: z.number().int(),
@@ -746,6 +748,8 @@ export const ResearchSessionCreateSchema = z.object({
   budget_mode: ResearchBudgetModeSchema.default('balanced'),
   budget_limit_usd: z.number().nonnegative().max(1_000).nullable().optional(),
   constraints: ResearchConstraintsSchema.default({}),
+  preferred_model_id: z.string().nullable().optional(),
+  preferred_search_tool: z.string().nullable().optional(),
 });
 export type ResearchSessionCreate = z.infer<typeof ResearchSessionCreateSchema>;
 

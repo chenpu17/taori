@@ -18,6 +18,15 @@ interface ResearchRouteDeps extends BuildServerArgs {
   researchRunner?: ResearchRunner;
 }
 
+function shouldRestartFailedSearchRun(detail: ReturnType<ResearchRepo['getDetail']>): boolean {
+  if (!detail) return false;
+  if (detail.sources.length > 0) return false;
+  return detail.tasks.some((task) =>
+    (task.kind === 'search' && task.status === 'failed') ||
+    ((task.kind === 'summarize' || task.kind === 'verify_citation') && task.status !== 'completed'),
+  );
+}
+
 function parseOrValidation<T>(
   result: { success: true; data: T } | { success: false; error: { errors: Array<{ message: string }> } },
 ): T {
@@ -94,7 +103,11 @@ export function registerResearchRoute(app: FastifyInstance, deps: ResearchRouteD
       status: body.confirm ? 'running' : 'reviewing',
     });
     if (body.confirm) {
-      repo.replaceTasks(current.id, buildResearchTasks(plan));
+      repo.replaceTasks(current.id, buildResearchTasks({
+        plan,
+        title: current.title,
+        objective: current.objective,
+      }));
       repo.update(current.id, {
         draft_markdown: buildResearchDraftSkeleton(current, plan),
         started_at: current.started_at ?? Date.now(),
@@ -130,6 +143,29 @@ export function registerResearchRoute(app: FastifyInstance, deps: ResearchRouteD
       throw new TaoriError({
         code: 'validation_error',
         message: `Research session cannot resume from status ${current.status}`,
+      });
+    }
+    const detail = repo.getDetail(req.params.id);
+    if (shouldRestartFailedSearchRun(detail)) {
+      const plan = current.plan ?? buildResearchPlan({
+        title: current.title,
+        objective: current.objective,
+        outputKind: current.output_kind,
+        budgetMode: current.budget_mode,
+        constraints: current.constraints,
+      });
+      repo.replaceTasks(req.params.id, buildResearchTasks({
+        plan,
+        title: current.title,
+        objective: current.objective,
+      }));
+      repo.replaceSources(req.params.id, []);
+      repo.replaceClaims(req.params.id, []);
+      repo.update(req.params.id, {
+        plan,
+        stage: 'planning',
+        draft_markdown: buildResearchDraftSkeleton(current, plan),
+        final_markdown: null,
       });
     }
     repo.update(req.params.id, {

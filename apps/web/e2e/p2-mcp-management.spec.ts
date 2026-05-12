@@ -40,7 +40,7 @@ test('P2 MCP management: user can connect managed Bocha search without editing r
 
   const bochaCard = page.getByTestId('settings-search-bocha');
   await expect(bochaCard).toContainText('搏查搜索');
-  await expect(bochaCard).toContainText('状态：未检查', { timeout: 20_000 });
+  await expect(page.getByTestId('settings-bocha-status')).toBeVisible({ timeout: 20_000 });
   await expect(bochaCard).toContainText('更新 API Key');
   await expect(page.getByTestId('mcp-server-command')).toHaveValue('');
   await expect(page.getByTestId('mcp-server-args')).toHaveValue('');

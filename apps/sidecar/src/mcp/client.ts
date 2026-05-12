@@ -20,6 +20,7 @@ export interface McpServerConfig {
   command: string;
   args: string[];
   env: Record<string, string>;
+  stdio_protocol?: 'content-length' | 'jsonl';
 }
 
 export interface McpServerLogEntry {
@@ -156,6 +157,7 @@ function sessionKey(config: McpServerConfig): string {
   return JSON.stringify({
     command: config.command,
     args: config.args,
+    stdio_protocol: config.stdio_protocol ?? 'content-length',
     env: Object.keys(config.env)
       .sort()
       .map((key) => [key, config.env[key]]),
@@ -208,6 +210,10 @@ class McpStdioSession {
 
   constructor(private readonly config: McpServerConfig) {
     this.key = sessionKey(config);
+  }
+
+  private get protocol(): 'content-length' | 'jsonl' {
+    return this.config.stdio_protocol ?? 'content-length';
   }
 
   async start(): Promise<void> {
@@ -283,7 +289,7 @@ class McpStdioSession {
     }
     const id = this.nextId++;
     const message: JsonRpcMessage = { jsonrpc: '2.0', id, method, params };
-    const payload = Buffer.from(JSON.stringify(message), 'utf8');
+    const payload = this.serializeMessage(message);
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
         this.pending.delete(id);
@@ -292,7 +298,6 @@ class McpStdioSession {
       }, timeoutMs);
       this.pending.set(id, { resolve, reject, timer });
       try {
-        writeOrThrow(this.child!, `Content-Length: ${payload.byteLength}\r\n\r\n`);
         writeOrThrow(this.child!, payload);
       } catch (e) {
         clearTimeout(timer);
@@ -305,8 +310,7 @@ class McpStdioSession {
   notify(method: string, params: unknown): void {
     if (!this.child || !isChildAlive(this.child)) return;
     const message: JsonRpcMessage = { jsonrpc: '2.0', method, params };
-    const payload = Buffer.from(JSON.stringify(message), 'utf8');
-    writeOrThrow(this.child, `Content-Length: ${payload.byteLength}\r\n\r\n`);
+    const payload = this.serializeMessage(message);
     writeOrThrow(this.child, payload);
   }
 
@@ -325,6 +329,10 @@ class McpStdioSession {
   }
 
   private onData(chunk: Buffer): void {
+    if (this.protocol === 'jsonl') {
+      this.onJsonlData(chunk);
+      return;
+    }
     this.buffer = Buffer.concat([this.buffer, chunk]);
     while (true) {
       const sep = this.buffer.indexOf('\r\n\r\n');
@@ -343,6 +351,27 @@ class McpStdioSession {
       this.buffer = this.buffer.slice(end);
       this.handleMessage(payload);
     }
+  }
+
+  private onJsonlData(chunk: Buffer): void {
+    this.buffer = Buffer.concat([this.buffer, chunk]);
+    while (true) {
+      const newline = this.buffer.indexOf('\n');
+      if (newline < 0) return;
+      const payload = this.buffer.slice(0, newline).toString('utf8').replace(/\r$/, '').trim();
+      this.buffer = this.buffer.slice(newline + 1);
+      if (payload) {
+        this.handleMessage(payload);
+      }
+    }
+  }
+
+  private serializeMessage(message: JsonRpcMessage): Buffer {
+    const payload = JSON.stringify(message);
+    if (this.protocol === 'jsonl') {
+      return Buffer.from(`${payload}\n`, 'utf8');
+    }
+    return Buffer.from(`Content-Length: ${Buffer.byteLength(payload, 'utf8')}\r\n\r\n${payload}`, 'utf8');
   }
 
   private handleMessage(payload: string): void {

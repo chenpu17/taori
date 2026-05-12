@@ -36,6 +36,10 @@ const MANAGED_BOCHA_KIND = 'bocha-search';
 const MANAGED_MCP_KIND_ENV_KEY = 'TAORI_MANAGED_MCP_KIND';
 const MANAGED_BOCHA_API_KEY_ENV = 'BOCHA_API_KEY';
 const DEFAULT_SEARCH_TOOL = 'builtin.web_search';
+const BUILTIN_WEB_SEARCH_ENGINE_KEY = 'builtin_web_search_engine';
+const BUILTIN_WEB_SEARCH_BOCHA_API_KEY_KEY = 'builtin_web_search_bocha_api_key';
+type BuiltinSearchEngine = 'duckduckgo' | 'exa' | 'bocha';
+type ToolsPane = 'search' | 'builtin' | 'mcp';
 
 interface SettingsProps {
   onClose: () => void;
@@ -207,6 +211,7 @@ function ToolsSection({ onChanged }: { onChanged: () => void }): JSX.Element {
   const [mcpArgs, setMcpArgs] = useState('');
   const [mcpEnv, setMcpEnv] = useState('');
   const [bochaApiKey, setBochaApiKey] = useState('');
+  const [builtinSearchEngine, setBuiltinSearchEngine] = useState<BuiltinSearchEngine>('duckduckgo');
   const [defaultSearchToolName, setDefaultSearchToolName] = useState(DEFAULT_SEARCH_TOOL);
   const [imageTimeoutMinutes, setImageTimeoutMinutes] = useState('5');
   const [expandedMcpId, setExpandedMcpId] = useState<string | null>(null);
@@ -216,23 +221,36 @@ function ToolsSection({ onChanged }: { onChanged: () => void }): JSX.Element {
   const [editArgs, setEditArgs] = useState('');
   const [editEnv, setEditEnv] = useState('');
   const [mcpRuntimeById, setMcpRuntimeById] = useState<Record<string, McpServerRuntimeResponse>>({});
+  const [searchStatus, setSearchStatus] = useState<{ tone: 'success' | 'error' | 'loading'; title: string; detail: string } | null>(null);
+  const [bochaStatus, setBochaStatus] = useState<{ tone: 'success' | 'error'; title: string; detail: string } | null>(null);
+  const [activeToolsPane, setActiveToolsPane] = useState<ToolsPane>('search');
+  const searchSectionRef = useRef<HTMLDivElement | null>(null);
+  const builtinSectionRef = useRef<HTMLDivElement | null>(null);
+  const mcpSectionRef = useRef<HTMLDivElement | null>(null);
 
   const load = async (): Promise<void> => {
     setLoading(true);
     setError(null);
     try {
-      const [res, healthRes, mcpRes, imageTimeoutRes, defaultSearchToolRes] = await Promise.all([
+      const [res, healthRes, mcpRes, imageTimeoutRes, defaultSearchToolRes, builtinEngineRes, builtinBochaRes] = await Promise.all([
         api.listTools(),
         api.toolsHealth().catch(() => ({ rows: [] })),
         api.listMcpServers().catch(() => ({ servers: [] })),
         api.getMemoryEffective('image_generation_timeout_ms').catch(() => ({ data: { value: null as string | null } })),
         api.getMemoryEffective('default_search_tool').catch(() => ({ data: { value: null as string | null } })),
+        api.getMemoryEffective(BUILTIN_WEB_SEARCH_ENGINE_KEY).catch(() => ({ data: { value: null as string | null } })),
+        api.getMemoryEffective(BUILTIN_WEB_SEARCH_BOCHA_API_KEY_KEY).catch(() => ({ data: { value: null as string | null } })),
       ]);
       setTools(res.data);
       setToolHealthRows(new Map(healthRes.rows.map((row) => [row.tool_name, row])));
       setMcpServers(mcpRes.servers);
       const bochaServer = mcpRes.servers.find(isManagedBochaServer);
-      setBochaApiKey(bochaServer?.env[MANAGED_BOCHA_API_KEY_ENV] ?? '');
+      setBochaApiKey(builtinBochaRes.data.value ?? bochaServer?.env[MANAGED_BOCHA_API_KEY_ENV] ?? '');
+      setBuiltinSearchEngine(
+        builtinEngineRes.data.value === 'exa' || builtinEngineRes.data.value === 'bocha'
+          ? builtinEngineRes.data.value
+          : 'duckduckgo',
+      );
       setDefaultSearchToolName(defaultSearchToolRes.data.value ?? DEFAULT_SEARCH_TOOL);
       const timeoutMs = Number(imageTimeoutRes.data.value ?? DEFAULT_IMAGE_GENERATION_TIMEOUT_MS);
       const normalizedTimeoutMs =
@@ -258,6 +276,26 @@ function ToolsSection({ onChanged }: { onChanged: () => void }): JSX.Element {
   const builtinNonSearchTools = tools.filter(
     (tool) => tool.source === 'builtin' && !isSearchToolCandidate(tool),
   );
+  const selectedSearchTool =
+    defaultSearchToolName === DEFAULT_SEARCH_TOOL
+      ? builtinSearchTool
+      : searchToolOptions.find((tool) => tool.name === defaultSearchToolName) ?? null;
+  const activeSearchLabel =
+    defaultSearchToolName === DEFAULT_SEARCH_TOOL
+      ? `内置网页搜索（${builtinSearchEngineLabel(builtinSearchEngine)}）`
+      : selectedSearchTool
+        ? searchToolOptionLabel(selectedSearchTool, mcpServers)
+        : defaultSearchToolName;
+  const scrollToToolsPane = (pane: ToolsPane): void => {
+    setActiveToolsPane(pane);
+    const target =
+      pane === 'builtin'
+        ? builtinSectionRef.current
+        : pane === 'mcp'
+          ? mcpSectionRef.current
+          : searchSectionRef.current;
+    target?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  };
 
   const toggle = async (tool: Tool): Promise<void> => {
     setSaving(tool.name);
@@ -311,33 +349,131 @@ function ToolsSection({ onChanged }: { onChanged: () => void }): JSX.Element {
     }
     setSaving('bocha:save');
     setError(null);
+    setBochaStatus(null);
     try {
+      await api.putMemory('global', BUILTIN_WEB_SEARCH_BOCHA_API_KEY_KEY, trimmedKey);
+      let targetId: string | null = bochaServer?.id ?? null;
       if (bochaServer) {
         await api.updateMcpServer(bochaServer.id, buildManagedBochaServerPayload(trimmedKey));
       } else {
-        await api.createMcpServer(buildManagedBochaServerPayload(trimmedKey));
+        const created = await api.createMcpServer(buildManagedBochaServerPayload(trimmedKey));
+        targetId = created.server.id;
       }
+      const refreshed = targetId ? await api.refreshMcpServer(targetId) : null;
       await load();
+      if (refreshed?.ok) {
+        setBochaStatus({
+          tone: 'success',
+          title: '搏查 MCP 已连接',
+          detail: `检查成功，已发现 ${refreshed.tools.length} 个工具。`,
+        });
+      } else if (refreshed) {
+        setBochaStatus({
+          tone: 'error',
+          title: '搏查 MCP 连接失败',
+          detail: refreshed.server.last_error ?? '刷新后未返回可用工具。',
+        });
+      }
       onChanged();
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
+      setBochaStatus({
+        tone: 'error',
+        title: '搏查 MCP 连接失败',
+        detail: e instanceof Error ? e.message : String(e),
+      });
     } finally {
       setSaving(null);
     }
   };
 
-  const saveDefaultSearchTool = async (): Promise<void> => {
+  const saveSearchConfig = async (): Promise<void> => {
+    setSaving('search:engine');
     setError(null);
-    setSaving('search:default');
+    setSearchStatus(null);
     try {
+      const trimmedBochaKey = bochaApiKey.trim();
+      await api.putMemory('global', BUILTIN_WEB_SEARCH_ENGINE_KEY, builtinSearchEngine);
+      if (builtinSearchEngine === 'bocha') {
+        if (!trimmedBochaKey) {
+          throw new Error('搏查搜索需要 API Key。');
+        }
+      }
+      if (trimmedBochaKey) {
+        await api.putMemory('global', BUILTIN_WEB_SEARCH_BOCHA_API_KEY_KEY, trimmedBochaKey);
+      }
       if (!defaultSearchToolName || defaultSearchToolName === DEFAULT_SEARCH_TOOL) {
         await api.deleteMemory('global', 'default_search_tool');
       } else {
         await api.putMemory('global', 'default_search_tool', defaultSearchToolName);
       }
+      setSearchStatus({
+        tone: 'success',
+        title: '搜索设置已保存',
+        detail: `当前默认搜索：${activeSearchLabel}。`,
+      });
       onChanged();
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      const message = e instanceof Error ? e.message : String(e);
+      setError(message);
+      setSearchStatus({
+        tone: 'error',
+        title: '搜索设置保存失败',
+        detail: message,
+      });
+    } finally {
+      setSaving(null);
+    }
+  };
+
+  const testBuiltinSearchConnection = async (): Promise<void> => {
+    if (builtinSearchEngine === 'bocha' && !bochaApiKey.trim()) {
+      setError('搏查搜索需要 API Key。');
+      setSearchStatus({
+        tone: 'error',
+        title: '无法检查连接',
+        detail: '请先填写搏查 API Key。',
+      });
+      return;
+    }
+    setSaving('search:test');
+    setError(null);
+    setSearchStatus({
+      tone: 'loading',
+      title: '正在检查内置搜索连接…',
+      detail: `使用 ${builtinSearchEngineLabel(builtinSearchEngine)} 发起测试查询。`,
+    });
+    try {
+      const trimmedBochaKey = bochaApiKey.trim();
+      await api.putMemory('global', BUILTIN_WEB_SEARCH_ENGINE_KEY, builtinSearchEngine);
+      if (builtinSearchEngine === 'bocha') {
+        await api.putMemory('global', BUILTIN_WEB_SEARCH_BOCHA_API_KEY_KEY, trimmedBochaKey);
+      } else if (trimmedBochaKey) {
+        await api.putMemory('global', BUILTIN_WEB_SEARCH_BOCHA_API_KEY_KEY, trimmedBochaKey);
+      }
+      const res = await api.invokeTool('builtin.web_search', {
+        query: 'Taori 搜索连接测试',
+        num_results: 3,
+      });
+      if (!res.data.ok) {
+        throw new Error(res.data.error?.message ?? '连接检查失败');
+      }
+      const output = res.data.output as { engine?: string; results?: Array<unknown> };
+      setSearchStatus({
+        tone: 'success',
+        title: '内置搜索可用',
+        detail: `${builtinSearchEngineLabel(builtinSearchEngine)} 已返回 ${output.results?.length ?? 0} 条结果。`,
+      });
+      await load();
+      onChanged();
+    } catch (e) {
+      const message = e instanceof Error ? e.message : String(e);
+      setError(message);
+      setSearchStatus({
+        tone: 'error',
+        title: '内置搜索不可用',
+        detail: message,
+      });
     } finally {
       setSaving(null);
     }
@@ -360,13 +496,34 @@ function ToolsSection({ onChanged }: { onChanged: () => void }): JSX.Element {
   const refreshMcpServer = async (server: McpServer): Promise<void> => {
     setSaving(`${server.id}:refresh`);
     setError(null);
+    if (isManagedBochaServer(server)) setBochaStatus(null);
     try {
-      await api.refreshMcpServer(server.id);
+      const refreshed = await api.refreshMcpServer(server.id);
       await load();
       await loadMcpRuntime(server.id);
+      if (isManagedBochaServer(server)) {
+        setBochaStatus(refreshed.ok
+          ? {
+              tone: 'success',
+              title: '搏查 MCP 可用',
+              detail: `检查成功，已发现 ${refreshed.tools.length} 个工具。`,
+            }
+          : {
+              tone: 'error',
+              title: '搏查 MCP 不可用',
+              detail: refreshed.server.last_error ?? '未返回可用工具。',
+            });
+      }
       onChanged();
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
+      if (isManagedBochaServer(server)) {
+        setBochaStatus({
+          tone: 'error',
+          title: '搏查 MCP 不可用',
+          detail: e instanceof Error ? e.message : String(e),
+        });
+      }
     } finally {
       setSaving(null);
     }
@@ -517,410 +674,494 @@ function ToolsSection({ onChanged }: { onChanged: () => void }): JSX.Element {
         />
       ) : (
         <>
-          <div className="settings-mcp" data-testid="settings-search-tools">
-            <div className="settings-section-head">
-              <h3>搜索工具</h3>
-            </div>
-            <p className="hint">
-              聊天、Quick Compare 与 Roundtable 共用同一个默认搜索工具。未额外指定时，会自动回退到内置网页搜索。
-            </p>
-            <div className="settings-inline-form">
-              <select
-                value={defaultSearchToolName}
-                onChange={(e) => setDefaultSearchToolName(e.target.value)}
-                data-testid="settings-default-search-tool"
-              >
-                <option value={DEFAULT_SEARCH_TOOL}>内置网页搜索（DuckDuckGo）</option>
-                {searchToolOptions
-                  .filter((tool) => tool.name !== DEFAULT_SEARCH_TOOL)
-                  .map((tool) => (
-                    <option key={tool.name} value={tool.name}>
-                      {searchToolOptionLabel(tool, mcpServers)}
-                    </option>
-                  ))}
-              </select>
-              <button
-                type="button"
-                className="settings-action-btn settings-action-btn--primary"
-                onClick={() => void saveDefaultSearchTool()}
-                disabled={saving === 'search:default'}
-                data-testid="settings-default-search-tool-save"
-              >
-                {saving === 'search:default' ? '保存中…' : '保存默认搜索'}
-              </button>
-            </div>
-            <div className="settings-tool-list">
-              <article className="settings-tool-card" data-testid="settings-search-builtin">
-                <div>
-                  <div className="settings-tool-title">
-                    <strong>内置网页搜索</strong>
-                    <code>builtin.web_search</code>
-                  </div>
-                  <p>{builtinSearchTool ? toolDescription(builtinSearchTool) : 'DuckDuckGo 双入口回退，适合作为默认兜底搜索。'}</p>
-                  <div className="settings-tool-meta">
-                    <span>来源：内置</span>
-                    <span>状态：{builtinSearchTool?.enabled === false ? '已关闭' : '可用'}</span>
-                    <span>适用：默认兜底搜索</span>
-                  </div>
-                  <ToolHealthStrip health={toolHealthRows.get('builtin.web_search') ?? null} />
-                </div>
-                {builtinSearchTool ? (
-                  <button
-                    type="button"
-                    className={builtinSearchTool.enabled ? 'tool-toggle enabled' : 'tool-toggle'}
-                    disabled={saving === builtinSearchTool.name}
-                    data-testid={`tool-toggle-${builtinSearchTool.name}`}
-                    onClick={() => void toggle(builtinSearchTool)}
-                  >
-                    {saving === builtinSearchTool.name ? '保存中…' : builtinSearchTool.enabled ? '已启用' : '已关闭'}
-                  </button>
-                ) : null}
-              </article>
-              <article className="settings-tool-card" data-testid="settings-search-bocha">
-                <div>
-                  <div className="settings-tool-title">
-                    <strong>搏查搜索</strong>
-                    <code>内建远程 SSE</code>
-                  </div>
-                  <p>
-                    只需填写 API Key。Taori 会在 sidecar 内托管远程 SSE bridge，不再要求你手工维护 <code>npx mcp-remote</code> 配置。
-                  </p>
-                  <div className="settings-inline-form settings-inline-form--stack">
-                    <input
-                      type="password"
-                      value={bochaApiKey}
-                      onChange={(e) => setBochaApiKey(e.target.value)}
-                      placeholder="输入搏查 API Key"
-                      autoComplete="off"
-                      data-testid="mcp-bocha-api-key"
-                    />
-                    <div className="settings-tool-meta">
-                      <span>状态：{bochaServer ? (bochaServer.enabled ? mcpHealthLabel(bochaServer.health_status) : '已停用') : '未配置'}</span>
-                      <span>工具：{bochaServer?.tools_count ?? 0} 个</span>
-                      <span>来源：托管 MCP</span>
-                    </div>
-                    {bochaServer?.last_error ? <p className="err">{bochaServer.last_error}</p> : null}
-                  </div>
-                </div>
-                <div className="settings-mcp-actions">
-                  <button
-                    type="button"
-                    className="settings-action-btn settings-action-btn--primary"
-                    onClick={() => void saveBochaConfig()}
-                    disabled={saving === 'bocha:save'}
-                    data-testid="mcp-bocha-save"
-                  >
-                    {saving === 'bocha:save' ? '保存中…' : bochaServer ? '更新 API Key' : '接入搏查'}
-                  </button>
-                  {bochaServer ? (
-                    <>
-                      <button
-                        type="button"
-                        className="settings-action-btn settings-action-btn--secondary"
-                        onClick={() => void refreshMcpServer(bochaServer)}
-                        disabled={saving === `${bochaServer.id}:refresh` || !bochaServer.enabled}
-                        data-testid="mcp-bocha-refresh"
-                      >
-                        {saving === `${bochaServer.id}:refresh` ? '检查中…' : '检查连接'}
-                      </button>
-                      <button
-                        type="button"
-                        className={bochaServer.enabled ? 'tool-toggle enabled' : 'tool-toggle'}
-                        onClick={() => void toggleMcpServer(bochaServer)}
-                        disabled={saving === bochaServer.id}
-                        data-testid="mcp-bocha-toggle"
-                      >
-                        {bochaServer.enabled ? '已启用' : '已停用'}
-                      </button>
-                      <button
-                        type="button"
-                        className="settings-action-btn settings-action-btn--secondary"
-                        onClick={() => void deleteMcpServer(bochaServer)}
-                        disabled={saving === `${bochaServer.id}:delete`}
-                        data-testid="mcp-bocha-delete"
-                      >
-                        移除
-                      </button>
-                    </>
-                  ) : null}
-                </div>
-              </article>
-            </div>
-          </div>
-
-          <div className="settings-tool-list">
-            {builtinNonSearchTools.map((tool) => (
-              <article className="settings-tool-card" key={tool.name} data-testid={`settings-tool-${tool.name}`}>
-                <div>
-                  <div className="settings-tool-title">
-                    <strong>{toolLabel(tool.name)}</strong>
-                    <code>{tool.name}</code>
-                  </div>
-                  <p>{toolDescription(tool)}</p>
-                  <div className="settings-tool-meta">
-                    <span>能力：{capabilityLabel(tool.capability)}</span>
-                    <span>来源：{tool.source === 'builtin' ? '内置' : 'MCP'}</span>
-                  </div>
-                  <ToolHealthStrip health={toolHealthRows.get(tool.name) ?? null} />
-                </div>
+          <div className="settings-tools-shell">
+            <nav className="settings-tools-nav" aria-label="工具能力导航">
+              {[
+                ['search', '搜索'],
+                ['builtin', '内置工具'],
+                ['mcp', 'MCP'],
+              ].map(([pane, label]) => (
                 <button
+                  key={pane}
                   type="button"
-                  className={tool.enabled ? 'tool-toggle enabled' : 'tool-toggle'}
-                  disabled={saving === tool.name || tool.source === 'mcp'}
-                  data-testid={`tool-toggle-${tool.name}`}
-                  onClick={() => void toggle(tool)}
-                  title={tool.source === 'mcp' ? '请在 MCP Server 层启停' : undefined}
+                  className={activeToolsPane === pane ? 'settings-tools-nav-btn active' : 'settings-tools-nav-btn'}
+                  onClick={() => scrollToToolsPane(pane as ToolsPane)}
+                  data-testid={`settings-tools-nav-${pane}`}
                 >
-                  {saving === tool.name ? '保存中…' : tool.enabled ? '已启用' : '已关闭'}
+                  {label}
                 </button>
-              </article>
-            ))}
-          </div>
+              ))}
+            </nav>
 
-          <div className="settings-mcp" data-testid="settings-mcp">
-            <div className="settings-section-head">
-              <h3>图像生成</h3>
-            </div>
-            <p className="hint">
-              可配置图像生成工具的单次等待上限。留空会恢复默认值 5 分钟。
-            </p>
-            <div className="settings-inline-form">
-              <input
-                type="number"
-                min="0.5"
-                max="30"
-                step="0.5"
-                value={imageTimeoutMinutes}
-                onChange={(e) => setImageTimeoutMinutes(e.target.value)}
-                placeholder="5"
-                data-testid="settings-image-timeout-minutes"
-              />
-              <button
-                type="button"
-                className="settings-action-btn settings-action-btn--primary"
-                onClick={() => void saveImageTimeout()}
-                disabled={saving === 'image-timeout'}
-                data-testid="settings-image-timeout-save"
+            <div className="settings-tools-content">
+              <div
+                ref={searchSectionRef}
+                className="settings-tools-panel"
+                data-testid="settings-search-tools"
               >
-                {saving === 'image-timeout' ? '保存中…' : '保存超时'}
-              </button>
-            </div>
-
-            <div className="settings-section-head">
-              <h3>高级 MCP Bridge</h3>
-            </div>
-            <p className="hint">
-              这里保留给本地 stdio server 或自定义 bridge。常用搜索接入请优先使用上面的“搜索工具”区。
-            </p>
-            <div className="settings-mcp-form">
-              <input
-                value={mcpName}
-                onChange={(e) => setMcpName(e.target.value)}
-                placeholder="名称，例如 Filesystem"
-                data-testid="mcp-server-name"
-              />
-              <input
-                value={mcpCommand}
-                onChange={(e) => setMcpCommand(e.target.value)}
-                placeholder="command，例如 node"
-                data-testid="mcp-server-command"
-              />
-              <input
-                value={mcpArgs}
-                onChange={(e) => setMcpArgs(e.target.value)}
-                placeholder="args，以空格分隔"
-                data-testid="mcp-server-args"
-              />
-              <textarea
-                value={mcpEnv}
-                onChange={(e) => setMcpEnv(e.target.value)}
-                placeholder={'环境变量，每行一个，例如\nAPI_KEY=xxx'}
-                data-testid="mcp-server-env"
-              />
-              <button
-                type="button"
-                className="settings-action-btn settings-action-btn--primary"
-                onClick={() => void addMcpServer()}
-                disabled={saving === 'mcp:add'}
-                data-testid="mcp-server-add"
-              >
-                {saving === 'mcp:add' ? '添加中…' : '添加并刷新'}
-              </button>
-            </div>
-            {customMcpServers.length === 0 ? (
-                <StatusNotice
-                  tone="info"
-                  title="尚未添加 MCP Server"
-                  detail="当前可直接添加本地 stdio Server，也可接入自定义 bridge。搏查等常用搜索已单独归入上方搜索工具区。"
-                  compact
-                  testId="settings-mcp-empty"
-                />
-            ) : (
-              <div className="settings-tool-list">
-                {customMcpServers.map((server) => (
-                  <article className="settings-tool-card" key={server.id} data-testid={`mcp-server-${server.id}`}>
-                    <div>
+                <div className="settings-section-head">
+                  <h3>搜索</h3>
+                </div>
+                <p className="hint">
+                  聊天、Quick Compare、Roundtable 与深度研究共用这里的搜索入口。默认搜索来源、内置引擎与搏查凭据统一收敛在这一组里。
+                </p>
+                <div className="settings-tool-list">
+                  <article className="settings-tool-card" data-testid="settings-search-builtin">
+                    <div data-testid="settings-tool-builtin.web_search">
                       <div className="settings-tool-title">
-                        <strong>{server.name}</strong>
-                        <code>{server.command} {server.args.join(' ')}</code>
+                        <strong>默认搜索入口</strong>
+                        <code>builtin.web_search / default_search_tool</code>
                       </div>
-                      <div className="settings-tool-meta">
-                        <span>状态：{server.enabled ? '启用' : '停用'}</span>
-                        <span>健康：{mcpHealthLabel(server.health_status)}</span>
-                        <span>工具：{server.tools_count} 个</span>
-                        <span>环境变量：{Object.keys(server.env).length} 个</span>
-                      </div>
-                      {server.last_error && <p className="err">{server.last_error}</p>}
-                      {expandedMcpId === server.id && (
-                        <div className="settings-mcp-runtime" data-testid={`mcp-server-runtime-${server.id}`}>
-                          {editingMcpId === server.id ? (
-                            <div className="settings-inline-form settings-inline-form--stack">
-                              <input
-                                value={editName}
-                                onChange={(e) => setEditName(e.target.value)}
-                                placeholder="名称"
-                                data-testid={`mcp-server-edit-name-${server.id}`}
-                              />
-                              <input
-                                value={editCommand}
-                                onChange={(e) => setEditCommand(e.target.value)}
-                                placeholder="command"
-                                data-testid={`mcp-server-edit-command-${server.id}`}
-                              />
-                              <input
-                                value={editArgs}
-                                onChange={(e) => setEditArgs(e.target.value)}
-                                placeholder="args，以空格分隔"
-                                data-testid={`mcp-server-edit-args-${server.id}`}
-                              />
-                              <textarea
-                                value={editEnv}
-                                onChange={(e) => setEditEnv(e.target.value)}
-                                placeholder={'环境变量，每行一个，例如\nAPI_KEY=xxx'}
-                                data-testid={`mcp-server-edit-env-${server.id}`}
-                              />
-                              <div className="settings-mcp-actions">
-                                <button
-                                  type="button"
-                                  className="settings-action-btn settings-action-btn--primary"
-                                  onClick={() => void saveMcpServer(server)}
-                                  disabled={saving === `${server.id}:save`}
-                                  data-testid={`mcp-server-save-${server.id}`}
-                                >
-                                  {saving === `${server.id}:save` ? '保存中…' : '保存并重载'}
-                                </button>
-                                <button
-                                  type="button"
-                                  className="settings-action-btn settings-action-btn--secondary"
-                                  onClick={() => setEditingMcpId(null)}
-                                  data-testid={`mcp-server-cancel-${server.id}`}
-                                >
-                                  取消
-                                </button>
-                              </div>
-                            </div>
-                          ) : (
-                            <>
-                              <p className="hint">
-                                {mcpRuntimeById[server.id]?.session_running
-                                  ? '当前会话正在运行，可直接查看最近 stderr / 生命周期日志。'
-                                  : '当前没有活跃会话；点击“检查连接”或“重启”后会重新建立连接。'}
-                              </p>
-                              <div className="settings-mcp-runtime-grid">
-                                <div className="settings-mcp-panel" data-testid={`mcp-server-tools-${server.id}`}>
-                                  <strong>已注册工具</strong>
-                                  {mcpRuntimeById[server.id]?.tools.length ? (
-                                    <ul>
-                                      {mcpRuntimeById[server.id].tools.map((tool) => (
-                                        <li key={tool.name}>
-                                          <code>{tool.name}</code>
-                                          <span>{tool.description}</span>
-                                        </li>
-                                      ))}
-                                    </ul>
-                                  ) : (
-                                    <p className="hint">暂无工具，请先检查连接。</p>
-                                  )}
-                                </div>
-                                <div className="settings-mcp-panel" data-testid={`mcp-server-logs-${server.id}`}>
-                                  <strong>最近日志</strong>
-                                  {mcpRuntimeById[server.id]?.logs.length ? (
-                                    <ul className="settings-mcp-logs">
-                                      {mcpRuntimeById[server.id].logs.slice(-8).map((entry, index) => (
-                                        <li key={`${entry.ts}-${index}`} className={`level-${entry.level}`}>
-                                          <span>{formatRelativeTime(entry.ts)}</span>
-                                          <code>{entry.message}</code>
-                                        </li>
-                                      ))}
-                                    </ul>
-                                  ) : (
-                                    <p className="hint">暂无日志，连接后会显示启动 / stderr / 退出信息。</p>
-                                  )}
-                                </div>
-                              </div>
-                            </>
-                          )}
+                      <p>{builtinSearchTool ? toolDescription(builtinSearchTool) : '支持 DuckDuckGo / Exa / 搏查 三种内置搜索引擎。'}</p>
+                      <div className="settings-inline-form settings-inline-form--stack">
+                        <label className="settings-tools-field">
+                          <span>默认搜索来源</span>
+                          <select
+                            value={defaultSearchToolName}
+                            onChange={(e) => setDefaultSearchToolName(e.target.value)}
+                            data-testid="settings-default-search-tool"
+                          >
+                            <option value={DEFAULT_SEARCH_TOOL}>
+                              {`内置网页搜索（${builtinSearchEngineLabel(builtinSearchEngine)}）`}
+                            </option>
+                            {searchToolOptions
+                              .filter((tool) => tool.name !== DEFAULT_SEARCH_TOOL)
+                              .map((tool) => (
+                                <option key={tool.name} value={tool.name}>
+                                  {searchToolOptionLabel(tool, mcpServers)}
+                                </option>
+                              ))}
+                          </select>
+                        </label>
+                        <label className="settings-tools-field">
+                          <span>内置引擎</span>
+                          <select
+                            value={builtinSearchEngine}
+                            onChange={(e) => setBuiltinSearchEngine(e.target.value as BuiltinSearchEngine)}
+                            data-testid="settings-builtin-search-engine"
+                          >
+                            <option value="duckduckgo">DuckDuckGo（免费）</option>
+                            <option value="exa">Exa</option>
+                            <option value="bocha">搏查</option>
+                          </select>
+                        </label>
+                        <div className="settings-tool-meta">
+                          <span>当前默认：{activeSearchLabel}</span>
+                          <span>内置状态：{builtinSearchTool?.enabled === false ? '已关闭' : '可用'}</span>
+                          <span>适用：聊天 / Quick Compare / Roundtable / 深度研究</span>
                         </div>
-                      )}
+                        {builtinSearchEngine === 'bocha' && !bochaApiKey.trim() ? (
+                          <p className="hint">搏查 API Key 在下方“搏查共享凭据”里维护，保存前请先填写。</p>
+                        ) : null}
+                      </div>
+                      {searchStatus ? (
+                        <StatusNotice
+                          tone={searchStatus.tone}
+                          title={searchStatus.title}
+                          detail={searchStatus.detail}
+                          compact
+                          testId="settings-builtin-search-status"
+                        />
+                      ) : null}
+                      <ToolHealthStrip health={toolHealthRows.get('builtin.web_search') ?? null} />
                     </div>
                     <div className="settings-mcp-actions">
                       <button
                         type="button"
-                        className="settings-action-btn settings-action-btn--secondary"
-                        onClick={() => void toggleMcpDetails(server)}
-                        data-testid={`mcp-server-details-${server.id}`}
+                        className="settings-action-btn settings-action-btn--primary"
+                        onClick={() => void saveSearchConfig()}
+                        disabled={saving === 'search:engine'}
+                        data-testid="settings-builtin-search-save"
                       >
-                        {expandedMcpId === server.id ? '收起详情' : '查看详情'}
+                        {saving === 'search:engine' ? '保存中…' : '保存搜索设置'}
                       </button>
                       <button
                         type="button"
                         className="settings-action-btn settings-action-btn--secondary"
-                        onClick={() => startEditMcpServer(server)}
-                        data-testid={`mcp-server-edit-${server.id}`}
+                        onClick={() => void testBuiltinSearchConnection()}
+                        disabled={saving === 'search:test' || builtinSearchTool?.enabled === false}
+                        data-testid="settings-builtin-search-test"
                       >
-                        编辑
+                        {saving === 'search:test' ? '检查中…' : '检查内置搜索'}
                       </button>
-                      <button
-                        type="button"
-                        className="settings-action-btn settings-action-btn--secondary"
-                        onClick={() => void refreshMcpServer(server)}
-                        disabled={saving === `${server.id}:refresh` || !server.enabled}
-                        data-testid={`mcp-server-refresh-${server.id}`}
-                      >
-                        {saving === `${server.id}:refresh` ? '检查中…' : '检查连接'}
-                      </button>
-                      <button
-                        type="button"
-                        className="settings-action-btn settings-action-btn--secondary"
-                        onClick={() => void restartMcpServer(server)}
-                        disabled={saving === `${server.id}:restart` || !server.enabled}
-                        data-testid={`mcp-server-restart-${server.id}`}
-                      >
-                        {saving === `${server.id}:restart` ? '重启中…' : '重启'}
-                      </button>
-                      <button
-                        type="button"
-                        className={server.enabled ? 'tool-toggle enabled' : 'tool-toggle'}
-                        onClick={() => void toggleMcpServer(server)}
-                        disabled={saving === server.id}
-                        data-testid={`mcp-server-toggle-${server.id}`}
-                      >
-                        {server.enabled ? '已启用' : '已停用'}
-                      </button>
-                      <button
-                        type="button"
-                        className="settings-action-btn settings-action-btn--secondary"
-                        onClick={() => void deleteMcpServer(server)}
-                        disabled={saving === `${server.id}:delete`}
-                        data-testid={`mcp-server-delete-${server.id}`}
-                      >
-                        删除
-                      </button>
+                      {builtinSearchTool ? (
+                        <button
+                          type="button"
+                          className={builtinSearchTool.enabled ? 'tool-toggle enabled' : 'tool-toggle'}
+                          disabled={saving === builtinSearchTool.name}
+                          data-testid={`tool-toggle-${builtinSearchTool.name}`}
+                          onClick={() => void toggle(builtinSearchTool)}
+                        >
+                          {saving === builtinSearchTool.name ? '保存中…' : builtinSearchTool.enabled ? '已启用' : '已关闭'}
+                        </button>
+                      ) : null}
                     </div>
                   </article>
-                ))}
+
+                  <article className="settings-tool-card" data-testid="settings-search-bocha">
+                    <div>
+                      <div className="settings-tool-title">
+                        <strong>搏查搜索共享凭据</strong>
+                        <code>Bocha API Key</code>
+                      </div>
+                      <p>
+                        这里的 API Key 会同时用于内置搏查搜索，以及可选的搏查 MCP Bridge；不再需要在两个地方分别维护。下方连接检查只验证 MCP Bridge 是否联通，不代表内置搏查搜索一定可用。
+                      </p>
+                      <div className="settings-inline-form settings-inline-form--stack">
+                        <input
+                          type="password"
+                          value={bochaApiKey}
+                          onChange={(e) => setBochaApiKey(e.target.value)}
+                          placeholder="输入搏查 API Key"
+                          autoComplete="off"
+                          data-testid="mcp-bocha-api-key"
+                        />
+                        <div className="settings-tool-meta">
+                          <span>共享凭据：{bochaApiKey.trim() ? '已填写' : '未填写'}</span>
+                          <span>Bridge 状态：{bochaServer ? (bochaServer.enabled ? mcpHealthLabel(bochaServer.health_status) : '已停用') : '未配置'}</span>
+                          <span>Bridge 工具：{bochaServer?.tools_count ?? 0} 个</span>
+                        </div>
+                        {bochaStatus ? (
+                          <StatusNotice
+                            tone={bochaStatus.tone}
+                            title={bochaStatus.title}
+                            detail={bochaStatus.detail}
+                            compact
+                            testId="settings-bocha-status"
+                          />
+                        ) : null}
+                        {bochaServer?.last_error ? <p className="err">{bochaServer.last_error}</p> : null}
+                      </div>
+                    </div>
+                    <div className="settings-mcp-actions">
+                      <button
+                        type="button"
+                        className="settings-action-btn settings-action-btn--primary"
+                        onClick={() => void saveBochaConfig()}
+                        disabled={saving === 'bocha:save'}
+                        data-testid="mcp-bocha-save"
+                      >
+                        {saving === 'bocha:save' ? '保存中…' : bochaServer ? '更新 API Key' : '接入搏查'}
+                      </button>
+                      {bochaServer ? (
+                        <>
+                          <button
+                            type="button"
+                            className="settings-action-btn settings-action-btn--secondary"
+                            onClick={() => void refreshMcpServer(bochaServer)}
+                            disabled={saving === `${bochaServer.id}:refresh` || !bochaServer.enabled}
+                            data-testid="mcp-bocha-refresh"
+                          >
+                            {saving === `${bochaServer.id}:refresh` ? '检查中…' : '检查 MCP Bridge'}
+                          </button>
+                          <button
+                            type="button"
+                            className={bochaServer.enabled ? 'tool-toggle enabled' : 'tool-toggle'}
+                            onClick={() => void toggleMcpServer(bochaServer)}
+                            disabled={saving === bochaServer.id}
+                            data-testid="mcp-bocha-toggle"
+                          >
+                            {bochaServer.enabled ? '已启用' : '已停用'}
+                          </button>
+                          <button
+                            type="button"
+                            className="settings-action-btn settings-action-btn--secondary"
+                            onClick={() => void deleteMcpServer(bochaServer)}
+                            disabled={saving === `${bochaServer.id}:delete`}
+                            data-testid="mcp-bocha-delete"
+                          >
+                            移除
+                          </button>
+                        </>
+                      ) : null}
+                    </div>
+                  </article>
+                </div>
               </div>
-            )}
+
+              <div ref={builtinSectionRef} className="settings-tools-panel">
+                <div className="settings-section-head">
+                  <h3>内置工具</h3>
+                </div>
+                <p className="hint">
+                  除搜索外的常用内置工具集中放在这里，避免搜索设置与日常工具开关混在一起。
+                </p>
+                <div className="settings-tool-list">
+                  {builtinNonSearchTools.map((tool) => (
+                    <article className="settings-tool-card" key={tool.name} data-testid={`settings-tool-${tool.name}`}>
+                      <div>
+                        <div className="settings-tool-title">
+                          <strong>{toolLabel(tool.name)}</strong>
+                          <code>{tool.name}</code>
+                        </div>
+                        <p>{toolDescription(tool)}</p>
+                        <div className="settings-tool-meta">
+                          <span>能力：{capabilityLabel(tool.capability)}</span>
+                          <span>来源：{tool.source === 'builtin' ? '内置' : 'MCP'}</span>
+                        </div>
+                        <ToolHealthStrip health={toolHealthRows.get(tool.name) ?? null} />
+                      </div>
+                      <button
+                        type="button"
+                        className={tool.enabled ? 'tool-toggle enabled' : 'tool-toggle'}
+                        disabled={saving === tool.name || tool.source === 'mcp'}
+                        data-testid={`tool-toggle-${tool.name}`}
+                        onClick={() => void toggle(tool)}
+                        title={tool.source === 'mcp' ? '请在 MCP Server 层启停' : undefined}
+                      >
+                        {saving === tool.name ? '保存中…' : tool.enabled ? '已启用' : '已关闭'}
+                      </button>
+                    </article>
+                  ))}
+                </div>
+
+                <div className="settings-section-head">
+                  <h3>图像生成</h3>
+                </div>
+                <p className="hint">
+                  可配置图像生成工具的单次等待上限。留空会恢复默认值 5 分钟。
+                </p>
+                <div className="settings-inline-form">
+                  <input
+                    type="number"
+                    min="0.5"
+                    max="30"
+                    step="0.5"
+                    value={imageTimeoutMinutes}
+                    onChange={(e) => setImageTimeoutMinutes(e.target.value)}
+                    placeholder="5"
+                    data-testid="settings-image-timeout-minutes"
+                  />
+                  <button
+                    type="button"
+                    className="settings-action-btn settings-action-btn--primary"
+                    onClick={() => void saveImageTimeout()}
+                    disabled={saving === 'image-timeout'}
+                    data-testid="settings-image-timeout-save"
+                  >
+                    {saving === 'image-timeout' ? '保存中…' : '保存超时'}
+                  </button>
+                </div>
+              </div>
+
+              <div ref={mcpSectionRef} className="settings-tools-panel" data-testid="settings-mcp">
+                <div className="settings-section-head">
+                  <h3>高级 MCP</h3>
+                </div>
+                <p className="hint">
+                  这里保留给本地 stdio server 或自定义 bridge。常用搜索接入请优先使用上面的“搜索”区。
+                </p>
+                <div className="settings-mcp-form">
+                  <input
+                    value={mcpName}
+                    onChange={(e) => setMcpName(e.target.value)}
+                    placeholder="名称，例如 Filesystem"
+                    data-testid="mcp-server-name"
+                  />
+                  <input
+                    value={mcpCommand}
+                    onChange={(e) => setMcpCommand(e.target.value)}
+                    placeholder="command，例如 node"
+                    data-testid="mcp-server-command"
+                  />
+                  <input
+                    value={mcpArgs}
+                    onChange={(e) => setMcpArgs(e.target.value)}
+                    placeholder="args，以空格分隔"
+                    data-testid="mcp-server-args"
+                  />
+                  <textarea
+                    value={mcpEnv}
+                    onChange={(e) => setMcpEnv(e.target.value)}
+                    placeholder={'环境变量，每行一个，例如\nAPI_KEY=xxx'}
+                    data-testid="mcp-server-env"
+                  />
+                  <button
+                    type="button"
+                    className="settings-action-btn settings-action-btn--primary"
+                    onClick={() => void addMcpServer()}
+                    disabled={saving === 'mcp:add'}
+                    data-testid="mcp-server-add"
+                  >
+                    {saving === 'mcp:add' ? '添加中…' : '添加并刷新'}
+                  </button>
+                </div>
+                {customMcpServers.length === 0 ? (
+                  <StatusNotice
+                    tone="info"
+                    title="尚未添加 MCP Server"
+                    detail="当前可直接添加本地 stdio Server，也可接入自定义 bridge。搏查等常用搜索已单独归入上方搜索工具区。"
+                    compact
+                    testId="settings-mcp-empty"
+                  />
+                ) : (
+                  <div className="settings-tool-list">
+                    {customMcpServers.map((server) => (
+                      <article className="settings-tool-card" key={server.id} data-testid={`mcp-server-${server.id}`}>
+                        <div>
+                          <div className="settings-tool-title">
+                            <strong>{server.name}</strong>
+                            <code>{server.command} {server.args.join(' ')}</code>
+                          </div>
+                          <div className="settings-tool-meta">
+                            <span>状态：{server.enabled ? '启用' : '停用'}</span>
+                            <span>健康：{mcpHealthLabel(server.health_status)}</span>
+                            <span>工具：{server.tools_count} 个</span>
+                            <span>环境变量：{Object.keys(server.env).length} 个</span>
+                          </div>
+                          {server.last_error && <p className="err">{server.last_error}</p>}
+                          {expandedMcpId === server.id && (
+                            <div className="settings-mcp-runtime" data-testid={`mcp-server-runtime-${server.id}`}>
+                              {editingMcpId === server.id ? (
+                                <div className="settings-inline-form settings-inline-form--stack">
+                                  <input
+                                    value={editName}
+                                    onChange={(e) => setEditName(e.target.value)}
+                                    placeholder="名称"
+                                    data-testid={`mcp-server-edit-name-${server.id}`}
+                                  />
+                                  <input
+                                    value={editCommand}
+                                    onChange={(e) => setEditCommand(e.target.value)}
+                                    placeholder="command"
+                                    data-testid={`mcp-server-edit-command-${server.id}`}
+                                  />
+                                  <input
+                                    value={editArgs}
+                                    onChange={(e) => setEditArgs(e.target.value)}
+                                    placeholder="args，以空格分隔"
+                                    data-testid={`mcp-server-edit-args-${server.id}`}
+                                  />
+                                  <textarea
+                                    value={editEnv}
+                                    onChange={(e) => setEditEnv(e.target.value)}
+                                    placeholder={'环境变量，每行一个，例如\nAPI_KEY=xxx'}
+                                    data-testid={`mcp-server-edit-env-${server.id}`}
+                                  />
+                                  <div className="settings-mcp-actions">
+                                    <button
+                                      type="button"
+                                      className="settings-action-btn settings-action-btn--primary"
+                                      onClick={() => void saveMcpServer(server)}
+                                      disabled={saving === `${server.id}:save`}
+                                      data-testid={`mcp-server-save-${server.id}`}
+                                    >
+                                      {saving === `${server.id}:save` ? '保存中…' : '保存并重载'}
+                                    </button>
+                                    <button
+                                      type="button"
+                                      className="settings-action-btn settings-action-btn--secondary"
+                                      onClick={() => setEditingMcpId(null)}
+                                      data-testid={`mcp-server-cancel-${server.id}`}
+                                    >
+                                      取消
+                                    </button>
+                                  </div>
+                                </div>
+                              ) : (
+                                <>
+                                  <p className="hint">
+                                    {mcpRuntimeById[server.id]?.session_running
+                                      ? '当前会话正在运行，可直接查看最近 stderr / 生命周期日志。'
+                                      : '当前没有活跃会话；点击“检查连接”或“重启”后会重新建立连接。'}
+                                  </p>
+                                  <div className="settings-mcp-runtime-grid">
+                                    <div className="settings-mcp-panel" data-testid={`mcp-server-tools-${server.id}`}>
+                                      <strong>已注册工具</strong>
+                                      {mcpRuntimeById[server.id]?.tools.length ? (
+                                        <ul>
+                                          {mcpRuntimeById[server.id].tools.map((tool) => (
+                                            <li key={tool.name}>
+                                              <code>{tool.name}</code>
+                                              <span>{tool.description}</span>
+                                            </li>
+                                          ))}
+                                        </ul>
+                                      ) : (
+                                        <p className="hint">暂无工具，请先检查连接。</p>
+                                      )}
+                                    </div>
+                                    <div className="settings-mcp-panel" data-testid={`mcp-server-logs-${server.id}`}>
+                                      <strong>最近日志</strong>
+                                      {mcpRuntimeById[server.id]?.logs.length ? (
+                                        <ul className="settings-mcp-logs">
+                                          {mcpRuntimeById[server.id].logs.slice(-8).map((entry, index) => (
+                                            <li key={`${entry.ts}-${index}`} className={`level-${entry.level}`}>
+                                              <span>{formatRelativeTime(entry.ts)}</span>
+                                              <code>{entry.message}</code>
+                                            </li>
+                                          ))}
+                                        </ul>
+                                      ) : (
+                                        <p className="hint">暂无日志，连接后会显示启动 / stderr / 退出信息。</p>
+                                      )}
+                                    </div>
+                                  </div>
+                                </>
+                              )}
+                            </div>
+                          )}
+                        </div>
+                        <div className="settings-mcp-actions">
+                          <button
+                            type="button"
+                            className="settings-action-btn settings-action-btn--secondary"
+                            onClick={() => void toggleMcpDetails(server)}
+                            data-testid={`mcp-server-details-${server.id}`}
+                          >
+                            {expandedMcpId === server.id ? '收起详情' : '查看详情'}
+                          </button>
+                          <button
+                            type="button"
+                            className="settings-action-btn settings-action-btn--secondary"
+                            onClick={() => startEditMcpServer(server)}
+                            data-testid={`mcp-server-edit-${server.id}`}
+                          >
+                            编辑
+                          </button>
+                          <button
+                            type="button"
+                            className="settings-action-btn settings-action-btn--secondary"
+                            onClick={() => void refreshMcpServer(server)}
+                            disabled={saving === `${server.id}:refresh` || !server.enabled}
+                            data-testid={`mcp-server-refresh-${server.id}`}
+                          >
+                            {saving === `${server.id}:refresh` ? '检查中…' : '检查连接'}
+                          </button>
+                          <button
+                            type="button"
+                            className="settings-action-btn settings-action-btn--secondary"
+                            onClick={() => void restartMcpServer(server)}
+                            disabled={saving === `${server.id}:restart` || !server.enabled}
+                            data-testid={`mcp-server-restart-${server.id}`}
+                          >
+                            {saving === `${server.id}:restart` ? '重启中…' : '重启'}
+                          </button>
+                          <button
+                            type="button"
+                            className={server.enabled ? 'tool-toggle enabled' : 'tool-toggle'}
+                            onClick={() => void toggleMcpServer(server)}
+                            disabled={saving === server.id}
+                            data-testid={`mcp-server-toggle-${server.id}`}
+                          >
+                            {server.enabled ? '已启用' : '已停用'}
+                          </button>
+                          <button
+                            type="button"
+                            className="settings-action-btn settings-action-btn--secondary"
+                            onClick={() => void deleteMcpServer(server)}
+                            disabled={saving === `${server.id}:delete`}
+                            data-testid={`mcp-server-delete-${server.id}`}
+                          >
+                            删除
+                          </button>
+                        </div>
+                      </article>
+                    ))}
+                  </div>
+                )}
+              </div>
+            </div>
           </div>
         </>
       )}
@@ -950,6 +1191,7 @@ function toolLabel(name: string): string {
 
 function isSearchToolCandidate(tool: Tool): boolean {
   if (tool.name === 'builtin.file_search') return false;
+  if (/(^|[\s._-])ai_search([\s._-]|$)/i.test(tool.name)) return false;
   const haystack = `${tool.name} ${tool.description}`.toLowerCase();
   return tool.name === 'builtin.web_search' || /(^|[\s._-])search([\s._-]|$)|搜索|检索/.test(haystack);
 }
@@ -959,6 +1201,12 @@ function isManagedBochaServer(server: McpServer): boolean {
     server.command === MANAGED_BOCHA_COMMAND &&
     server.env[MANAGED_MCP_KIND_ENV_KEY] === MANAGED_BOCHA_KIND
   );
+}
+
+function builtinSearchEngineLabel(engine: BuiltinSearchEngine): string {
+  if (engine === 'exa') return 'Exa';
+  if (engine === 'bocha') return '搏查';
+  return 'DuckDuckGo';
 }
 
 function buildManagedBochaServerPayload(apiKey: string): Pick<McpServer, 'name' | 'command' | 'args' | 'env' | 'enabled'> {
@@ -975,7 +1223,7 @@ function buildManagedBochaServerPayload(apiKey: string): Pick<McpServer, 'name' 
 }
 
 function searchToolOptionLabel(tool: Tool, mcpServers: McpServer[]): string {
-  if (tool.name === DEFAULT_SEARCH_TOOL) return '内置网页搜索（DuckDuckGo）';
+  if (tool.name === DEFAULT_SEARCH_TOOL) return '内置网页搜索';
   if (tool.source === 'mcp' && tool.source_id) {
     const server = mcpServers.find((item) => item.id === tool.source_id);
     return server ? `${server.name} · ${tool.description}` : `MCP · ${tool.description}`;

@@ -13,6 +13,7 @@ import { createWebFetchToolWithDeps } from '../src/bus/builtins/web_fetch.js';
 import { createFileReadTool } from '../src/bus/builtins/file_read.js';
 import { createFileSearchTool } from '../src/bus/builtins/file_search.js';
 import { CostsRepo, FilesRepo, FileChunksRepo, ResearchRepo } from '../src/db/repos/index.js';
+import { buildResearchDraftSkeleton, buildResearchPlan, buildResearchTasks } from '../src/research/planner.js';
 import { ResearchRunner } from '../src/research/task-runner.js';
 
 const bearer = 'test_bearer_runner';
@@ -123,8 +124,62 @@ describe('research runner', () => {
     expect(detail!.sources.length).toBeGreaterThan(0);
     expect(detail!.claims.length).toBeGreaterThan(0);
     expect(detail!.session.draft_markdown).toContain('## 关键问题与证据');
+    expect(detail!.session.final_markdown).toBe(detail!.session.draft_markdown);
+    expect(String(detail!.sources[0]?.metadata?.query ?? '')).toContain('AI Coding 2026');
+    expect(String(detail!.sources[0]?.metadata?.question_id ?? '')).toBeTruthy();
+    expect(detail!.claims.some((claim) => claim.support_status !== 'unverified')).toBe(true);
     // All search/summarize/verify tasks should have left the queue.
     const queued = detail!.tasks.filter((t) => t.status === 'queued');
     expect(queued).toHaveLength(0);
+  }, 30_000);
+
+  it('pauses instead of claiming completion when searches return no usable results', async () => {
+    const costs = new CostsRepo(db);
+    const bus = new CapabilityBus(costs);
+    bus.register(createWebSearchToolWithDeps({
+      fetch: (() => Promise.resolve(new Response('<html></html>', {
+        status: 200,
+        headers: { 'content-type': 'text/html; charset=utf-8' },
+      }))) as typeof fetch,
+    }));
+    bus.register(createWebFetchToolWithDeps({ fetch: hermeticFetch as typeof fetch }));
+    const emptyRunner = new ResearchRunner({ repo, bus });
+
+    const created = repo.create({
+      title: '空结果研究',
+      objective: '验证没有搜索结果时不会显示为已完成。',
+      output_kind: 'report',
+      budget_mode: 'balanced',
+    });
+    const plan = buildResearchPlan({
+      title: created.title,
+      objective: created.objective,
+      outputKind: created.output_kind,
+      budgetMode: created.budget_mode,
+      constraints: created.constraints,
+    });
+    repo.update(created.id, {
+      plan,
+      status: 'running',
+      stage: 'planning',
+      started_at: Date.now(),
+      draft_markdown: buildResearchDraftSkeleton(created, plan),
+    });
+    repo.replaceTasks(created.id, buildResearchTasks({
+      plan,
+      title: created.title,
+      objective: created.objective,
+    }));
+
+    await emptyRunner.start(created.id);
+
+    const detail = repo.getDetail(created.id);
+    expect(detail).toBeTruthy();
+    expect(detail!.session.status).toBe('paused');
+    expect(detail!.tasks.some((t) => t.status === 'failed')).toBe(true);
+    expect(detail!.sources).toHaveLength(0);
+    expect(detail!.claims).toHaveLength(0);
+    expect(detail!.tasks.find((t) => t.kind === 'summarize')?.status).toBe('failed');
+    expect(detail!.tasks.find((t) => t.kind === 'verify_citation')?.status).toBe('skipped');
   }, 30_000);
 });

@@ -23,13 +23,16 @@
  */
 
 import type {
+  ResearchClaim,
   ResearchPlan,
   ResearchSession,
   ResearchSource,
   ResearchTask,
 } from '@taori/shared';
 import type { CapabilityBus } from '../bus/index.js';
+import type { MemoriesRepo } from '../db/repos/index.js';
 import type { ResearchRepo } from '../db/repos/index.js';
+import { pickPreferredSearchToolName } from '../search/tool-selection.js';
 
 const SEARCH_RESULTS_PER_TASK = 5;
 const FETCH_TOP_N = 2;
@@ -39,6 +42,7 @@ const TICK_DELAY_MS = 25;
 export interface ResearchRunnerDeps {
   repo: ResearchRepo;
   bus: CapabilityBus;
+  memories?: MemoriesRepo;
   log?: { info?: (msg: unknown, extra?: unknown) => void; warn?: (msg: unknown, extra?: unknown) => void; error?: (msg: unknown, extra?: unknown) => void };
 }
 
@@ -47,6 +51,8 @@ interface WebSearchHit {
   url: string;
   snippet: string;
 }
+
+type TaskOutcome = 'completed' | 'failed' | 'skipped';
 
 export class ResearchRunner {
   private active = new Map<string, Promise<void>>();
@@ -86,42 +92,75 @@ export class ResearchRunner {
       const tasks = this.deps.repo.listTasks(sessionId);
       const next = tasks.find((t) => t.status === 'queued');
       if (!next) {
-        this.finalizeSession(session, tasks);
+        this.finalizeSession(this.deps.repo.get(sessionId) ?? session, this.deps.repo.listTasks(sessionId));
         return;
       }
-      await this.runTask(session, next);
+      if (this.pauseIfNoSourcesForSynthesis(session, next)) return;
+      const outcome = await this.runTask(session, next);
+      if (outcome === 'failed' && (next.kind === 'summarize' || next.kind === 'verify_citation')) {
+        this.finalizeSession(this.deps.repo.get(sessionId) ?? session, this.deps.repo.listTasks(sessionId));
+        return;
+      }
       await sleep(TICK_DELAY_MS);
     }
   }
 
+  private pauseIfNoSourcesForSynthesis(session: ResearchSession, next: ResearchTask): boolean {
+    if (next.kind !== 'summarize' && next.kind !== 'verify_citation') return false;
+    const sources = this.deps.repo.listSources(session.id);
+    if (sources.length > 0) return false;
+    const reason =
+      '没有收集到可用来源，已在生成草稿前暂停研究。请切换可用搜索源或调整研究方向后重试。';
+    this.deps.repo.updateTask(next.id, {
+      status: 'failed',
+      finished_at: Date.now(),
+      error: { message: reason },
+    });
+    for (const task of this.deps.repo.listTasks(session.id)) {
+      if (task.id === next.id || task.status !== 'queued') continue;
+      if (task.kind !== 'summarize' && task.kind !== 'verify_citation') continue;
+      this.deps.repo.updateTask(task.id, {
+        status: 'skipped',
+        finished_at: Date.now(),
+        output: { reason: 'missing_sources' },
+      });
+    }
+    this.finalizeSession(this.deps.repo.get(session.id) ?? session, this.deps.repo.listTasks(session.id));
+    return true;
+  }
+
   private finalizeSession(session: ResearchSession, tasks: ResearchTask[]): void {
     const hasFailed = tasks.some((t) => t.status === 'failed');
+    const current = this.deps.repo.get(session.id) ?? session;
     this.deps.repo.update(session.id, {
       status: hasFailed ? 'paused' : 'completed',
       stage: hasFailed ? session.stage : 'finalized',
       completed_at: hasFailed ? null : Date.now(),
+      ...(hasFailed || current.final_markdown != null || current.draft_markdown == null
+        ? {}
+        : { final_markdown: current.draft_markdown }),
     });
   }
 
-  private async runTask(session: ResearchSession, task: ResearchTask): Promise<void> {
+  private async runTask(session: ResearchSession, task: ResearchTask): Promise<TaskOutcome> {
     const startedAt = Date.now();
     this.deps.repo.updateTask(task.id, { status: 'running', started_at: startedAt });
     try {
       switch (task.kind) {
         case 'search':
-          await this.runSearch(session, task);
           this.deps.repo.update(session.id, { stage: 'searching' });
+          await this.runSearch(session, task);
           break;
         case 'fetch':
           await this.runFetch(session, task);
           break;
         case 'summarize':
-          await this.runSummarize(session);
           this.deps.repo.update(session.id, { stage: 'drafting' });
+          await this.runSummarize(session);
           break;
         case 'verify_citation':
-          await this.runVerify(session);
           this.deps.repo.update(session.id, { stage: 'verifying' });
+          await this.runVerify(session);
           break;
         case 'outline':
         case 'read_file':
@@ -130,18 +169,19 @@ export class ResearchRunner {
             finished_at: Date.now(),
             output: { skipped: true },
           });
-          return;
+          return 'completed';
         default:
           this.deps.repo.updateTask(task.id, {
             status: 'skipped',
             finished_at: Date.now(),
           });
-          return;
+          return 'skipped';
       }
       this.deps.repo.updateTask(task.id, {
         status: 'completed',
         finished_at: Date.now(),
       });
+      return 'completed';
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       this.deps.log?.warn?.({ sessionId: session.id, taskId: task.id, err: message }, 'research task failed');
@@ -150,24 +190,31 @@ export class ResearchRunner {
         finished_at: Date.now(),
         error: { message },
       });
+      return 'failed';
     }
   }
 
   private async runSearch(session: ResearchSession, task: ResearchTask): Promise<void> {
-    const query = String(task.input?.question ?? task.title ?? '').trim();
+    const query = String(task.input?.query ?? task.input?.question ?? task.title ?? '').trim();
     if (!query) {
       this.deps.repo.updateTask(task.id, { output: { reason: 'empty_query' } });
       return;
     }
+    const searchToolName = pickPreferredSearchToolName(
+      this.deps.bus,
+      session.preferred_search_tool ?? this.deps.memories?.getEffective(session.conversation_id ?? null, 'default_search_tool'),
+      this.deps.bus.list().map((tool) => tool.name),
+    ) ?? 'builtin.web_search';
     const res = await this.deps.bus.invoke(
-      'builtin.web_search',
+      searchToolName,
       { query, num_results: SEARCH_RESULTS_PER_TASK },
       { conversationId: session.conversation_id ?? null },
     );
     if (!res.ok) {
-      throw new Error(`web_search failed: ${res.error?.message ?? 'unknown'}`);
+      throw new Error(`${searchToolName} failed: ${res.error?.message ?? 'unknown'}`);
     }
-    const hits = (res.output as { results?: WebSearchHit[] })?.results ?? [];
+    const output = res.output as { results?: WebSearchHit[]; engine?: string; fallback_from?: string };
+    const hits = output?.results ?? [];
     const recorded: ResearchSource[] = [];
     for (const hit of hits.slice(0, SEARCH_RESULTS_PER_TASK)) {
       if (!hit?.url) continue;
@@ -183,7 +230,13 @@ export class ResearchRunner {
         snippet: hit.snippet?.slice(0, 3_900) ?? null,
         credibility_score: scoreCredibility(hit.url),
         included: true,
-        metadata: { question_id: task.input?.question_id ?? null, query },
+        metadata: {
+          question_id: task.input?.question_id ?? null,
+          query,
+          search_tool: searchToolName,
+          search_engine: output?.engine ?? null,
+          search_fallback_from: output?.fallback_from ?? null,
+        },
       });
       recorded.push(inserted);
     }
@@ -208,8 +261,17 @@ export class ResearchRunner {
         // ignore individual fetch failures; search hits are still recorded.
       }
     }
+    if (recorded.length === 0) {
+      throw new Error(`web_search returned no usable results for query: ${query}`);
+    }
     this.deps.repo.updateTask(task.id, {
-      output: { hits: recorded.length, query },
+      output: {
+        hits: recorded.length,
+        query,
+        search_tool: searchToolName,
+        search_engine: output?.engine ?? null,
+        search_fallback_from: output?.fallback_from ?? null,
+      },
     });
     // Snapshot session budget from cost_records sum is expensive; defer to
     // verify step which aggregates once.
@@ -259,21 +321,16 @@ export class ResearchRunner {
     const plan = session.plan;
     if (!plan) return;
     const sources = this.deps.repo.listSources(session.id);
-    // Wipe prior auto-claims for idempotency (re-run friendliness).
-    for (const claim of this.deps.repo.listClaims(session.id)) {
-      // ResearchRepo has replaceClaims but no deleteOne; we just leave existing
-      // claims in place since the schema treats them as immutable history.
-      void claim;
-    }
     const sections = outputSections(plan.output_kind);
+    const claims: Array<Omit<ResearchClaim, 'id' | 'research_session_id' | 'created_at' | 'updated_at'>> = [];
     for (let i = 0; i < sections.length; i += 1) {
       const section = sections[i] ?? `第 ${i + 1} 部分`;
-      const question = plan.key_questions[i % Math.max(1, plan.key_questions.length)];
+      const question = pickQuestionForSection(plan, section, i);
       const matching = sources
-        .filter((s) => matchesQuestion(s, question?.question ?? ''))
+        .filter((s) => matchesQuestion(s, question?.question ?? '', question?.id))
         .slice(0, 3);
       const support = pickSupport(matching);
-      this.deps.repo.appendClaim(session.id, {
+      claims.push({
         section_key: section,
         claim_text: buildClaimText(section, question?.question ?? session.objective, matching),
         claim_kind: i === 0 ? 'recommendation' : 'fact',
@@ -281,6 +338,7 @@ export class ResearchRunner {
         citations: matching.map((s) => ({ source_id: s.id, locator: s.locator, note: s.title })),
       });
     }
+    this.deps.repo.replaceClaims(session.id, claims);
   }
 }
 
@@ -309,13 +367,42 @@ function outputSections(kind: ResearchPlan['output_kind']): string[] {
   return ['结论', '证据', '风险', '建议', '待补充问题'];
 }
 
+function pickQuestionForSection(
+  plan: ResearchPlan,
+  section: string,
+  index: number,
+): ResearchPlan['key_questions'][number] | undefined {
+  const priorities: Record<string, string[]> = {
+    结论: ['现状判断', '方案差异', '推荐路径', '核心事实'],
+    证据: ['问题拆解', '现状判断', '评估维度'],
+    风险: ['风险争议'],
+    建议: ['关键变量', '推荐路径', '方案差异'],
+    待补充问题: ['问题拆解', '现状判断'],
+    对比维度: ['评估维度'],
+    方案分析: ['方案差异', '现状判断'],
+    判断依据: ['决策条件', '现状判断'],
+    可选路径: ['推荐路径', '方案差异'],
+    风险与前提: ['风险争议', '决策条件'],
+    执行建议: ['推荐路径', '关键变量'],
+    摘要: ['核心事实', '现状判断'],
+    关键事实: ['核心事实', '现状判断'],
+    下一步: ['推荐路径', '关键变量'],
+  };
+  for (const reason of priorities[section] ?? []) {
+    const found = plan.key_questions.find((question) => question.reason === reason);
+    if (found) return found;
+  }
+  return plan.key_questions[index % Math.max(1, plan.key_questions.length)];
+}
+
 function pickSupport(matching: ResearchSource[]): 'supported' | 'weak' | 'unverified' {
   if (matching.length === 0) return 'unverified';
   if (matching.length === 1) return 'weak';
   return 'supported';
 }
 
-function matchesQuestion(source: ResearchSource, question: string): boolean {
+function matchesQuestion(source: ResearchSource, question: string, questionId?: string): boolean {
+  if (questionId && source.metadata?.question_id === questionId) return true;
   if (!question) return true;
   const hay = `${source.title ?? ''} ${source.snippet ?? ''}`.toLowerCase();
   if (!hay.trim()) return false;
@@ -357,7 +444,7 @@ function buildDraft(
     lines.push('', '## 关键问题与证据');
     for (const q of plan.key_questions) {
       lines.push('', `### ${q.question}`);
-      const matching = sources.filter((s) => matchesQuestion(s, q.question)).slice(0, 5);
+      const matching = sources.filter((s) => matchesQuestion(s, q.question, q.id)).slice(0, 5);
       if (matching.length === 0) {
         lines.push('', '_暂无匹配证据，建议扩大检索关键词或追加来源。_');
         continue;

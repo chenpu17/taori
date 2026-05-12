@@ -56,6 +56,21 @@ function sectionHeadings(outputKind: ResearchOutputKind): string[] {
   return ['结论', '证据', '风险', '建议', '待补充问题'];
 }
 
+function summarizeObjective(objective: string): string {
+  const first = objective.trim().replace(/\s+/g, ' ').split(/[。.!?！？]/)[0]?.trim() ?? '';
+  if (!first) return '围绕目标完成范围澄清、问题拆解与证据搜集。';
+  return first.length > 80 ? `${first.slice(0, 80)}…` : first;
+}
+
+function describeScope(constraints: ResearchConstraints): string[] {
+  const bits: string[] = [];
+  if (constraints.time_range?.trim()) bits.push(`时间范围：${constraints.time_range.trim()}`);
+  if (constraints.region?.trim()) bits.push(`区域：${constraints.region.trim()}`);
+  if (constraints.language?.trim()) bits.push(`语言：${constraints.language.trim()}`);
+  if (constraints.must_cover.length > 0) bits.push(`必须覆盖：${constraints.must_cover.join('、')}`);
+  return bits;
+}
+
 export function buildResearchPlan(input: {
   title: string;
   objective: string;
@@ -64,8 +79,13 @@ export function buildResearchPlan(input: {
   constraints: ResearchConstraints;
 }): ResearchPlan {
   const questions = questionTemplates(input.outputKind);
+  const scope = describeScope(input.constraints);
   return {
-    summary: `围绕“${input.title}”先做范围澄清、问题拆解与证据搜集，再整理成 ${input.outputKind === 'brief' ? '简报' : input.outputKind === 'comparison' ? '对比结论' : input.outputKind === 'decision' ? '决策建议' : '研究报告'}。`,
+    summary: [
+      `围绕“${input.title}”开展研究，目标是：${summarizeObjective(input.objective)}`,
+      scope.length > 0 ? `约束条件：${scope.join('；')}。` : null,
+      `交付形式：${input.outputKind === 'brief' ? '简报' : input.outputKind === 'comparison' ? '对比结论' : input.outputKind === 'decision' ? '决策建议' : '研究报告'}。`,
+    ].filter(Boolean).join(' '),
     output_kind: input.outputKind,
     budget_mode: input.budgetMode,
     key_questions: questions.map((item, index) => ({
@@ -109,7 +129,56 @@ export function buildResearchPlan(input: {
   };
 }
 
-export function buildResearchTasks(plan: ResearchPlan): ResearchTaskSeed[] {
+function buildSearchQuery(topic: string, objective: string, question: { question: string; reason: string }): string {
+  const parts = [
+    topic.trim(),
+    summarizeObjective(objective),
+    question.reason.trim(),
+    ...searchReasonHints(question.reason),
+    '官网 报告 文档',
+  ].filter(Boolean);
+  const deduped: string[] = [];
+  const seen = new Set<string>();
+  for (const part of parts) {
+    const normalized = normalizeSearchChunk(part);
+    if (!normalized || seen.has(normalized)) continue;
+    seen.add(normalized);
+    deduped.push(part.trim());
+  }
+  return deduped
+    .join(' ')
+    .replace(/[：:；;，,。！？!?（）()\[\]【】"']/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, 160);
+}
+
+function normalizeSearchChunk(value: string): string {
+  return value
+    .toLowerCase()
+    .replace(/[：:；;，,。！？!?（）()\[\]【】"'`\s]/g, '')
+    .trim();
+}
+
+function searchReasonHints(reason: string): string[] {
+  if (reason === '问题拆解') return ['子问题 研究框架 市场格局 主要玩家'];
+  if (reason === '现状判断') return ['现状 市场规模 竞争格局 主要玩家'];
+  if (reason === '关键变量') return ['关键变量 驱动因素 成本 模型能力'];
+  if (reason === '风险争议') return ['风险 争议 合规 安全 版权'];
+  if (reason === '评估维度') return ['评估维度 比较指标 方法'];
+  if (reason === '方案差异') return ['差异 对比 价格 速度 可用性'];
+  if (reason === '决策条件') return ['决策条件 前提 约束'];
+  if (reason === '推荐路径') return ['推荐路径 优先级 建议'];
+  if (reason === '核心事实') return ['核心事实 数据 结论'];
+  return [];
+}
+
+export function buildResearchTasks(input: {
+  plan: ResearchPlan;
+  title: string;
+  objective: string;
+}): ResearchTaskSeed[] {
+  const { plan, title, objective } = input;
   const tasks: ResearchTaskSeed[] = [
     {
       kind: 'outline',
@@ -129,10 +198,12 @@ export function buildResearchTasks(plan: ResearchPlan): ResearchTaskSeed[] {
     tasks.push({
       kind: 'search',
       status: 'queued',
-      title: `检索：${question.question}`,
+      title: `检索：${title} — ${question.reason}`,
       input: {
+        question_id: question.id,
         question: question.question,
         reason: question.reason,
+        query: buildSearchQuery(title, objective, question),
       },
     });
   }

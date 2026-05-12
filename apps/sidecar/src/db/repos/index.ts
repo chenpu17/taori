@@ -392,6 +392,8 @@ function toResearchSession(row: ResearchSessionRow): ResearchSession {
     plan: parseResearchPlan(row.plan_json),
     draft_markdown: row.draft_markdown ?? null,
     final_markdown: row.final_markdown ?? null,
+    preferred_model_id: (row as Record<string, unknown>).preferred_model_id as string | null ?? null,
+    preferred_search_tool: (row as Record<string, unknown>).preferred_search_tool as string | null ?? null,
     started_at: row.started_at ?? null,
     completed_at: row.completed_at ?? null,
     created_at: row.created_at,
@@ -1374,6 +1376,8 @@ export interface ResearchSessionPatch {
   plan?: ResearchPlan | null;
   draft_markdown?: string | null;
   final_markdown?: string | null;
+  preferred_model_id?: string | null;
+  preferred_search_tool?: string | null;
   started_at?: number | null;
   completed_at?: number | null;
 }
@@ -1473,6 +1477,8 @@ export class ResearchRepo {
         plan_json: null,
         draft_markdown: null,
         final_markdown: null,
+        preferred_model_id: input.preferred_model_id ?? null,
+        preferred_search_tool: input.preferred_search_tool ?? null,
         started_at: null,
         completed_at: null,
         created_at: now,
@@ -1504,6 +1510,8 @@ export class ResearchRepo {
         }),
         ...(patch.draft_markdown !== undefined && { draft_markdown: patch.draft_markdown }),
         ...(patch.final_markdown !== undefined && { final_markdown: patch.final_markdown }),
+        ...(patch.preferred_model_id !== undefined && { preferred_model_id: patch.preferred_model_id }),
+        ...(patch.preferred_search_tool !== undefined && { preferred_search_tool: patch.preferred_search_tool }),
         ...(patch.started_at !== undefined && { started_at: patch.started_at }),
         ...(patch.completed_at !== undefined && { completed_at: patch.completed_at }),
         updated_at: Date.now(),

@@ -7,7 +7,7 @@ export const MANAGED_MCP_KIND_ENV_KEY = 'TAORI_MANAGED_MCP_KIND';
 export const MANAGED_BOCHA_KIND = 'bocha-search';
 export const MANAGED_BOCHA_API_KEY_ENV = 'BOCHA_API_KEY';
 export const MANAGED_BOCHA_AUTH_HEADER_ENV = 'BOCHA_AUTH_HEADER';
-export const MANAGED_BOCHA_ENDPOINT = 'https://mcp.bochaai.com/sse';
+export const MANAGED_BOCHA_ENDPOINT = 'https://mcp.bochaai.com/mcp';
 
 function resolveMcpRemoteProxyPath(): string {
   return require.resolve('mcp-remote/dist/proxy.js');
@@ -31,12 +31,14 @@ export function resolveManagedMcpServerConfig(config: {
   command: string;
   args: string[];
   env: Record<string, string>;
+  stdio_protocol?: 'content-length' | 'jsonl';
 } {
   if (!isManagedBochaServer(config)) {
     return {
       command: config.command,
       args: config.args,
       env: config.env,
+      stdio_protocol: 'content-length',
     };
   }
 
@@ -55,11 +57,12 @@ export function resolveManagedMcpServerConfig(config: {
       resolveMcpRemoteProxyPath(),
       MANAGED_BOCHA_ENDPOINT,
       '--transport',
-      'sse-only',
+      'http-first',
       '--header',
       `Authorization:\${${MANAGED_BOCHA_AUTH_HEADER_ENV}}`,
       '--silent',
     ],
     env,
+    stdio_protocol: 'jsonl',
   };
 }

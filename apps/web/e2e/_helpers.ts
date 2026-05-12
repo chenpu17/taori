@@ -103,6 +103,9 @@ export async function resetSidecar(env: SidecarEnv): Promise<void> {
     'active_chat_model_id',
     'image_model_default',
     'thinking_enabled',
+    'builtin_web_search_engine',
+    'builtin_web_search_bocha_api_key',
+    'default_search_tool',
   ];
   for (const key of globalMemoryKeys) {
     await authedFetch(

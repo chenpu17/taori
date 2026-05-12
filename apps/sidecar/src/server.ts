@@ -578,10 +578,21 @@ export function buildServer(args: BuildServerArgs): FastifyInstance {
     bus.register(createFileReadTool(files));
     bus.register(createFileSearchTool({ filesRepo: files, chunksRepo: fileChunks }));
     if (process.env.TAORI_E2E_HERMETIC_WEB === '1') {
-      bus.register(createWebSearchToolWithDeps({ fetch: hermeticWebFetch }));
+      bus.register(createWebSearchToolWithDeps({
+        fetch: hermeticWebFetch,
+        resolveConfig: (ctx) => ({
+          engine: (memories.getEffective(ctx.conversationId ?? null, 'builtin_web_search_engine') as 'duckduckgo' | 'exa' | 'bocha' | null) ?? 'duckduckgo',
+          bochaApiKey: memories.getEffective(ctx.conversationId ?? null, 'builtin_web_search_bocha_api_key'),
+        }),
+      }));
       bus.register(createWebFetchToolWithDeps({ fetch: hermeticWebFetch }));
     } else {
-      bus.register(createWebSearchTool());
+      bus.register(createWebSearchToolWithDeps({
+        resolveConfig: (ctx) => ({
+          engine: (memories.getEffective(ctx.conversationId ?? null, 'builtin_web_search_engine') as 'duckduckgo' | 'exa' | 'bocha' | null) ?? 'duckduckgo',
+          bochaApiKey: memories.getEffective(ctx.conversationId ?? null, 'builtin_web_search_bocha_api_key'),
+        }),
+      }));
       bus.register(createWebFetchTool());
     }
     const filesDir = path.join(path.dirname(args.config.dbPath), 'files');
@@ -621,7 +632,7 @@ export function buildServer(args: BuildServerArgs): FastifyInstance {
   registerTemplatesPersonasRoute(app, argsWithBus);
   registerWorkflowRecipesRoute(app, argsWithBus);
   const researchRepo = new ResearchRepo(args.db);
-  const researchRunner = new ResearchRunner({ repo: researchRepo, bus, log: app.log });
+  const researchRunner = new ResearchRunner({ repo: researchRepo, bus, memories, log: app.log });
   registerResearchRoute(app, { ...argsWithBus, researchRunner });
 
   registerToolsRoute(app, { bus, memories, costs });

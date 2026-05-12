@@ -7,6 +7,7 @@ import { ControlClient } from '../src/control/client.js';
 import { openDb } from '../src/db/index.js';
 import { MemoryStore } from '../src/keystore.js';
 import { buildServer } from '../src/server.js';
+import { ResearchRepo } from '../src/db/repos/index.js';
 
 const bearer = 'test_bearer_research';
 
@@ -111,13 +112,15 @@ describe('research sessions', () => {
     expect(confirm.statusCode).toBe(200);
     const confirmBody = confirm.json() as {
       session: { status: string; draft_markdown: string | null; started_at: number | null };
-      tasks: Array<{ status: string }>;
+      tasks: Array<{ status: string; title: string; input?: { query?: string } }>;
     };
     expect(confirmBody.session.status).toBe('running');
     expect(confirmBody.session.started_at).not.toBeNull();
     expect(confirmBody.session.draft_markdown).toContain('# 国产模型价格变化');
     expect(confirmBody.tasks.length).toBeGreaterThan(1);
     expect(confirmBody.tasks.some((task) => task.status === 'queued')).toBe(true);
+    expect(confirmBody.tasks.some((task) => task.title.includes('国产模型价格变化'))).toBe(true);
+    expect(confirmBody.tasks.some((task) => task.input?.query?.includes('国产模型价格变化'))).toBe(true);
   });
 
   it('pauses, resumes, cancels, and exports a research session', async () => {
@@ -174,5 +177,71 @@ describe('research sessions', () => {
     });
     expect(cancelled.statusCode).toBe(200);
     expect((cancelled.json() as { session: { status: string } }).session.status).toBe('cancelled');
+  });
+
+  it('resume requeues a paused run when all searches previously failed with no sources', async () => {
+    const repo = new ResearchRepo(db);
+    const create = await app.inject({
+      method: 'POST',
+      url: '/v1/research/sessions',
+      headers: { authorization: `Bearer ${bearer}`, 'content-type': 'application/json' },
+      payload: {
+        title: '浏览器 AI 助手交互趋势',
+        objective: '梳理浏览器端 AI 助手的典型交互设计趋势。',
+        output_kind: 'report',
+        budget_mode: 'balanced',
+      },
+    });
+    const created = create.json() as { id: string };
+    await app.inject({
+      method: 'POST',
+      url: `/v1/research/sessions/${created.id}/start`,
+      headers: { authorization: `Bearer ${bearer}`, 'content-type': 'application/json' },
+      payload: { confirm: true },
+    });
+
+    const beforeResume = repo.getDetail(created.id)!;
+    for (const task of beforeResume.tasks) {
+      if (task.kind === 'search') {
+        repo.updateTask(task.id, {
+          status: 'failed',
+          error: { message: 'web_search returned no usable results' },
+          finished_at: Date.now(),
+        });
+      } else if (task.kind === 'summarize') {
+        repo.updateTask(task.id, {
+          status: 'failed',
+          error: { message: 'missing_sources' },
+          finished_at: Date.now(),
+        });
+      } else if (task.kind === 'verify_citation') {
+        repo.updateTask(task.id, {
+          status: 'skipped',
+          output: { reason: 'missing_sources' },
+          finished_at: Date.now(),
+        });
+      }
+    }
+    repo.update(created.id, { status: 'paused', stage: 'searching' });
+
+    const resumed = await app.inject({
+      method: 'POST',
+      url: `/v1/research/sessions/${created.id}/resume`,
+      headers: { authorization: `Bearer ${bearer}` },
+    });
+    expect(resumed.statusCode).toBe(200);
+    const resumedBody = resumed.json() as {
+      session: { status: string; stage: string; draft_markdown: string | null };
+      tasks: Array<{ kind: string; status: string; error?: unknown }>;
+      sources: unknown[];
+      claims: unknown[];
+    };
+    expect(resumedBody.session.status).toBe('running');
+    expect(resumedBody.session.stage).toBe('planning');
+    expect(resumedBody.session.draft_markdown).toContain('# 浏览器 AI 助手交互趋势');
+    expect(resumedBody.tasks.some((task) => task.kind === 'search' && task.status === 'queued')).toBe(true);
+    expect(resumedBody.tasks.some((task) => task.kind === 'search' && task.status === 'failed')).toBe(false);
+    expect(resumedBody.sources).toHaveLength(0);
+    expect(resumedBody.claims).toHaveLength(0);
   });
 });

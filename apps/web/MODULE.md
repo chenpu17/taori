@@ -23,8 +23,8 @@
 
 ## 当前合同变化
 
-- 控制中心工具页按“搜索工具 / 其他内置工具 / 高级 MCP Bridge”三段重排：搏查搜索改为托管远程 SSE 接入卡片，不再向普通用户暴露 `npx mcp-remote` 细节；自定义 stdio/bridge 仍保留在高级区。
-- 控制中心工具页新增“默认搜索工具”全局设置，用户选择会同时影响普通聊天、Quick Compare 与 Roundtable 的联网搜索入口；未配置时回退到内置网页搜索。
+- 控制中心工具页按“搜索 / 内置工具 / 高级 MCP”分区导航展示：搜索设置、其他内置工具、自定义 MCP 配置不再混排成长列表。
+- 搜索区把“默认搜索来源”“内置网页搜索引擎”“搏查 API Key”收敛为一组设置；搏查共享凭据同时服务内置搏查搜索与可选的托管 Bridge，不再分别维护两套 Key。
 - 模型编辑器新增 `pricing_meta` JSON 编辑。
 - 圆桌参与者列新增 `rt.tool_trace` 可视化，并在刷新后保留本轮工具痕迹。
 - 聊天消息的“续写”按钮改为调用 Sidecar `POST /v1/runs/:id/continue`，不再追加“请继续上文”这类合成用户消息；若 Sidecar 返回 `cost_confirmation_required`，复用成本确认弹窗并以 `confirmed_cost=true` 二次提交；完成后刷新消息、运行时间线、实时成本和侧边栏。
@@ -44,4 +44,4 @@
 - standalone 浏览器模式下，Renderer 不再要求预先注入 Bearer 才能工作：`sidecar.ts` 可读取同源 bootstrap，所有普通 REST 与聊天流请求默认携带 `credentials: include`，由 Sidecar 的 HttpOnly cookie 会话完成鉴权；Tauri 与开发环境仍兼容 Bearer 模式。
 - 聊天消息内的成本摘要不再只显示 `$`：Renderer 会在消息气泡中直接展示 `in / cache / out` token 指标，并继续保留详情卡与 Run Timeline 的成本明细。
 - ModelCenter 的模型矩阵行操作区改为紧凑布局：默认/健康/Tools 使用短文案，编辑/删除改为 icon button，降低表格 padding 与操作区宽度，优先提升同屏信息密度。
-- Control Center 新增“深度研究”分区与顶部快捷入口：Renderer 可创建 research session、预览计划、确认启动、暂停/恢复/取消，并查看任务 / 来源 / 结论占位与 Markdown 草稿。
+- 深度研究 Renderer 改为更接近对话的单列研究流：启动页保留大输入框与最少控制项；进入研究后以“用户请求气泡 + 研究卡片 + 结果卡片”的方式推进，计划预览、执行进度、结果导出与继续追问都收敛在同一列中，证据与风险折叠到次级面板。

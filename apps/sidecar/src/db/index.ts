@@ -486,5 +486,15 @@ CREATE UNIQUE INDEX IF NOT EXISTS memories_scope_key_uniq_v2
   if (!qcOutputCols.some((c) => c.name === 'tool_names')) {
     sqlite.exec(`ALTER TABLE quick_compare_outputs ADD COLUMN tool_names TEXT NOT NULL DEFAULT '[]'`);
   }
+  // R1 — preferred model and search tool columns on research_sessions (additive).
+  const resCols = sqlite
+    .prepare(`PRAGMA table_info(research_sessions)`)
+    .all() as Array<{ name: string }>;
+  if (!resCols.some((c) => c.name === 'preferred_model_id')) {
+    sqlite.exec(`ALTER TABLE research_sessions ADD COLUMN preferred_model_id TEXT`);
+  }
+  if (!resCols.some((c) => c.name === 'preferred_search_tool')) {
+    sqlite.exec(`ALTER TABLE research_sessions ADD COLUMN preferred_search_tool TEXT`);
+  }
   return drizzle(sqlite, { schema });
 }
