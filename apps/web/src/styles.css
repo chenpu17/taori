@@ -3896,6 +3896,191 @@ header h1::before {
   flex-wrap: wrap;
   overflow: visible;
 }
+
+/* AI Planning UI */
+.research-center__planning-waiting {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 20px 0 8px;
+  color: var(--fg-soft);
+}
+.research-center__planning-waiting p {
+  margin: 0;
+  font-size: 14px;
+}
+.research-center__planning-indicator {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  color: var(--fg-soft);
+}
+@keyframes rc-spin {
+  to { transform: rotate(360deg); }
+}
+.research-center__spinner {
+  display: inline-block;
+  width: 14px;
+  height: 14px;
+  border: 2px solid color-mix(in srgb, var(--accent) 30%, transparent);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: rc-spin 0.7s linear infinite;
+  flex-shrink: 0;
+}
+.research-center__plan-review {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  padding-top: 4px;
+}
+.research-center__plan-messages {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.research-center__plan-msg {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.research-center__plan-msg--user {
+  align-items: flex-end;
+}
+.research-center__plan-msg--assistant {
+  align-items: flex-start;
+}
+.research-center__plan-msg-role {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--fg-soft);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+.research-center__plan-msg p {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.55;
+  padding: 8px 12px;
+  border-radius: 10px;
+  max-width: 85%;
+}
+.research-center__plan-msg--user p {
+  background: color-mix(in srgb, var(--accent) 14%, var(--surface-2));
+  color: var(--fg);
+}
+.research-center__plan-msg--assistant p {
+  background: var(--surface-2);
+  color: var(--fg);
+}
+.research-center__plan-summary-card {
+  border-left: 3px solid var(--accent);
+  padding: 10px 14px;
+  background: color-mix(in srgb, var(--accent) 6%, var(--surface-2));
+  border-radius: 0 8px 8px 0;
+}
+.research-center__plan-summary-text {
+  margin: 0;
+  font-size: 14px;
+  line-height: 1.65;
+  color: var(--fg);
+}
+.research-center__plan-section-label {
+  display: block;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--fg-soft);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  margin-bottom: 8px;
+}
+.research-center__plan-questions ol {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.research-center__plan-question {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+}
+.research-center__plan-q-num {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  background: color-mix(in srgb, var(--accent) 18%, var(--surface-2));
+  color: var(--accent);
+  font-size: 12px;
+  font-weight: 700;
+  flex-shrink: 0;
+  margin-top: 1px;
+}
+.research-center__plan-q-text {
+  margin: 0 0 3px;
+  font-size: 14px;
+  line-height: 1.5;
+  color: var(--fg);
+}
+.research-center__plan-q-reason {
+  font-size: 12px;
+  color: var(--fg-soft);
+  line-height: 1.4;
+}
+.research-center__plan-stops ul {
+  margin: 0;
+  padding-left: 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+.research-center__plan-stops li {
+  font-size: 13px;
+  color: var(--fg-soft);
+  line-height: 1.5;
+}
+.research-center__plan-feedback-form {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  border-top: 1px solid var(--border);
+  padding-top: 14px;
+}
+.research-center__plan-feedback-input {
+  width: 100%;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface-1);
+  color: var(--fg);
+  font-size: 14px;
+  line-height: 1.55;
+  resize: vertical;
+  min-height: 60px;
+  box-sizing: border-box;
+}
+.research-center__plan-feedback-input:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 20%, transparent);
+}
+.research-center__plan-feedback-actions {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  justify-content: flex-end;
+}
+.research-center__plan-cancel-row {
+  display: flex;
+  justify-content: flex-start;
+  padding-top: 4px;
+}
 .research-center__message--report {
   gap: 12px;
 }

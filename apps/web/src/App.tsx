@@ -1137,6 +1137,10 @@ function Workspace({
     setResearchObjectiveDraft('');
   }, []);
 
+  const handleResearchSelectedIdChange = useCallback((id: string | null) => {
+    setActiveResearchId(id);
+  }, []);
+
   useEffect(() => {
     const onFocusRun = (event: Event): void => {
       const detail = (event as CustomEvent<CostRunFocusDetail>).detail;
@@ -1293,7 +1297,7 @@ function Workspace({
         {activeSurface === 'research' ? (
           <ResearchCenter
             selectedId={activeResearchId}
-            onSelectedIdChange={(id) => setActiveResearchId(id)}
+            onSelectedIdChange={handleResearchSelectedIdChange}
             objectiveDraft={researchObjectiveDraft}
             onObjectiveDraftChange={setResearchObjectiveDraft}
             onSessionsChanged={refreshResearchSessions}

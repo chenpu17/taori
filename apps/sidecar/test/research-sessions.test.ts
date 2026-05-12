@@ -60,8 +60,8 @@ describe('research sessions', () => {
     });
     expect(create.statusCode).toBe(201);
     const created = create.json() as { id: string; status: string; stage: string };
-    expect(created.status).toBe('draft');
-    expect(created.stage).toBe('scoping');
+    expect(created.status).toBe('reviewing');
+    expect(created.stage).toBe('planning');
 
     const list = await app.inject({
       method: 'GET',

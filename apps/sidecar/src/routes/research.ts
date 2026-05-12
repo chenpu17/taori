@@ -3,19 +3,23 @@ import {
   ResearchSessionCreateSchema,
   ResearchSessionExportRequestSchema,
   ResearchSessionStartRequestSchema,
+  ResearchPlanReviseRequestSchema,
   TaoriError,
 } from '@taori/shared';
 import type { BuildServerArgs } from '../server.js';
-import { ConversationsRepo, ResearchRepo } from '../db/repos/index.js';
+import { ConversationsRepo, ModelsRepo, ProvidersRepo, ResearchRepo } from '../db/repos/index.js';
 import {
   buildResearchDraftSkeleton,
   buildResearchPlan,
   buildResearchTasks,
 } from '../research/planner.js';
+import { generateAIPlan, revisePlan } from '../research/ai-planner.js';
 import type { ResearchRunner } from '../research/task-runner.js';
+import type { KeyStore } from '../keystore.js';
 
 interface ResearchRouteDeps extends BuildServerArgs {
   researchRunner?: ResearchRunner;
+  keystore: KeyStore;
 }
 
 function shouldRestartFailedSearchRun(detail: ReturnType<ResearchRepo['getDetail']>): boolean {
@@ -41,6 +45,12 @@ export function registerResearchRoute(app: FastifyInstance, deps: ResearchRouteD
   const repo = new ResearchRepo(deps.db);
   const conversations = new ConversationsRepo(deps.db);
   const runner = deps.researchRunner;
+  const plannerDeps = {
+    modelsRepo: new ModelsRepo(deps.db),
+    providersRepo: new ProvidersRepo(deps.db),
+    keystore: deps.keystore,
+    log: app.log,
+  };
 
   app.get('/v1/research/sessions', async () => ({
     research_sessions: repo.list(),
@@ -54,8 +64,31 @@ export function registerResearchRoute(app: FastifyInstance, deps: ResearchRouteD
         message: `Conversation ${body.conversation_id} not found`,
       });
     }
+    // Create session with an immediate template plan so the UI can show the
+    // confirm button right away. Async AI planning will update the plan if it
+    // produces something better.
+    const session = repo.create(body);
+    const templatePlan = buildResearchPlan({
+      title: session.title,
+      objective: session.objective,
+      outputKind: session.output_kind,
+      budgetMode: session.budget_mode,
+      constraints: session.constraints,
+    });
+    repo.update(session.id, { plan: templatePlan, stage: 'planning' });
+    // Kick off async AI planning — fire-and-forget; overwrites plan when done
+    setImmediate(() => {
+      void generateAIPlan(session, plannerDeps).then((plan) => {
+        if (plan) {
+          repo.update(session.id, { plan });
+        }
+      }).catch((err: unknown) => {
+        app.log.error({ err }, 'Background AI planning failed');
+      });
+    });
+    const withPlan = repo.getDetail(session.id)?.session ?? session;
     reply.code(201);
-    return repo.create(body);
+    return withPlan;
   });
 
   app.get<{ Params: { id: string } }>('/v1/research/sessions/:id', async (req) => {
@@ -78,6 +111,46 @@ export function registerResearchRoute(app: FastifyInstance, deps: ResearchRouteD
     claims: repo.listClaims(req.params.id),
   }));
 
+  // Revise research plan via conversational feedback
+  app.post<{ Params: { id: string } }>('/v1/research/sessions/:id/plan/revise', async (req) => {
+    const body = parseOrValidation(ResearchPlanReviseRequestSchema.safeParse(req.body));
+    const current = repo.get(req.params.id);
+    if (!current) {
+      throw new TaoriError({ code: 'not_found', message: `Research session ${req.params.id} not found` });
+    }
+    if (current.status !== 'reviewing') {
+      throw new TaoriError({
+        code: 'validation_error',
+        message: `Cannot revise plan when session is in status ${current.status}`,
+      });
+    }
+
+    const existingMessages = current.plan_messages ?? [];
+    const userMessage = { role: 'user' as const, content: body.feedback, ts: Date.now() };
+
+    // Attempt AI revision
+    const result = await revisePlan(current, body.feedback, plannerDeps);
+
+    if (result) {
+      const assistantMessage = { role: 'assistant' as const, content: result.assistantMessage, ts: Date.now() };
+      repo.update(current.id, {
+        plan: result.plan,
+        plan_messages: [...existingMessages, userMessage, assistantMessage],
+      });
+    } else {
+      // No AI available — just record the user message and keep existing plan
+      repo.update(current.id, {
+        plan_messages: [...existingMessages, userMessage],
+      });
+    }
+
+    const detail = repo.getDetail(current.id);
+    if (!detail) {
+      throw new TaoriError({ code: 'not_found', message: `Research session ${current.id} not found` });
+    }
+    return detail;
+  });
+
   app.post<{ Params: { id: string } }>('/v1/research/sessions/:id/start', async (req) => {
     const body = parseOrValidation(ResearchSessionStartRequestSchema.safeParse(req.body ?? {}));
     const current = repo.get(req.params.id);
@@ -90,7 +163,8 @@ export function registerResearchRoute(app: FastifyInstance, deps: ResearchRouteD
         message: `Research session cannot start from status ${current.status}`,
       });
     }
-    const plan = buildResearchPlan({
+    // Use AI-generated plan if available, otherwise fall back to template
+    const plan = current.plan ?? buildResearchPlan({
       title: current.title,
       objective: current.objective,
       outputKind: current.output_kind,

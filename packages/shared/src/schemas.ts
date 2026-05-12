@@ -716,6 +716,18 @@ export const ResearchClaimSchema = z.object({
 });
 export type ResearchClaim = z.infer<typeof ResearchClaimSchema>;
 
+export const PlanMessageSchema = z.object({
+  role: z.enum(['user', 'assistant']),
+  content: z.string(),
+  ts: z.number().int(),
+});
+export type PlanMessage = z.infer<typeof PlanMessageSchema>;
+
+export const ResearchPlanReviseRequestSchema = z.object({
+  feedback: z.string().min(1).max(4_000),
+});
+export type ResearchPlanReviseRequest = z.infer<typeof ResearchPlanReviseRequestSchema>;
+
 export const ResearchSessionSchema = z.object({
   id: z.string(),
   conversation_id: z.string().nullable(),
@@ -729,6 +741,7 @@ export const ResearchSessionSchema = z.object({
   budget_spent_usd: z.number().nonnegative(),
   constraints: ResearchConstraintsSchema,
   plan: ResearchPlanSchema.nullable(),
+  plan_messages: z.array(PlanMessageSchema).nullable(),
   draft_markdown: z.string().nullable(),
   final_markdown: z.string().nullable(),
   preferred_model_id: z.string().nullable(),

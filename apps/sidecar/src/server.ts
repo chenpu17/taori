@@ -641,7 +641,7 @@ export function buildServer(args: BuildServerArgs): FastifyInstance {
     keystore: args.keystore,
     log: app.log,
   });
-  registerResearchRoute(app, { ...argsWithBus, researchRunner });
+  registerResearchRoute(app, { ...argsWithBus, researchRunner, keystore: args.keystore });
 
   registerToolsRoute(app, { bus, memories, costs });
   registerMcpRoute(app, { ...argsWithBus, bus });

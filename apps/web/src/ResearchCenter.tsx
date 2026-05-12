@@ -1,6 +1,7 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type {
   Model,
+  PlanMessage,
   ResearchBudgetMode,
   ResearchOutputKind,
   ResearchSession,
@@ -249,9 +250,15 @@ export function ResearchCenter({
   // '' means "use system default"
   const [preferredModelId, setPreferredModelId] = useState('');
   const [preferredSearchTool, setPreferredSearchTool] = useState('');
+  const [planFeedback, setPlanFeedback] = useState('');
+  const [planFeedbackBusy, setPlanFeedbackBusy] = useState(false);
 
   const isControlled = controlledSelectedId !== undefined;
   const selectedId = isControlled ? controlledSelectedId : internalSelectedId;
+
+  // Stable ref so loadSessions can read the current selectedId without capturing it in deps
+  const selectedIdRef = useRef(selectedId);
+  selectedIdRef.current = selectedId;
 
   const setSelectedId = useCallback(
     (id: string | null) => {
@@ -289,10 +296,11 @@ export function ResearchCenter({
       try {
         const res = await api.listResearchSessions();
         setSessions(res.research_sessions);
+        const currentId = selectedIdRef.current;
         const nextSelected =
           preferId ??
-          (selectedId && res.research_sessions.some((item) => item.id === selectedId)
-            ? selectedId
+          (currentId && res.research_sessions.some((item) => item.id === currentId)
+            ? currentId
             : null) ??
           (isControlled ? null : (res.research_sessions[0]?.id ?? null));
         setSelectedId(nextSelected);
@@ -302,7 +310,7 @@ export function ResearchCenter({
         setLoading(false);
       }
     },
-    [isControlled, selectedId, setSelectedId],
+    [isControlled, setSelectedId],
   );
 
   const loadDetail = useCallback(async (id: string) => {
@@ -348,7 +356,11 @@ export function ResearchCenter({
 
   useEffect(() => {
     if (!selectedId) return;
-    if (detail?.session.status !== 'running') return;
+    // Poll while running (tasks in progress) or while still in reviewing state
+    // (AI plan might arrive and update the plan after initial template was set)
+    const isRunning = detail?.session.status === 'running';
+    const isReviewing = detail?.session.status === 'reviewing';
+    if (!isRunning && !isReviewing) return;
     const handle = window.setInterval(() => {
       void loadDetail(selectedId);
     }, 2_000);
@@ -411,20 +423,36 @@ export function ResearchCenter({
     setError(null);
     try {
       const created = await api.createResearchSession(createSessionInput());
-      const prepared = await api.startResearchSession(created.id, { confirm: false });
       resetComposer();
-      await refreshCurrent(prepared);
+      // Session is created in 'reviewing' state; AI planning starts async
+      await loadSessions(created.id);
+      setSelectedId(created.id);
+      await notifyResearchChanged();
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
       setActionBusy(null);
     }
-  }, [createSessionInput, refreshCurrent, resetComposer, startDisabled]);
+  }, [createSessionInput, loadSessions, notifyResearchChanged, resetComposer, setSelectedId, startDisabled]);
+
+  const submitPlanFeedback = useCallback(async () => {
+    if (!selectedId || !planFeedback.trim()) return;
+    setPlanFeedbackBusy(true);
+    setError(null);
+    try {
+      const updated = await api.reviseResearchPlan(selectedId, planFeedback.trim());
+      setPlanFeedback('');
+      await refreshCurrent(updated);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setPlanFeedbackBusy(false);
+    }
+  }, [planFeedback, refreshCurrent, selectedId]);
 
   const runAction = useCallback(
     async (
       action:
-        | 'prepare'
         | 'confirm'
         | 'pause'
         | 'resume'
@@ -436,9 +464,7 @@ export function ResearchCenter({
       setActionBusy(action);
       setError(null);
       try {
-        if (action === 'prepare') {
-          await refreshCurrent(await api.startResearchSession(selectedId, { confirm: false }));
-        } else if (action === 'confirm') {
+        if (action === 'confirm') {
           await refreshCurrent(await api.startResearchSession(selectedId, { confirm: true }));
         } else if (action === 'pause') {
           await refreshCurrent(await api.pauseResearchSession(selectedId));
@@ -518,6 +544,7 @@ export function ResearchCenter({
 
   const statusHeadline = useMemo(() => {
     if (!detail) return '';
+    if (detail.session.status === 'reviewing' && !detail.session.plan) return 'AI 正在生成研究计划…';
     if (detail.session.status === 'reviewing') return '计划已生成，等待你确认';
     if (detail.session.status === 'running') return `正在执行 · ${STAGE_LABELS[detail.session.stage]}`;
     if (detail.session.status === 'completed') return '研究已完成，可以直接阅读结果';
@@ -750,27 +777,8 @@ export function ResearchCenter({
     if (!detail) return null;
     return (
       <div className="research-center__action-row research-center__action-row--compact">
-        {detail.session.status === 'draft' ? (
-          <button
-            type="button"
-            className="research-center__primary-btn"
-            disabled={actionBusy != null}
-            onClick={() => void runAction('prepare')}
-            data-testid="research-action-prepare"
-          >
-            {actionBusy === 'prepare' ? '生成中…' : '生成计划'}
-          </button>
-        ) : null}
-        {detail.session.status === 'reviewing' ? (
+        {detail.session.status === 'reviewing' && detail.session.plan ? (
           <>
-            <button
-              type="button"
-              className="research-center__ghost-btn"
-              disabled={actionBusy != null}
-              onClick={() => void runAction('prepare')}
-            >
-              更新计划
-            </button>
             <button
               type="button"
               className="research-center__primary-btn"
@@ -781,6 +789,11 @@ export function ResearchCenter({
               {actionBusy === 'confirm' ? '启动中…' : '开始执行'}
             </button>
           </>
+        ) : null}
+        {detail.session.status === 'reviewing' && !detail.session.plan ? (
+          <span className="research-center__planning-indicator">
+            <span className="research-center__spinner" aria-hidden /> AI 正在规划中…
+          </span>
         ) : null}
         {detail.session.status === 'running' ? (
           <button
@@ -909,59 +922,175 @@ export function ResearchCenter({
                 </div>
               </div>
 
-              <p className="research-center__research-summary">
-                {researchSummary}
-              </p>
-
-              <ol className="research-center__checklist" data-testid="research-task-list">
-                {checklistItems.map((item) => (
-                  <li
-                    key={item.id}
-                    className={`research-center__checklist-item research-center__checklist-item--${item.status}`}
-                    data-testid={`research-task-row-${item.id}`}
-                  >
-                    <span className="research-center__checklist-dot" aria-hidden />
-                    <div className="research-center__checklist-copy">
-                      <strong>{item.title}</strong>
-                      <span>{item.subtitle}</span>
+              {/* AI Planning phase: no plan yet */}
+              {detail.session.status === 'reviewing' && !detail.session.plan ? (
+                <div className="research-center__planning-waiting">
+                  <span className="research-center__spinner" aria-hidden />
+                  <p>Taori 正在分析你的研究目标，生成一份个性化的研究计划…</p>
+                </div>
+              ) : detail.session.status === 'reviewing' && detail.session.plan ? (
+                /* AI Planning phase: plan ready for review */
+                <div className="research-center__plan-review" data-testid="research-plan-review">
+                  {/* Plan conversation history */}
+                  {(detail.session.plan_messages ?? []).length > 0 ? (
+                    <div className="research-center__plan-messages">
+                      {(detail.session.plan_messages as PlanMessage[]).map((msg, i) => (
+                        <div
+                          key={i}
+                          className={`research-center__plan-msg research-center__plan-msg--${msg.role}`}
+                        >
+                          <span className="research-center__plan-msg-role">
+                            {msg.role === 'user' ? '你' : 'Taori'}
+                          </span>
+                          <p>{msg.content}</p>
+                        </div>
+                      ))}
                     </div>
-                  </li>
-                ))}
-              </ol>
+                  ) : null}
 
-              {taskStats.total > 0 ? (
-                <div className="research-center__progress" aria-label="任务进度">
-                  <div className="research-center__progress-bar">
-                    <div
-                      className="research-center__progress-fill"
-                      style={{ width: `${progressPercent}%` }}
-                      data-testid="research-progress-fill"
-                    />
+                  {/* Plan summary */}
+                  <div className="research-center__plan-summary-card">
+                    <p className="research-center__plan-summary-text">{detail.session.plan.summary}</p>
                   </div>
-                  <span className="research-center__progress-label">{progressPercent}%</span>
+
+                  {/* Key questions */}
+                  <div className="research-center__plan-questions">
+                    <strong className="research-center__plan-section-label">关键研究问题</strong>
+                    <ol data-testid="research-plan-questions">
+                      {detail.session.plan.key_questions.map((q, i) => (
+                        <li key={q.id} className="research-center__plan-question">
+                          <span className="research-center__plan-q-num">{i + 1}</span>
+                          <div>
+                            <p className="research-center__plan-q-text">{q.question}</p>
+                            <small className="research-center__plan-q-reason">{q.reason}</small>
+                          </div>
+                        </li>
+                      ))}
+                    </ol>
+                  </div>
+
+                  {/* Stop conditions */}
+                  {detail.session.plan.stop_conditions.length > 0 ? (
+                    <div className="research-center__plan-stops">
+                      <strong className="research-center__plan-section-label">停止条件</strong>
+                      <ul>
+                        {detail.session.plan.stop_conditions.map((c, i) => (
+                          <li key={i}>{c}</li>
+                        ))}
+                      </ul>
+                    </div>
+                  ) : null}
+
+                  {/* Feedback form */}
+                  <div className="research-center__plan-feedback-form">
+                    <textarea
+                      className="research-center__plan-feedback-input"
+                      value={planFeedback}
+                      onChange={(e) => setPlanFeedback(e.target.value)}
+                      placeholder={'对计划有调整意见？告诉 Taori 你的想法，比如"多聚焦在国内市场"或"加入竞品对比"…'}
+                      rows={2}
+                      disabled={planFeedbackBusy}
+                      data-testid="research-plan-feedback"
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter' && (e.metaKey || e.ctrlKey) && planFeedback.trim()) {
+                          e.preventDefault();
+                          void submitPlanFeedback();
+                        }
+                      }}
+                    />
+                    <div className="research-center__plan-feedback-actions">
+                      <button
+                        type="button"
+                        className="research-center__ghost-btn"
+                        disabled={planFeedbackBusy || !planFeedback.trim()}
+                        onClick={() => void submitPlanFeedback()}
+                        data-testid="research-plan-feedback-submit"
+                      >
+                        {planFeedbackBusy ? '调整中…' : '调整计划'}
+                      </button>
+                      <button
+                        type="button"
+                        className="research-center__primary-btn"
+                        disabled={actionBusy != null || planFeedbackBusy}
+                        onClick={() => void runAction('confirm')}
+                        data-testid="research-action-confirm"
+                      >
+                        {actionBusy === 'confirm' ? '启动中…' : '✓ 计划确认，开始执行'}
+                      </button>
+                    </div>
+                  </div>
+
+                  {/* Cancel */}
+                  <div className="research-center__plan-cancel-row">
+                    <button
+                      type="button"
+                      className="research-center__danger-btn"
+                      disabled={actionBusy != null}
+                      onClick={() => void runAction('cancel')}
+                      data-testid="research-action-cancel"
+                    >
+                      取消
+                    </button>
+                  </div>
                 </div>
-              ) : null}
+              ) : (
+                /* Running / completed / other statuses */
+                <>
+                  <p className="research-center__research-summary">
+                    {researchSummary}
+                  </p>
 
-              <div className="research-center__message-metrics">
-                {summaryMetrics.map((item) => (
-                  <span key={item.label}>
-                    <small>{item.label}</small>
-                    <strong>{item.value}</strong>
-                  </span>
-                ))}
-              </div>
+                  <ol className="research-center__checklist" data-testid="research-task-list">
+                    {checklistItems.map((item) => (
+                      <li
+                        key={item.id}
+                        className={`research-center__checklist-item research-center__checklist-item--${item.status}`}
+                        data-testid={`research-task-row-${item.id}`}
+                      >
+                        <span className="research-center__checklist-dot" aria-hidden />
+                        <div className="research-center__checklist-copy">
+                          <strong>{item.title}</strong>
+                          <span>{item.subtitle}</span>
+                        </div>
+                      </li>
+                    ))}
+                  </ol>
 
-              {constraintSummary.length > 0 ? (
-                <div className="research-center__constraint-row">
-                  {constraintSummary.map((item) => (
-                    <span key={item} className="research-center__constraint-chip">
-                      {item}
-                    </span>
-                  ))}
-                </div>
-              ) : null}
+                  {taskStats.total > 0 ? (
+                    <div className="research-center__progress" aria-label="任务进度">
+                      <div className="research-center__progress-bar">
+                        <div
+                          className="research-center__progress-fill"
+                          style={{ width: `${progressPercent}%` }}
+                          data-testid="research-progress-fill"
+                        />
+                      </div>
+                      <span className="research-center__progress-label">{progressPercent}%</span>
+                    </div>
+                  ) : null}
 
-              {renderSessionActions()}
+                  <div className="research-center__message-metrics">
+                    {summaryMetrics.map((item) => (
+                      <span key={item.label}>
+                        <small>{item.label}</small>
+                        <strong>{item.value}</strong>
+                      </span>
+                    ))}
+                  </div>
+
+                  {constraintSummary.length > 0 ? (
+                    <div className="research-center__constraint-row">
+                      {constraintSummary.map((item) => (
+                        <span key={item} className="research-center__constraint-chip">
+                          {item}
+                        </span>
+                      ))}
+                    </div>
+                  ) : null}
+
+                  {renderSessionActions()}
+                </>
+              )}
             </article>
 
             {showReportCard ? (

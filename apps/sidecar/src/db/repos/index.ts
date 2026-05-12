@@ -102,6 +102,7 @@ import {
   WorkflowRecipeSpecSchema,
   ResearchConstraintsSchema,
   ResearchPlanSchema,
+  type PlanMessage,
 } from '@taori/shared';
 
 type ProviderRow = typeof providers.$inferSelect;
@@ -266,6 +267,22 @@ function parseResearchPlan(raw: string | null): ResearchPlan | null {
   }
 }
 
+function parsePlanMessages(raw: string | null | undefined): PlanMessage[] | null {
+  if (!raw) return null;
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    if (!Array.isArray(parsed)) return null;
+    return (parsed as unknown[]).filter(
+      (m): m is PlanMessage =>
+        typeof m === 'object' && m !== null &&
+        ((m as Record<string, unknown>).role === 'user' || (m as Record<string, unknown>).role === 'assistant') &&
+        typeof (m as Record<string, unknown>).content === 'string',
+    );
+  } catch {
+    return null;
+  }
+}
+
 function parseResearchCitations(raw: string | null): ResearchClaim['citations'] {
   if (!raw) return [];
   try {
@@ -390,6 +407,7 @@ function toResearchSession(row: ResearchSessionRow): ResearchSession {
     budget_spent_usd: row.budget_spent_usd ?? 0,
     constraints: parseResearchConstraints(row.constraints_json),
     plan: parseResearchPlan(row.plan_json),
+    plan_messages: parsePlanMessages((row as Record<string, unknown>).plan_messages_json as string | null | undefined),
     draft_markdown: row.draft_markdown ?? null,
     final_markdown: row.final_markdown ?? null,
     preferred_model_id: (row as Record<string, unknown>).preferred_model_id as string | null ?? null,
@@ -1374,6 +1392,7 @@ export interface ResearchSessionPatch {
   budget_spent_usd?: number;
   constraints?: ResearchConstraints;
   plan?: ResearchPlan | null;
+  plan_messages?: PlanMessage[] | null;
   draft_markdown?: string | null;
   final_markdown?: string | null;
   preferred_model_id?: string | null;
@@ -1458,7 +1477,7 @@ export class ResearchRepo {
       .map(toResearchClaim);
   }
 
-  create(input: ResearchSessionCreate): ResearchSession {
+  create(input: ResearchSessionCreate, initialStatus: ResearchStatus = 'reviewing'): ResearchSession {
     const now = Date.now();
     const row = this.db
       .insert(research_sessions)
@@ -1468,13 +1487,14 @@ export class ResearchRepo {
         title: input.title,
         objective: input.objective,
         output_kind: input.output_kind,
-        status: 'draft',
+        status: initialStatus,
         stage: 'scoping',
         budget_mode: input.budget_mode,
         budget_limit_usd: input.budget_limit_usd ?? null,
         budget_spent_usd: 0,
         constraints_json: JSON.stringify(ResearchConstraintsSchema.parse(input.constraints ?? {})),
         plan_json: null,
+        plan_messages_json: null,
         draft_markdown: null,
         final_markdown: null,
         preferred_model_id: input.preferred_model_id ?? null,
@@ -1507,6 +1527,9 @@ export class ResearchRepo {
         }),
         ...(patch.plan !== undefined && {
           plan_json: patch.plan ? JSON.stringify(ResearchPlanSchema.parse(patch.plan)) : null,
+        }),
+        ...(patch.plan_messages !== undefined && {
+          plan_messages_json: patch.plan_messages ? JSON.stringify(patch.plan_messages) : null,
         }),
         ...(patch.draft_markdown !== undefined && { draft_markdown: patch.draft_markdown }),
         ...(patch.final_markdown !== undefined && { final_markdown: patch.final_markdown }),

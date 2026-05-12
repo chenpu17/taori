@@ -496,5 +496,9 @@ CREATE UNIQUE INDEX IF NOT EXISTS memories_scope_key_uniq_v2
   if (!resCols.some((c) => c.name === 'preferred_search_tool')) {
     sqlite.exec(`ALTER TABLE research_sessions ADD COLUMN preferred_search_tool TEXT`);
   }
+  // R2 — plan_messages_json column for AI planning conversation history.
+  if (!resCols.some((c) => c.name === 'plan_messages_json')) {
+    sqlite.exec(`ALTER TABLE research_sessions ADD COLUMN plan_messages_json TEXT`);
+  }
   return drizzle(sqlite, { schema });
 }

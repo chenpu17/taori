@@ -295,6 +295,7 @@ export const research_sessions = sqliteTable(
     final_markdown: text('final_markdown'),
     preferred_model_id: text('preferred_model_id'),
     preferred_search_tool: text('preferred_search_tool'),
+    plan_messages_json: text('plan_messages_json'),
     started_at: integer('started_at'),
     completed_at: integer('completed_at'),
     created_at: integer('created_at').notNull(),

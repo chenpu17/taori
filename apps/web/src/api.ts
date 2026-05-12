@@ -856,6 +856,12 @@ export const api = {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(input),
     }).then((r) => json<ResearchSessionExport>(r)),
+  reviseResearchPlan: (id: string, feedback: string) =>
+    authedFetch(`/v1/research/sessions/${id}/plan/revise`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ feedback }),
+    }).then((r) => json<ResearchSessionDetail>(r)),
   clearAllData: () =>
     authedFetch('/v1/admin/clear-all-data', { method: 'POST' }).then((r) =>
       json<{
