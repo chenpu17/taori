@@ -5,9 +5,10 @@
  * draining the queued task list:
  *
  *   outline      — pre-completed by planner (seed).
- *   search       — calls builtin.web_search; appends each result as a
- *                  research_source row (dedup by locator); top hits are also
- *                  hydrated with web_fetch snippets.
+ *   search       — calls builtin.web_search; each question can fan out into
+ *                  multiple query rounds based on budget/depth until source
+ *                  coverage is good enough. Results are deduped by locator and
+ *                  top hits are hydrated with web_fetch snippets.
  *   summarize    — once all search tasks finish, rebuild draft_markdown
  *                  from collected sources, grouped by question.
  *   verify_citation — emit research_claims, one per output section, with
@@ -35,11 +36,12 @@ import type { MemoriesRepo, ModelsRepo, ProvidersRepo } from '../db/repos/index.
 import type { ResearchRepo } from '../db/repos/index.js';
 import type { KeyStore } from '../keystore.js';
 import { createChatModel } from '../providers/chat-model.js';
+import { buildSearchQueries } from './planner.js';
 import { pickPreferredSearchToolName } from '../search/tool-selection.js';
 
-const SEARCH_RESULTS_PER_TASK = 5;
-const FETCH_TOP_N = 2;
-const FETCH_MAX_CHARS = 2500;
+const SEARCH_RESULTS_PER_TASK = 8;
+const FETCH_TOP_N = 4;
+const FETCH_MAX_CHARS = 5000;
 const TICK_DELAY_MS = 25;
 
 export interface ResearchRunnerDeps {
@@ -56,6 +58,15 @@ interface WebSearchHit {
   title: string;
   url: string;
   snippet: string;
+}
+
+interface SearchRoundSummary {
+  query: string;
+  hits: number;
+  total_sources: number;
+  unique_hosts: number;
+  search_engine: string | null;
+  search_fallback_from: string | null;
 }
 
 type TaskOutcome = 'completed' | 'failed' | 'skipped';
@@ -168,6 +179,10 @@ export class ResearchRunner {
           this.deps.repo.update(session.id, { stage: 'verifying' });
           await this.runVerify(session);
           break;
+        case 'reflect':
+          this.deps.repo.update(session.id, { stage: 'searching' });
+          await this.runReflect(session, task);
+          break;
         case 'outline':
         case 'read_file':
           this.deps.repo.updateTask(task.id, {
@@ -201,8 +216,22 @@ export class ResearchRunner {
   }
 
   private async runSearch(session: ResearchSession, task: ResearchTask): Promise<void> {
-    const query = String(task.input?.query ?? task.input?.question ?? task.title ?? '').trim();
-    if (!query) {
+    const question = String(task.input?.question ?? task.title ?? '').trim();
+    const reason = String(task.input?.reason ?? '').trim();
+    const questionId = typeof task.input?.question_id === 'string' ? task.input.question_id : undefined;
+    const configured = buildSearchQueries({
+      title: session.title,
+      objective: session.objective,
+      question: { question, reason: reason || '研究需要' },
+      budgetMode: session.budget_mode,
+      constraints: session.constraints,
+    });
+    const queries = uniqueSearchQueries([
+      String(task.input?.query ?? '').trim(),
+      ...configured,
+      question,
+    ]);
+    if (queries.length === 0) {
       this.deps.repo.updateTask(task.id, { output: { reason: 'empty_query' } });
       return;
     }
@@ -211,6 +240,57 @@ export class ResearchRunner {
       session.preferred_search_tool ?? this.deps.memories?.getEffective(session.conversation_id ?? null, 'default_search_tool'),
       this.deps.bus.list().map((tool) => tool.name),
     ) ?? 'builtin.web_search';
+    const rounds: SearchRoundSummary[] = [];
+    for (const query of queries) {
+      const round = await this.executeSearchRound(session, task, searchToolName, query, questionId);
+      const matchedSources = collectSourcesForQuestion(
+        this.deps.repo.listSources(session.id),
+        question,
+        questionId,
+      );
+      rounds.push({
+        query,
+        hits: round.recorded.length,
+        total_sources: matchedSources.length,
+        unique_hosts: countUniqueHosts(matchedSources),
+        search_engine: round.engine,
+        search_fallback_from: round.fallbackFrom,
+      });
+      if (hasEnoughSearchCoverage(matchedSources, session.budget_mode)) break;
+    }
+    const matchedSources = collectSourcesForQuestion(
+      this.deps.repo.listSources(session.id),
+      question,
+      questionId,
+    );
+    if (matchedSources.length === 0) {
+      throw new Error(`web_search returned no usable results for query: ${queries[0]}`);
+    }
+    const lastRound = rounds.at(-1) ?? null;
+    this.deps.repo.updateTask(task.id, {
+      output: {
+        hits: matchedSources.length,
+        query: queries[0],
+        queries: rounds.map((round) => round.query),
+        rounds,
+        rounds_completed: rounds.length,
+        unique_hosts: countUniqueHosts(matchedSources),
+        search_tool: searchToolName,
+        search_engine: lastRound?.search_engine ?? null,
+        search_fallback_from: rounds.find((round) => round.search_fallback_from)?.search_fallback_from ?? null,
+      },
+    });
+    // Snapshot session budget from cost_records sum is expensive; defer to
+    // verify step which aggregates once.
+  }
+
+  private async executeSearchRound(
+    session: ResearchSession,
+    task: ResearchTask,
+    searchToolName: string,
+    query: string,
+    questionId?: string,
+  ): Promise<{ recorded: ResearchSource[]; engine: string | null; fallbackFrom: string | null }> {
     const res = await this.deps.bus.invoke(
       searchToolName,
       { query, num_results: SEARCH_RESULTS_PER_TASK },
@@ -226,7 +306,15 @@ export class ResearchRunner {
       if (!hit?.url) continue;
       const existing = this.deps.repo.findSourceByLocator(session.id, hit.url);
       if (existing) {
-        recorded.push(existing);
+        const nextMetadata = mergeQuestionMetadata(existing.metadata, questionId, {
+          query,
+          search_tool: searchToolName,
+          search_engine: output?.engine ?? null,
+          search_fallback_from: output?.fallback_from ?? null,
+        });
+        if (JSON.stringify(nextMetadata) !== JSON.stringify(existing.metadata ?? {})) {
+          this.deps.repo.updateSource(existing.id, { metadata: nextMetadata });
+        }
         continue;
       }
       const inserted = this.deps.repo.appendSource(session.id, {
@@ -236,17 +324,15 @@ export class ResearchRunner {
         snippet: hit.snippet?.slice(0, 3_900) ?? null,
         credibility_score: scoreCredibility(hit.url),
         included: true,
-        metadata: {
-          question_id: task.input?.question_id ?? null,
+        metadata: mergeQuestionMetadata({}, questionId, {
           query,
           search_tool: searchToolName,
           search_engine: output?.engine ?? null,
           search_fallback_from: output?.fallback_from ?? null,
-        },
+        }),
       });
       recorded.push(inserted);
     }
-    // Hydrate top results with web_fetch for richer snippets (best effort).
     for (const source of recorded.slice(0, FETCH_TOP_N)) {
       try {
         const fetched = await this.deps.bus.invoke(
@@ -267,20 +353,101 @@ export class ResearchRunner {
         // ignore individual fetch failures; search hits are still recorded.
       }
     }
-    if (recorded.length === 0) {
-      throw new Error(`web_search returned no usable results for query: ${query}`);
+    return {
+      recorded,
+      engine: output?.engine ?? null,
+      fallbackFrom: output?.fallback_from ?? null,
+    };
+  }
+
+  private async runReflect(session: ResearchSession, task: ResearchTask): Promise<void> {
+    if (!this.deps.modelsRepo || !this.deps.providersRepo) {
+      this.deps.repo.updateTask(task.id, { output: { skipped: true, reason: 'no_model_deps' } });
+      return;
     }
+    const sources = this.deps.repo.listSources(session.id);
+    if (sources.length === 0) {
+      this.deps.repo.updateTask(task.id, { output: { skipped: true, reason: 'no_sources' } });
+      return;
+    }
+
+    const rawQuestions = Array.isArray(task.input?.questions) ? task.input.questions as Array<{ id: string; question: string; reason: string }> : [];
+    const maxFollowUps = typeof task.input?.max_follow_ups === 'number' ? task.input.max_follow_ups : 2;
+
+    let chatModel: ReturnType<typeof createChatModel>['model'] | null = null;
+    try {
+      const picked = await pickSynthesisModel(
+        session,
+        this.deps.modelsRepo,
+        this.deps.providersRepo,
+        this.deps.keystore ?? null,
+        this.deps.memories ?? null,
+      );
+      if (picked) {
+        chatModel = createChatModel({ provider: picked.provider, model: picked.model, apiKey: picked.apiKey }).model;
+      }
+    } catch {
+      // ignore model errors; just skip reflect
+    }
+
+    if (!chatModel) {
+      this.deps.repo.updateTask(task.id, { output: { skipped: true, reason: 'no_usable_model' } });
+      return;
+    }
+
+    const prompt = buildReflectPrompt(session, rawQuestions, sources);
+    let reflectResult: ReflectResult | null = null;
+    try {
+      const { text } = await generateText({
+        model: chatModel,
+        prompt,
+        maxTokens: 1500,
+        abortSignal: AbortSignal.timeout(20_000),
+      });
+      reflectResult = parseReflectResponse(text);
+    } catch (err) {
+      this.deps.log?.warn?.({ err, sessionId: session.id }, 'research.reflect_failed');
+    }
+
+    if (!reflectResult || reflectResult.follow_up_searches.length === 0) {
+      this.deps.repo.updateTask(task.id, { output: { skipped: true, reason: 'no_gaps_identified', raw: reflectResult } });
+      return;
+    }
+
+    // Insert targeted follow-up search tasks before the summarize task.
+    // They will be picked up by the main loop in the next tick.
+    const searchToolName = pickPreferredSearchToolName(
+      this.deps.bus,
+      session.preferred_search_tool ?? this.deps.memories?.getEffective(session.conversation_id ?? null, 'default_search_tool'),
+      this.deps.bus.list().map((tool) => tool.name),
+    ) ?? 'builtin.web_search';
+
+    const followUps = reflectResult.follow_up_searches.slice(0, maxFollowUps);
+    const addedTasks: string[] = [];
+    for (const gap of followUps) {
+      if (!gap.query?.trim()) continue;
+      const inserted = this.deps.repo.insertTask(session.id, {
+        kind: 'search',
+        status: 'queued',
+        title: `补充检索：${gap.topic ?? gap.query}`,
+        input: {
+          question: gap.topic ?? gap.query,
+          reason: '信息空白补充',
+          query: gap.query,
+          is_follow_up: true,
+          search_tool: searchToolName,
+        },
+      });
+      addedTasks.push(inserted.id);
+    }
+
     this.deps.repo.updateTask(task.id, {
       output: {
-        hits: recorded.length,
-        query,
-        search_tool: searchToolName,
-        search_engine: output?.engine ?? null,
-        search_fallback_from: output?.fallback_from ?? null,
+        coverage: reflectResult.coverage,
+        follow_up_searches: followUps,
+        added_tasks: addedTasks,
       },
     });
-    // Snapshot session budget from cost_records sum is expensive; defer to
-    // verify step which aggregates once.
   }
 
   private async runFetch(session: ResearchSession, task: ResearchTask): Promise<void> {
@@ -432,39 +599,74 @@ function buildSynthesisPrompt(
     decision: '决策建议（结论 + 依据 + 可选路径 + 执行建议）',
   };
   const structureGuide: Record<string, string> = {
-    report: '## 核心结论\n## 详细分析\n## 风险与不确定性\n## 建议与后续步骤',
-    brief: '## 摘要\n## 关键事实\n## 风险\n## 下一步行动',
-    comparison: '## 结论\n## 对比维度\n## 各方案分析\n## 风险\n## 选择建议',
-    decision: '## 结论（推荐方向）\n## 决策依据\n## 可选路径\n## 风险与前提\n## 执行建议',
+    report: '## 核心结论\n\n## 详细分析\n\n## 风险与不确定性\n\n## 建议与后续步骤',
+    brief: '## 摘要\n\n## 关键事实\n\n## 风险\n\n## 下一步行动',
+    comparison: '## 结论（哪种方案更合适）\n\n## 对比维度分析\n\n## 各方案详细分析\n\n## 风险与注意事项\n\n## 选择建议',
+    decision: '## 结论（推荐方向）\n\n## 决策依据\n\n## 可选路径分析\n\n## 风险与前提条件\n\n## 执行建议',
   };
   const kind = plan.output_kind ?? 'report';
 
-  const questionsText = plan.key_questions.length > 0
-    ? plan.key_questions.map((q, i) => `${i + 1}. ${q.question}`).join('\n')
-    : '（无预设问题，请依据收集资料自行分析）';
+  // Group sources by question for better LLM comprehension
+  const sourcesByQuestion = new Map<string, ResearchSource[]>();
+  const unassignedSources: ResearchSource[] = [];
 
-  const sourcesText = sources.map((s, i) => {
-    const title = (s.title ?? s.locator).slice(0, 200);
-    const snippet = (s.snippet ?? '').slice(0, 600).replace(/\s+/g, ' ');
-    return `[${i + 1}] 标题：${title}\n    来源：${s.locator}\n    摘要：${snippet || '（无摘要）'}`;
-  }).join('\n\n');
+  for (const source of sources) {
+    const qid = typeof source.metadata?.question_id === 'string' ? source.metadata.question_id : null;
+    const qids = Array.isArray(source.metadata?.question_ids) ? source.metadata.question_ids as string[] : [];
+    const allQids = new Set([...(qid ? [qid] : []), ...qids]);
+    if (allQids.size === 0) {
+      unassignedSources.push(source);
+    } else {
+      for (const id of allQids) {
+        if (!sourcesByQuestion.has(id)) sourcesByQuestion.set(id, []);
+        sourcesByQuestion.get(id)!.push(source);
+      }
+    }
+  }
 
-  return `你是一名专业研究分析师。请基于以下研究目标和收集到的资料，撰写一份完整的研究报告。
+  let globalIndex = 1;
+  const sourceIndexMap = new Map<string, number>();
+  const questionsText = plan.key_questions.map((q) => {
+    const qSources = sourcesByQuestion.get(q.id) ?? [];
+    const sourceLines = qSources.map((s) => {
+      if (!sourceIndexMap.has(s.id)) sourceIndexMap.set(s.id, globalIndex++);
+      const idx = sourceIndexMap.get(s.id)!;
+      const title = (s.title ?? s.locator).slice(0, 200);
+      const snippet = (s.snippet ?? '').slice(0, 1500).replace(/\s+/g, ' ');
+      return `  [${idx}] 标题：${title}\n      来源：${s.locator}\n      内容：${snippet || '（无摘要）'}`;
+    }).join('\n\n');
+    return `【问题：${q.question}（${q.reason}）】\n${sourceLines || '  （本问题未找到对应资料）'}`;
+  }).join('\n\n---\n\n');
+
+  // Any sources not linked to a specific question
+  const unassignedText = unassignedSources.length > 0
+    ? '\n\n【其他相关资料】\n' + unassignedSources.map((s) => {
+        if (!sourceIndexMap.has(s.id)) sourceIndexMap.set(s.id, globalIndex++);
+        const idx = sourceIndexMap.get(s.id)!;
+        const title = (s.title ?? s.locator).slice(0, 200);
+        const snippet = (s.snippet ?? '').slice(0, 800).replace(/\s+/g, ' ');
+        return `  [${idx}] 标题：${title}\n      来源：${s.locator}\n      内容：${snippet || '（无摘要）'}`;
+      }).join('\n\n')
+    : '';
+
+  const totalSources = sourceIndexMap.size + (unassignedSources.length > 0 ? unassignedSources.filter(s => !sourceIndexMap.has(s.id)).length : 0);
+
+  return `你是一名资深研究分析师，擅长从多源信息中提炼洞见、识别矛盾、输出有深度的分析报告。
 
 【研究主题】${session.title}
 【研究目标】${session.objective}
-【输出格式】${kindLabel[kind] ?? kindLabel.report}
-【研究计划摘要】${plan.summary}
+【输出类型】${kindLabel[kind] ?? kindLabel.report}
+【研究计划】${plan.summary}
 
-【关键研究问题】
-${questionsText}
+【按问题整理的资料（共 ${totalSources} 条来源）】
 
-【收集的资料（共 ${sources.length} 条）】
-${sourcesText}
+${questionsText}${unassignedText}
 
 ---
 
-请严格按照以下结构撰写 Markdown 报告（中文），结构：
+请基于上述资料，撰写一份完整的 Markdown 研究报告（中文）。
+
+报告结构：
 
 # ${session.title}
 
@@ -472,14 +674,143 @@ ${structureGuide[kind] ?? structureGuide.report}
 
 ## 参考来源
 
-要求：
-- 每个论断需标注引用来源，格式为 [[序号]](来源URL)，例如 [[1]](https://example.com)
-- 内容详实、逻辑严谨，避免泛泛而谈
-- 如有信息不足或相互矛盾，请在报告末尾注明
-- 不要重复罗列资料原文，而是基于资料进行分析、归纳和判断`;
+分析要求：
+- 对每个研究问题，基于资料给出明确结论，不要回避判断
+- 当不同来源的说法存在矛盾时，明确指出分歧并分析原因
+- 对信息不充分的点，说明已知内容和尚不确定的部分
+- 每个重要论断用 [[序号]](URL) 格式引用来源，例如 [[1]](https://example.com)
+- 对于${kind === 'comparison' ? '对比类报告：用表格展示关键维度对比，再逐项深入分析' : kind === 'decision' ? '决策报告：明确给出推荐选项和不推荐理由，条件式建议要列出前提条件' : '综合报告：先给结论，再给支撑证据，最后给不确定性'}
+- 参考来源部分列出所有引用，格式：[[序号]] 标题 — URL
+- 内容必须基于资料分析，不要凭空发挥；资料不足之处明确标注`;
 }
 
 
+
+// ─── Reflect helpers ─────────────────────────────────────────────────────────
+
+interface ReflectCoverageItem {
+  question_id: string;
+  level: 'good' | 'partial' | 'missing';
+  what_we_know: string;
+  what_is_missing: string;
+}
+
+interface ReflectFollowUp {
+  topic: string;
+  query: string;
+}
+
+interface ReflectResult {
+  coverage: ReflectCoverageItem[];
+  follow_up_searches: ReflectFollowUp[];
+}
+
+function buildReflectPrompt(
+  session: ResearchSession,
+  questions: Array<{ id: string; question: string; reason: string }>,
+  sources: ResearchSource[],
+): string {
+  const questionLines = questions
+    .map((q, i) => `${i + 1}. [${q.id}] ${q.question}（${q.reason}）`)
+    .join('\n');
+
+  // Group sources by question for the prompt
+  const grouped = questions.map((q) => {
+    const qSources = sources.filter((s) => {
+      const qid = typeof s.metadata?.question_id === 'string' ? s.metadata.question_id : null;
+      const qids = Array.isArray(s.metadata?.question_ids) ? s.metadata.question_ids as string[] : [];
+      return qid === q.id || qids.includes(q.id);
+    });
+    if (qSources.length === 0) return `[${q.id}] ${q.question}\n  → 未找到相关资料`;
+    const summaries = qSources.slice(0, 5).map((s) => {
+      const title = (s.title ?? s.locator).slice(0, 120);
+      const snippet = (s.snippet ?? '').slice(0, 400).replace(/\s+/g, ' ');
+      return `  - ${title}: ${snippet || '（无摘要）'}`;
+    }).join('\n');
+    return `[${q.id}] ${q.question}\n${summaries}`;
+  }).join('\n\n');
+
+  return `你是一名专业研究分析师，正在评估一项深度研究的当前信息覆盖情况。
+
+研究主题：${session.title}
+研究目标：${session.objective}
+
+关键研究问题：
+${questionLines}
+
+当前已收集的资料摘要（按问题分组）：
+${grouped}
+
+---
+
+请评估每个问题的信息覆盖情况，并识别最重要的信息空白，以便进行补充检索。
+
+严格按照以下 JSON 格式输出（不要包含任何其他文字）：
+{
+  "coverage": [
+    {
+      "question_id": "q1",
+      "level": "good",
+      "what_we_know": "已掌握的核心内容（30字以内）",
+      "what_is_missing": "仍缺少什么信息（30字以内，good级别可写'覆盖充分'）"
+    }
+  ],
+  "follow_up_searches": [
+    {
+      "topic": "具体缺少的信息描述",
+      "query": "用于补充检索的搜索词（英文或中文，适合搜索引擎）"
+    }
+  ]
+}
+
+要求：
+- coverage 包含所有问题的评估，level 为 good/partial/missing 之一
+- follow_up_searches 只包含 level 为 partial 或 missing 的最重要补充，最多 3 条
+- 如果覆盖已经充分，follow_up_searches 可以为空数组 []
+- 搜索词要具体、可操作，适合直接输入搜索引擎`;
+}
+
+function parseReflectResponse(text: string): ReflectResult | null {
+  try {
+    const cleaned = text.replace(/^```(?:json)?\s*/m, '').replace(/\s*```\s*$/m, '').trim();
+    const jsonStart = cleaned.indexOf('{');
+    const jsonEnd = cleaned.lastIndexOf('}');
+    if (jsonStart === -1 || jsonEnd === -1) return null;
+    const raw = JSON.parse(cleaned.slice(jsonStart, jsonEnd + 1)) as Record<string, unknown>;
+
+    const coverage: ReflectCoverageItem[] = [];
+    if (Array.isArray(raw.coverage)) {
+      for (const item of raw.coverage) {
+        if (typeof item !== 'object' || item === null) continue;
+        const c = item as Record<string, unknown>;
+        if (typeof c.question_id !== 'string') continue;
+        coverage.push({
+          question_id: c.question_id,
+          level: (c.level === 'good' || c.level === 'partial' || c.level === 'missing') ? c.level : 'partial',
+          what_we_know: typeof c.what_we_know === 'string' ? c.what_we_know.slice(0, 200) : '',
+          what_is_missing: typeof c.what_is_missing === 'string' ? c.what_is_missing.slice(0, 200) : '',
+        });
+      }
+    }
+
+    const followUps: ReflectFollowUp[] = [];
+    if (Array.isArray(raw.follow_up_searches)) {
+      for (const item of raw.follow_up_searches) {
+        if (typeof item !== 'object' || item === null) continue;
+        const f = item as Record<string, unknown>;
+        if (typeof f.query !== 'string' || !f.query.trim()) continue;
+        followUps.push({
+          topic: typeof f.topic === 'string' ? f.topic.slice(0, 200) : f.query,
+          query: f.query.trim().slice(0, 200),
+        });
+      }
+    }
+
+    return { coverage, follow_up_searches: followUps };
+  } catch {
+    return null;
+  }
+}
 
 function scoreCredibility(url: string): number {
   try {
@@ -493,6 +824,61 @@ function scoreCredibility(url: string): number {
   } catch {
     return 0.5;
   }
+}
+
+function uniqueSearchQueries(queries: string[]): string[] {
+  return queries
+    .map((query) => query.trim())
+    .filter(Boolean)
+    .filter((value, index, arr) => arr.indexOf(value) === index);
+}
+
+function countUniqueHosts(sources: ResearchSource[]): number {
+  const hosts = new Set<string>();
+  for (const source of sources) {
+    try {
+      hosts.add(new URL(source.locator).hostname);
+    } catch {
+      hosts.add(source.locator);
+    }
+  }
+  return hosts.size;
+}
+
+function collectSourcesForQuestion(
+  sources: ResearchSource[],
+  question: string,
+  questionId?: string,
+): ResearchSource[] {
+  return sources.filter((source) => matchesQuestion(source, question, questionId));
+}
+
+function hasEnoughSearchCoverage(sources: ResearchSource[], budgetMode: ResearchSession['budget_mode']): boolean {
+  const uniqueHosts = countUniqueHosts(sources);
+  if (budgetMode === 'fast') return sources.length >= 2;
+  if (budgetMode === 'balanced') return sources.length >= 3 && uniqueHosts >= 2;
+  return sources.length >= 4 && uniqueHosts >= 2;
+}
+
+function mergeQuestionMetadata(
+  metadata: Record<string, unknown> | null | undefined,
+  questionId: string | undefined,
+  patch: Record<string, unknown>,
+): Record<string, unknown> {
+  const next = { ...(metadata ?? {}) };
+  if (questionId) {
+    next.question_id = next.question_id ?? questionId;
+    const ids = new Set<string>(
+      Array.isArray(next.question_ids)
+        ? next.question_ids.filter((value): value is string => typeof value === 'string')
+        : typeof next.question_id === 'string'
+          ? [next.question_id]
+          : [],
+    );
+    ids.add(questionId);
+    next.question_ids = Array.from(ids);
+  }
+  return { ...next, ...patch };
 }
 
 function outputSections(kind: ResearchPlan['output_kind']): string[] {
@@ -538,6 +924,13 @@ function pickSupport(matching: ResearchSource[]): 'supported' | 'weak' | 'unveri
 
 function matchesQuestion(source: ResearchSource, question: string, questionId?: string): boolean {
   if (questionId && source.metadata?.question_id === questionId) return true;
+  if (
+    questionId &&
+    Array.isArray(source.metadata?.question_ids) &&
+    source.metadata.question_ids.some((value) => value === questionId)
+  ) {
+    return true;
+  }
   if (!question) return true;
   const hay = `${source.title ?? ''} ${source.snippet ?? ''}`.toLowerCase();
   if (!hay.trim()) return false;

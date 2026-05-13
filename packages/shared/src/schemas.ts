@@ -647,6 +647,7 @@ export const ResearchTaskKindSchema = z.enum([
   'read_file',
   'summarize',
   'outline',
+  'reflect',
   'verify_citation',
 ]);
 export type ResearchTaskKind = z.infer<typeof ResearchTaskKindSchema>;

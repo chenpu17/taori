@@ -1662,6 +1662,30 @@ export class ResearchRepo {
     return toResearchClaim(row);
   }
 
+  insertTask(sessionId: string, task: ResearchTaskSeed): ResearchTask {
+    const now = Date.now();
+    const row = this.db
+      .insert(research_tasks)
+      .values({
+        id: makeId('research_task'),
+        research_session_id: sessionId,
+        parent_task_id: task.parent_task_id ?? null,
+        kind: task.kind,
+        status: task.status ?? 'queued',
+        title: task.title,
+        input_json: JSON.stringify(task.input),
+        output_json: task.output ? JSON.stringify(task.output) : null,
+        error_json: task.error ? JSON.stringify(task.error) : null,
+        started_at: task.started_at ?? null,
+        finished_at: task.finished_at ?? null,
+        created_at: now,
+        updated_at: now,
+      })
+      .returning()
+      .get() as ResearchTaskRow;
+    return toResearchTask(row);
+  }
+
   replaceTasks(sessionId: string, tasks: ResearchTaskSeed[]): ResearchTask[] {
     return this.db.transaction((tx) => {
       tx.delete(research_tasks).where(eq(research_tasks.research_session_id, sessionId)).run();

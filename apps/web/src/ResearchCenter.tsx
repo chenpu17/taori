@@ -146,6 +146,9 @@ function taskDetail(task: ResearchTask): string {
         : typeof task.input?.question === 'string'
           ? task.input.question
           : '';
+    const rounds = Array.isArray(task.output?.rounds)
+      ? task.output.rounds.filter((item): item is Record<string, unknown> => typeof item === 'object' && item !== null)
+      : [];
     const engine =
       typeof task.output?.search_engine === 'string'
         ? searchEngineLabel(task.output.search_engine)
@@ -155,15 +158,41 @@ function taskDetail(task: ResearchTask): string {
         ? searchEngineLabel(task.output.search_fallback_from)
         : null;
     const hits = typeof task.output?.hits === 'number' ? `命中 ${task.output.hits} 条` : null;
+    const roundCount =
+      typeof task.output?.rounds_completed === 'number'
+        ? `${task.output.rounds_completed} 轮检索`
+        : rounds.length > 1
+          ? `${rounds.length} 轮检索`
+          : null;
+    const hostCount =
+      typeof task.output?.unique_hosts === 'number' && task.output.unique_hosts > 0
+        ? `${task.output.unique_hosts} 个站点`
+        : null;
     const queryText = query ? compactTaskQuery(query) : null;
     return [
       engine ? (fallback ? `${engine}（从 ${fallback} 回退）` : engine) : null,
+      roundCount,
+      hostCount,
       hits,
       queryText,
     ].filter(Boolean).join(' · ');
   }
   if (task.kind === 'summarize') {
     return '已基于当前证据整理结构化草稿。';
+  }
+  if (task.kind === 'reflect') {
+    if (task.status === 'skipped' || task.output?.skipped) {
+      const reason = String(task.output?.reason ?? '');
+      if (reason === 'fast_mode') return '快速模式，跳过差距分析。';
+      if (reason === 'no_sources') return '暂无来源，跳过差距分析。';
+      return '差距分析已跳过。';
+    }
+    const added = Array.isArray(task.output?.added_tasks) ? (task.output.added_tasks as unknown[]).length : 0;
+    const coverage = Array.isArray(task.output?.coverage) ? task.output.coverage as Array<Record<string,unknown>> : [];
+    const partial = coverage.filter((c) => c.level === 'partial' || c.level === 'missing').length;
+    if (added > 0) return `识别到 ${partial} 个信息空白，追加了 ${added} 轮补充检索。`;
+    if (coverage.length > 0) return `已评估 ${coverage.length} 个问题的证据覆盖情况。`;
+    return '正在分析已有资料，识别信息空白…';
   }
   if (task.kind === 'verify_citation') {
     return '正在校验关键主张是否具备可回溯引用。';
@@ -359,13 +388,16 @@ export function ResearchCenter({
     // Poll while running (tasks in progress) or while reviewing without a plan
     // yet (waiting for async AI planning to finish).
     const isRunning = detail?.session.status === 'running';
-    const isReviewingNoPlan = detail?.session.status === 'reviewing' && !detail.session.plan;
-    if (!isRunning && !isReviewingNoPlan) return;
+    const isPlanningNoPlan =
+      detail?.session.status === 'reviewing' &&
+      !detail.session.plan &&
+      detail.session.stage === 'planning';
+    if (!isRunning && !isPlanningNoPlan) return;
     const handle = window.setInterval(() => {
       void loadDetail(selectedId, true); // silent: no flicker or scroll reset
     }, 2_000);
     return () => window.clearInterval(handle);
-  }, [detail?.session.plan, detail?.session.status, loadDetail, selectedId]);
+  }, [detail?.session.plan, detail?.session.stage, detail?.session.status, loadDetail, selectedId]);
 
   const selectedSession = useMemo(
     () => sessions?.find((item) => item.id === selectedId) ?? null,
@@ -515,6 +547,19 @@ export function ResearchCenter({
     );
   }, [detail]);
   const constraintSummary = detail ? buildConstraintSummary(detail.session) : [];
+  const planConversation = (detail?.session.plan_messages ?? []) as PlanMessage[];
+  const isScopingReview =
+    detail?.session.status === 'reviewing' &&
+    !detail.session.plan &&
+    detail.session.stage === 'scoping';
+  const uniqueSourceHosts = useMemo(() => {
+    if (!detail) return 0;
+    return new Set(detail.sources.map((item) => safeHostname(item.locator))).size;
+  }, [detail]);
+  const verifiedClaims = useMemo(() => {
+    if (!detail) return 0;
+    return detail.claims.filter((claim) => claim.support_status === 'supported').length;
+  }, [detail]);
 
   const checklistItems = useMemo<ChecklistItem[]>(() => {
     if (!detail) return [];
@@ -544,6 +589,9 @@ export function ResearchCenter({
 
   const statusHeadline = useMemo(() => {
     if (!detail) return '';
+    if (detail.session.status === 'reviewing' && !detail.session.plan && detail.session.stage === 'scoping') {
+      return '先确认研究边界，再生成计划';
+    }
     if (detail.session.status === 'reviewing' && !detail.session.plan) return 'AI 正在生成研究计划…';
     if (detail.session.status === 'reviewing') return '计划已生成，等待你确认';
     if (detail.session.status === 'running') return `正在执行 · ${STAGE_LABELS[detail.session.stage]}`;
@@ -554,6 +602,9 @@ export function ResearchCenter({
 
   const statusCopy = useMemo(() => {
     if (!detail) return '';
+    if (detail.session.status === 'reviewing' && !detail.session.plan && detail.session.stage === 'scoping') {
+      return '先把研究边界说清楚，后续检索和综合才会更深、更稳。';
+    }
     if (detail.session.status === 'reviewing') {
       return '先过一遍关键问题与停止条件，确认后才会真正开始搜索、抓取与写作。';
     }
@@ -594,15 +645,15 @@ export function ResearchCenter({
         value: `${detail.session.budget_spent_usd.toFixed(3)} USD`,
       },
       {
-        label: '来源',
-        value: String(detail.sources.length),
+        label: '来源 / 站点',
+        value: `${detail.sources.length} / ${uniqueSourceHosts}`,
       },
       {
-        label: '主张',
-        value: String(detail.claims.length),
+        label: '主张 / 已验证',
+        value: `${detail.claims.length} / ${verifiedClaims}`,
       },
     ];
-  }, [detail]);
+  }, [detail, uniqueSourceHosts, verifiedClaims]);
 
   const evidenceSummary = useMemo(() => {
     if (!detail) return '';
@@ -928,17 +979,72 @@ export function ResearchCenter({
 
               {/* AI Planning phase: no plan yet */}
               {detail.session.status === 'reviewing' && !detail.session.plan ? (
-                <div className="research-center__planning-waiting">
-                  <span className="research-center__spinner" aria-hidden />
-                  <p>Taori 正在分析你的研究目标，生成一份个性化的研究计划…</p>
-                </div>
+                isScopingReview ? (
+                  <div className="research-center__plan-review research-center__plan-review--scoping" data-testid="research-plan-scoping">
+                    {planConversation.length > 0 ? (
+                      <div className="research-center__plan-messages">
+                        {planConversation.map((msg, i) => (
+                          <div
+                            key={i}
+                            className={`research-center__plan-msg research-center__plan-msg--${msg.role}`}
+                          >
+                            <span className="research-center__plan-msg-role">
+                              {msg.role === 'user' ? '你' : 'Taori'}
+                            </span>
+                            <p>{msg.content}</p>
+                          </div>
+                        ))}
+                      </div>
+                    ) : null}
+
+                    <div className="research-center__plan-summary-card research-center__plan-summary-card--scoping">
+                      <p className="research-center__plan-summary-text">
+                        回复后，Taori 会先把这些边界收束成计划，再进入真正的检索、抓取与写作。
+                      </p>
+                    </div>
+
+                    <div className="research-center__plan-feedback-form">
+                      <textarea
+                        className="research-center__plan-feedback-input"
+                        value={planFeedback}
+                        onChange={(e) => setPlanFeedback(e.target.value)}
+                        placeholder={'例如：聚焦中国市场，近 12 个月，优先价格、稳定性和 SLA，中英资料都可以。'}
+                        rows={3}
+                        disabled={planFeedbackBusy}
+                        data-testid="research-plan-feedback"
+                        onKeyDown={(e) => {
+                          if (e.key === 'Enter' && (e.metaKey || e.ctrlKey) && planFeedback.trim()) {
+                            e.preventDefault();
+                            void submitPlanFeedback();
+                          }
+                        }}
+                      />
+                      <div className="research-center__plan-feedback-actions">
+                        <button
+                          type="button"
+                          className="research-center__primary-btn"
+                          disabled={planFeedbackBusy || !planFeedback.trim()}
+                          onClick={() => void submitPlanFeedback()}
+                          data-testid="research-plan-feedback-submit"
+                        >
+                          {planFeedbackBusy ? '整理中…' : '补充信息，生成计划'}
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                ) : (
+                  <div className="research-center__planning-waiting">
+                    <span className="research-center__spinner" aria-hidden />
+                    <p>Taori 正在分析你的研究目标，生成一份个性化的研究计划…</p>
+                  </div>
+                )
               ) : detail.session.status === 'reviewing' && detail.session.plan ? (
                 /* AI Planning phase: plan ready for review */
                 <div className="research-center__plan-review" data-testid="research-plan-review">
                   {/* Plan conversation history */}
-                  {(detail.session.plan_messages ?? []).length > 0 ? (
+                  {planConversation.length > 0 ? (
                     <div className="research-center__plan-messages">
-                      {(detail.session.plan_messages as PlanMessage[]).map((msg, i) => (
+                      {planConversation.map((msg, i) => (
                         <div
                           key={i}
                           className={`research-center__plan-msg research-center__plan-msg--${msg.role}`}
