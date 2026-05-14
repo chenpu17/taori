@@ -18,6 +18,16 @@ marked.setOptions({
   breaks: true,
 });
 
+// Open all external links in a new browser tab / window.
+const linkRenderer = new marked.Renderer();
+linkRenderer.link = ({ href, title, text }: { href: string; title?: string | null; text: string }): string => {
+  const isExternal = href && /^https?:\/\//.test(href);
+  const titleAttr = title ? ` title="${title}"` : '';
+  const targetAttr = isExternal ? ' target="_blank" rel="noopener noreferrer"' : '';
+  return `<a href="${href}"${titleAttr}${targetAttr}>${text}</a>`;
+};
+marked.use({ renderer: linkRenderer });
+
 // DeepSeek uses <｜｜DSML｜｜tool_calls>…</｜｜DSML｜｜tool_calls> XML blocks
 // embedded in text content. These are tool call artifacts that should not
 // be shown to the user; strip them before rendering.
@@ -37,7 +47,7 @@ export function renderMarkdown(src: string): string {
       'ul', 'ol', 'li', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6',
       'a', 'hr', 'table', 'thead', 'tbody', 'tr', 'th', 'td', 'span',
     ],
-    ALLOWED_ATTR: ['href', 'title', 'class'],
+    ALLOWED_ATTR: ['href', 'title', 'class', 'target', 'rel'],
     ALLOWED_URI_REGEXP: /^(?:https?:|mailto:|tel:|#)/i,
   });
   return enhanceTables(enhanceCodeBlocks(sanitized));
@@ -119,7 +129,7 @@ function enhanceCodeBlocks(html: string): string {
       'div', 'button',
     ],
     ALLOWED_ATTR: [
-      'href', 'title', 'class', 'type',
+      'href', 'title', 'class', 'type', 'target', 'rel',
       'data-code-block', 'data-language', 'data-markdown-copy',
       'data-mermaid-block', 'data-mermaid-output',
       'data-code-collapsible', 'data-code-collapsed', 'data-line-count',
@@ -149,7 +159,7 @@ function enhanceTables(html: string): string {
       'div', 'button',
     ],
     ALLOWED_ATTR: [
-      'href', 'title', 'class', 'type',
+      'href', 'title', 'class', 'type', 'target', 'rel',
       'data-code-block', 'data-language', 'data-markdown-copy',
       'data-mermaid-block', 'data-mermaid-output',
       'data-code-collapsible', 'data-code-collapsed', 'data-line-count',

@@ -47,3 +47,5 @@ Taori 业务编排进程，负责 LLM 调用、工具调度、圆桌执行、SQL
 - standalone npm 模式现可同源托管浏览器 Web UI：当 npm 包内存在 `dist-web` 资源时，Sidecar 会直接提供 `/` 登录页与 `/app` Web UI；浏览器用户通过 `--password` 设置的访问密码换取 HttpOnly cookie 会话，普通脚本与自动化仍可继续使用 Bearer Token 调 API。
 - 聊天成本链路新增 `cache_input_tokens`：`/v1/chat` 流内 `cost` annotation、`cost.recorded` run event 与 `GET /v1/costs/calls` 会透出输入 / cache / 输出 token；OpenAI-compatible provider metadata 与 DeepSeek 官方原始 usage 中的 cached prompt tokens 会被尽力采集并落入 `cost_records`。
 - 深度研究第一切片已落地：Sidecar 新增 `research_sessions / tasks / sources / claims` 四张表、`ResearchRepo`、确定性 planner 与 `/v1/research/sessions*` 资源路由；`start` 支持计划预览与确认启动，`pause/resume/cancel/export` 支持工作台基础状态流转与导出。
+- 深度研究执行链路已从“每题单次搜索”提升为“按预算做多轮自适应检索”：同一研究问题会追加官方/第三方等补充 query，直到来源覆盖达到阈值后再进入综合；来源 metadata 也会保留 `question_ids`，允许同一证据支撑多个问题而不丢关联。
+- 深度研究现在会在广泛且欠约束的选题上先进入 `stage='scoping'`：Sidecar 先追问地区 / 时间范围 / 重点维度，再生成计划，避免在边界模糊时直接产出浅计划。

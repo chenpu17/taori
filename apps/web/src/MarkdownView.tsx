@@ -93,6 +93,19 @@ export function MarkdownView({
   }, [html]);
 
   const onClick = (event: MouseEvent<HTMLDivElement>): void => {
+    // Open external links in new tab (also works around Tauri webview ignoring target=_blank).
+    const anchor = event.target instanceof Element
+      ? event.target.closest<HTMLAnchorElement>('a[href]')
+      : null;
+    if (anchor) {
+      const href = anchor.getAttribute('href') ?? '';
+      if (/^https?:\/\//.test(href)) {
+        event.preventDefault();
+        window.open(href, '_blank', 'noopener,noreferrer');
+        return;
+      }
+    }
+
     const quoteToggle = event.target instanceof Element
       ? event.target.closest<HTMLButtonElement>('button[data-quote-toggle]')
       : null;

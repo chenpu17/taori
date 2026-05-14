@@ -6,8 +6,9 @@ import {
   ResearchPlanReviseRequestSchema,
   TaoriError,
 } from '@taori/shared';
+import type { PlanMessage, ResearchConstraints, ResearchSession } from '@taori/shared';
 import type { BuildServerArgs } from '../server.js';
-import { ConversationsRepo, ModelsRepo, ProvidersRepo, ResearchRepo } from '../db/repos/index.js';
+import { ConversationsRepo, MemoriesRepo, ModelsRepo, ProvidersRepo, ResearchRepo } from '../db/repos/index.js';
 import {
   buildResearchDraftSkeleton,
   buildResearchPlan,
@@ -41,11 +42,87 @@ function parseOrValidation<T>(
   });
 }
 
+function shouldClarifyBeforePlanning(session: Pick<ResearchSession, 'objective' | 'constraints'>): boolean {
+  const objective = session.objective.trim();
+  if (!objective) return false;
+  if (session.constraints.time_range || session.constraints.region || session.constraints.language) return false;
+  if ((session.constraints.must_cover ?? []).length > 0) return false;
+  if (session.constraints.min_citations != null) return false;
+  if (objective.length > 160) return false;
+  return /(市场格局|主要玩家|竞争格局|机会点|行业趋势|生态|全景|定位|策略|差异)/.test(objective);
+}
+
+function buildClarificationMessage(session: Pick<ResearchSession, 'objective' | 'constraints'>): string {
+  const prompts: string[] = [];
+  if (!session.constraints.region) prompts.push('这次更想聚焦哪个市场/地区？例如中国、北美、全球。');
+  if (!session.constraints.time_range) prompts.push('时间范围更希望看近 6/12/24 个月，还是更长期？');
+  if ((session.constraints.must_cover ?? []).length === 0) {
+    prompts.push('最优先的比较维度是哪几个？例如价格、速度、可用性、风险、生态、SLA。');
+  }
+  if (!session.constraints.language && prompts.length < 3) {
+    prompts.push('来源语言只看中文，还是中英都可以？');
+  }
+  return [
+    '为把这次研究做深，我先确认几个边界，再给你计划：',
+    ...prompts.slice(0, 3).map((item, index) => `${index + 1}. ${item}`),
+    '',
+    '直接回复一句话即可，例如：聚焦中国市场，近 12 个月，优先价格、稳定性和 SLA，中英资料都可以。',
+  ].join('\n');
+}
+
+function mergeClarifiedConstraints(current: ResearchConstraints, feedback: string): ResearchConstraints {
+  const next: ResearchConstraints = {
+    time_range: current.time_range ?? null,
+    region: current.region ?? null,
+    language: current.language ?? null,
+    must_cover: [...(current.must_cover ?? [])],
+    min_citations: current.min_citations ?? null,
+  };
+  const text = feedback.trim();
+  if (!next.time_range) {
+    if (/近\s*6\s*个?月|最近半年|过去半年/.test(text)) next.time_range = '近 6 个月';
+    else if (/近\s*12\s*个?月|最近一年|过去一年|近一年/.test(text)) next.time_range = '近 12 个月';
+    else if (/近\s*24\s*个?月|最近两年|过去两年/.test(text)) next.time_range = '近 24 个月';
+    else if (/近\s*3\s*年|最近三年|过去三年/.test(text)) next.time_range = '近 3 年';
+  }
+  if (!next.region) {
+    if (/(中国|国内)/.test(text)) next.region = '中国';
+    else if (/(北美|美国|加拿大)/.test(text)) next.region = '北美';
+    else if (/(欧洲|欧盟)/.test(text)) next.region = '欧洲';
+    else if (/全球/.test(text)) next.region = '全球';
+    else if (/(亚太|亚洲)/.test(text)) next.region = '亚太';
+  }
+  if (!next.language) {
+    if (/(中英|中文.*英文|英文.*中文)/.test(text)) next.language = '中文 + 英文';
+    else if (/中文/.test(text)) next.language = '中文';
+    else if (/英文/.test(text)) next.language = '英文';
+  }
+  const mustCoverTerms = ['价格', '速度', '可用性', '风险', '生态', 'SLA', '稳定性', '文档', '社区', '延迟', '并发', '成本'];
+  const mustCover = new Set(next.must_cover);
+  for (const term of mustCoverTerms) {
+    if (text.includes(term)) mustCover.add(term);
+  }
+  next.must_cover = Array.from(mustCover);
+  return next;
+}
+
+function buildPlanFallback(session: ResearchSession, constraints: ResearchConstraints, notes: string[] = []) {
+  return buildResearchPlan({
+    title: session.title,
+    objective: session.objective,
+    outputKind: session.output_kind,
+    budgetMode: session.budget_mode,
+    constraints,
+    planningNotes: notes,
+  });
+}
+
 export function registerResearchRoute(app: FastifyInstance, deps: ResearchRouteDeps): void {
   const repo = new ResearchRepo(deps.db);
   const conversations = new ConversationsRepo(deps.db);
   const runner = deps.researchRunner;
   const plannerDeps = {
+    memories: new MemoriesRepo(deps.db),
     modelsRepo: new ModelsRepo(deps.db),
     providersRepo: new ProvidersRepo(deps.db),
     keystore: deps.keystore,
@@ -64,19 +141,24 @@ export function registerResearchRoute(app: FastifyInstance, deps: ResearchRouteD
         message: `Conversation ${body.conversation_id} not found`,
       });
     }
-    // Create session with no plan yet — AI planning runs async.
-    // The UI shows "AI 正在规划中…" until a plan arrives.
     const session = repo.create(body);
-    repo.update(session.id, { stage: 'planning' });
-    // Kick off async AI planning; fall back to template plan if AI fails.
-    setImmediate(() => {
-      const fallbackPlan = () => buildResearchPlan({
-        title: session.title,
-        objective: session.objective,
-        outputKind: session.output_kind,
-        budgetMode: session.budget_mode,
-        constraints: session.constraints,
+    if (shouldClarifyBeforePlanning(session)) {
+      repo.update(session.id, {
+        stage: 'scoping',
+        plan_messages: [{
+          role: 'assistant',
+          content: buildClarificationMessage(session),
+          ts: Date.now(),
+        }],
       });
+      const scoped = repo.getDetail(session.id)?.session ?? session;
+      reply.code(201);
+      return scoped;
+    }
+
+    repo.update(session.id, { stage: 'planning' });
+    setImmediate(() => {
+      const fallbackPlan = () => buildPlanFallback(session, session.constraints);
       void generateAIPlan(session, plannerDeps).then((plan) => {
         repo.update(session.id, { plan: plan ?? fallbackPlan() });
       }).catch((err: unknown) => {
@@ -126,20 +208,40 @@ export function registerResearchRoute(app: FastifyInstance, deps: ResearchRouteD
     const existingMessages = current.plan_messages ?? [];
     const userMessage = { role: 'user' as const, content: body.feedback, ts: Date.now() };
 
-    // Attempt AI revision
-    const result = await revisePlan(current, body.feedback, plannerDeps);
-
-    if (result) {
-      const assistantMessage = { role: 'assistant' as const, content: result.assistantMessage, ts: Date.now() };
+    if (!current.plan) {
+      const nextConstraints = mergeClarifiedConstraints(current.constraints, body.feedback);
+      const nextMessages: PlanMessage[] = [...existingMessages, userMessage];
+      const planningSession: ResearchSession = {
+        ...current,
+        constraints: nextConstraints,
+        stage: 'planning',
+        plan_messages: nextMessages,
+      };
+      const aiPlan = await generateAIPlan(planningSession, plannerDeps);
+      const plan = aiPlan ?? buildPlanFallback(current, nextConstraints, [body.feedback]);
       repo.update(current.id, {
-        plan: result.plan,
-        plan_messages: [...existingMessages, userMessage, assistantMessage],
+        stage: 'planning',
+        constraints: nextConstraints,
+        plan,
+        plan_messages: [
+          ...nextMessages,
+          { role: 'assistant', content: plan.summary, ts: Date.now() },
+        ],
       });
     } else {
-      // No AI available — just record the user message and keep existing plan
-      repo.update(current.id, {
-        plan_messages: [...existingMessages, userMessage],
-      });
+      const result = await revisePlan(current, body.feedback, plannerDeps);
+
+      if (result) {
+        const assistantMessage = { role: 'assistant' as const, content: result.assistantMessage, ts: Date.now() };
+        repo.update(current.id, {
+          plan: result.plan,
+          plan_messages: [...existingMessages, userMessage, assistantMessage],
+        });
+      } else {
+        repo.update(current.id, {
+          plan_messages: [...existingMessages, userMessage],
+        });
+      }
     }
 
     const detail = repo.getDetail(current.id);
@@ -161,14 +263,14 @@ export function registerResearchRoute(app: FastifyInstance, deps: ResearchRouteD
         message: `Research session cannot start from status ${current.status}`,
       });
     }
+    if (!current.plan && current.stage === 'scoping') {
+      throw new TaoriError({
+        code: 'validation_error',
+        message: '请先补充研究范围，Taori 再为你生成计划。',
+      });
+    }
     // Use AI-generated plan if available, otherwise fall back to template
-    const plan = current.plan ?? buildResearchPlan({
-      title: current.title,
-      objective: current.objective,
-      outputKind: current.output_kind,
-      budgetMode: current.budget_mode,
-      constraints: current.constraints,
-    });
+    const plan = current.plan ?? buildPlanFallback(current, current.constraints);
     repo.update(current.id, {
       plan,
       stage: 'planning',

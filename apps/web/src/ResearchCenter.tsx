@@ -185,13 +185,27 @@ function taskDetail(task: ResearchTask): string {
       const reason = String(task.output?.reason ?? '');
       if (reason === 'fast_mode') return '快速模式，跳过差距分析。';
       if (reason === 'no_sources') return '暂无来源，跳过差距分析。';
+      if (reason === 'no_gaps_identified') return '证据覆盖充分，无需补充检索。';
       return '差距分析已跳过。';
     }
     const added = Array.isArray(task.output?.added_tasks) ? (task.output.added_tasks as unknown[]).length : 0;
     const coverage = Array.isArray(task.output?.coverage) ? task.output.coverage as Array<Record<string,unknown>> : [];
-    const partial = coverage.filter((c) => c.level === 'partial' || c.level === 'missing').length;
-    if (added > 0) return `识别到 ${partial} 个信息空白，追加了 ${added} 轮补充检索。`;
-    if (coverage.length > 0) return `已评估 ${coverage.length} 个问题的证据覆盖情况。`;
+    const good = coverage.filter((c) => c.level === 'good').length;
+    const partial = coverage.filter((c) => c.level === 'partial').length;
+    const missing = coverage.filter((c) => c.level === 'missing').length;
+    const round = typeof task.output?.reflect_round === 'number' ? `第${task.output.reflect_round}轮 · ` : '';
+    const nextRound = task.output?.next_round_scheduled ? ' → 将继续第二轮深度反思' : '';
+    if (added > 0) {
+      const parts = [
+        round,
+        good > 0 ? `${good}个问题充分覆盖` : null,
+        partial > 0 ? `${partial}个部分覆盖` : null,
+        missing > 0 ? `${missing}个缺失` : null,
+        `追加 ${added} 轮补充检索`,
+      ].filter(Boolean);
+      return parts.join(' · ') + nextRound;
+    }
+    if (coverage.length > 0) return `${round}${good}/${coverage.length} 个问题充分覆盖，证据已齐全。`;
     return '正在分析已有资料，识别信息空白…';
   }
   if (task.kind === 'verify_citation') {
@@ -1246,7 +1260,12 @@ export function ResearchCenter({
                         <span>{detail.sources.length}</span>
                       </div>
                       <ul className="research-center__source-list" data-testid="research-source-list">
-                        {visibleSources.map((source) => (
+                        {visibleSources.map((source) => {
+                          const score = source.credibility_score ?? 0.5;
+                          const credTag = score >= 0.85 ? { label: '高可信', cls: 'high' }
+                            : score >= 0.7 ? { label: '可信', cls: 'med' }
+                            : null;
+                          return (
                           <li key={source.id} className="research-center__source-item">
                             <a
                               href={source.locator}
@@ -1258,9 +1277,15 @@ export function ResearchCenter({
                             </a>
                             <div className="research-center__source-meta">
                               <span>{safeHostname(source.locator)}</span>
+                              {credTag ? (
+                                <span className={`research-center__cred-badge research-center__cred-badge--${credTag.cls}`}>
+                                  {credTag.label}
+                                </span>
+                              ) : null}
                             </div>
                           </li>
-                        ))}
+                          );
+                        })}
                       </ul>
                     </section>
                   ) : detail.session.plan ? (

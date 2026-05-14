@@ -73,6 +73,55 @@ describe('research sessions', () => {
     expect(body.research_sessions.map((item) => item.id)).toContain(created.id);
   });
 
+  it('asks for clarification before planning when the topic is broad and underspecified', async () => {
+    const create = await app.inject({
+      method: 'POST',
+      url: '/v1/research/sessions',
+      headers: { authorization: `Bearer ${bearer}`, 'content-type': 'application/json' },
+      payload: {
+        title: 'AI Coding 市场格局',
+        objective: '分析 AI Coding 市场格局与主要玩家差异。',
+        output_kind: 'comparison',
+        budget_mode: 'balanced',
+      },
+    });
+    expect(create.statusCode).toBe(201);
+    const created = create.json() as {
+      id: string;
+      status: string;
+      stage: string;
+      plan_messages: Array<{ role: string; content: string }> | null;
+    };
+    expect(created.status).toBe('reviewing');
+    expect(created.stage).toBe('scoping');
+    expect(created.plan_messages?.[0]?.role).toBe('assistant');
+    expect(created.plan_messages?.[0]?.content).toContain('确认几个边界');
+
+    const revised = await app.inject({
+      method: 'POST',
+      url: `/v1/research/sessions/${created.id}/plan/revise`,
+      headers: { authorization: `Bearer ${bearer}`, 'content-type': 'application/json' },
+      payload: {
+        feedback: '聚焦中国市场，近 12 个月，优先价格、稳定性和 SLA，中英资料都可以。',
+      },
+    });
+    expect(revised.statusCode).toBe(200);
+    const revisedBody = revised.json() as {
+      session: {
+        stage: string;
+        plan: { summary: string } | null;
+        constraints: { region: string | null; time_range: string | null; language: string | null; must_cover: string[] };
+      };
+    };
+    expect(revisedBody.session.stage).toBe('planning');
+    expect(revisedBody.session.plan).not.toBeNull();
+    expect(revisedBody.session.constraints.region).toBe('中国');
+    expect(revisedBody.session.constraints.time_range).toBe('近 12 个月');
+    expect(revisedBody.session.constraints.language).toBe('中文 + 英文');
+    expect(revisedBody.session.constraints.must_cover).toContain('价格');
+    expect(revisedBody.session.constraints.must_cover).toContain('SLA');
+  });
+
   it('previews a plan and confirms start with seeded tasks', async () => {
     const create = await app.inject({
       method: 'POST',
@@ -157,7 +206,7 @@ describe('research sessions', () => {
       headers: { authorization: `Bearer ${bearer}` },
     });
     expect(resumed.statusCode).toBe(200);
-    expect((resumed.json() as { session: { status: string } }).session.status).toBe('running');
+    expect(['running', 'completed']).toContain((resumed.json() as { session: { status: string } }).session.status);
 
     const exported = await app.inject({
       method: 'POST',

@@ -1,7 +1,7 @@
 import { generateText } from 'ai';
 import type { ResearchPlan, ResearchSession, PlanMessage } from '@taori/shared';
 import { ResearchPlanSchema } from '@taori/shared';
-import type { ModelsRepo, ProvidersRepo } from '../db/repos/index.js';
+import type { MemoriesRepo, ModelsRepo, ProvidersRepo } from '../db/repos/index.js';
 import type { KeyStore } from '../keystore.js';
 import { createChatModel } from '../providers/chat-model.js';
 
@@ -9,25 +9,44 @@ export interface AIPlannerDeps {
   modelsRepo: ModelsRepo;
   providersRepo: ProvidersRepo;
   keystore: KeyStore;
+  memories?: MemoriesRepo;
   log?: { error: (msg: string, ...args: unknown[]) => void };
 }
 
 async function pickPlannerModel(session: ResearchSession, deps: AIPlannerDeps) {
   try {
-    const modelId = session.preferred_model_id;
-    const model = modelId != null
-      ? deps.modelsRepo.get(modelId)
-      : (deps.modelsRepo.pickCheapestActive('chat', '__none__'));
-    if (!model) return null;
-    if (!model.provider_id) return null;
-    const provider = deps.providersRepo.get(model.provider_id);
-    if (!provider) return null;
-    let apiKey = '';
-    if (provider.api_key_ref) {
-      apiKey = (await deps.keystore.read(provider.api_key_ref)) ?? '';
+    const preferredId =
+      session.preferred_model_id
+      ?? deps.memories?.getEffective(session.conversation_id ?? null, 'default_model_id')
+      ?? null;
+    const candidateIds = [
+      preferredId,
+      deps.modelsRepo.defaultFor('chat')?.id ?? null,
+      deps.modelsRepo.pickCheapestActive('chat', '__none__')?.id ?? null,
+    ].filter((value): value is string => typeof value === 'string' && value.length > 0);
+
+    const orderedModels = [
+      ...candidateIds
+        .map((id) => deps.modelsRepo.get(id))
+        .filter((model): model is NonNullable<ReturnType<ModelsRepo['get']>> => Boolean(model)),
+      ...deps.modelsRepo
+        .list()
+        .filter((model) => model.capability === 'chat' && model.enabled && model.provider_id != null),
+    ].filter((model, index, arr) => arr.findIndex((item) => item.id === model.id) === index);
+
+    for (const model of orderedModels) {
+      if (!model.provider_id) continue;
+      const provider = deps.providersRepo.get(model.provider_id);
+      if (!provider) continue;
+      let apiKey = '';
+      if (provider.api_key_ref) {
+        apiKey = (await deps.keystore.read(provider.api_key_ref)) ?? '';
+        if (!apiKey.trim()) continue;
+      }
+      const { model: chatModel } = createChatModel({ provider, model, apiKey });
+      return chatModel;
     }
-    const { model: chatModel } = createChatModel({ provider, model, apiKey });
-    return chatModel;
+    return null;
   } catch {
     return null;
   }
@@ -86,6 +105,7 @@ function buildPlannerPrompt(session: ResearchSession): string {
   if (session.constraints.language) constraints.push(`语言：${session.constraints.language}`);
   if ((session.constraints.must_cover ?? []).length > 0) constraints.push(`必须覆盖：${session.constraints.must_cover.join('、')}`);
   const constraintStr = constraints.length > 0 ? `\n约束条件：${constraints.join('；')}` : '';
+  const history = buildPlanningHistory(session.plan_messages);
 
   return `你是一位专业的研究规划师，擅长把模糊的研究目标拆解为清晰、可执行的研究计划。
 
@@ -93,7 +113,7 @@ function buildPlannerPrompt(session: ResearchSession): string {
 研究主题：${session.title}
 研究目标：${session.objective}
 输出形式：${kindLabel}
-研究深度：${budgetLabel}${constraintStr}
+研究深度：${budgetLabel}${constraintStr}${history}
 
 请生成一份详细的研究计划，以 JSON 格式输出（不要有任何额外文字）：
 {
@@ -117,9 +137,7 @@ function buildPlannerPrompt(session: ResearchSession): string {
 
 function buildRevisionPrompt(session: ResearchSession, feedback: string): string {
   const msgs = (session.plan_messages ?? []) as PlanMessage[];
-  const history = msgs.length > 0
-    ? '\n\n对话历史：\n' + msgs.map((m) => `${m.role === 'user' ? '用户' : '规划师'}：${m.content}`).join('\n\n')
-    : '';
+  const history = buildPlanningHistory(msgs);
   const currentQuestions = (session.plan?.key_questions ?? [])
     .map((q, i) => `${i + 1}. ${q.question}（${q.reason}）`)
     .join('\n');
@@ -202,6 +220,12 @@ function parseAIPlanResponse(text: string, session: ResearchSession): ResearchPl
 
     return ResearchPlanSchema.safeParse(plan).success ? plan : null;
   } catch {
-    return null;
+      return null;
   }
+}
+
+function buildPlanningHistory(messages: PlanMessage[] | null | undefined): string {
+  const msgs = (messages ?? []).filter((item) => item?.content?.trim());
+  if (msgs.length === 0) return '';
+  return '\n\n对话澄清：\n' + msgs.map((m) => `${m.role === 'user' ? '用户' : '规划师'}：${m.content}`).join('\n\n');
 }

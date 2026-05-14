@@ -138,6 +138,12 @@ test('research center keeps market-analysis runs readable and collects evidence 
   await page.getByTestId('composer-deep-research').click();
   await expect(page.getByTestId('research-center')).toBeVisible();
   await page.getByTestId('research-quick-start').click();
+  await expect(page.getByTestId('research-plan-scoping')).toBeVisible({ timeout: 10_000 });
+  await expect(page.getByTestId('research-center')).toContainText('先确认研究边界');
+  await page.getByTestId('research-plan-feedback').fill(
+    '聚焦全球市场，近 12 个月，优先价格、可用性和风险，中英资料都可以。',
+  );
+  await page.getByTestId('research-plan-feedback-submit').click();
   await expect(page.getByTestId('research-action-confirm')).toBeVisible({ timeout: 10_000 });
   await page.getByTestId('research-action-confirm').click();
 
@@ -153,6 +159,7 @@ test('research center keeps market-analysis runs readable and collects evidence 
   });
   await expect(page.getByTestId('research-source-list').locator('li').first()).toBeVisible({ timeout: 60_000 });
   await expect(page.getByTestId('research-reading-pane')).toBeVisible({ timeout: 60_000 });
+  await expect(page.getByTestId('research-task-list')).toContainText(/轮检索|个站点/, { timeout: 60_000 });
   // Draft is now rendered as HTML — check for content rather than raw markdown syntax
   await expect(page.getByTestId('research-draft')).toContainText('证据');
 });

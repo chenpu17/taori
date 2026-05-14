@@ -50,6 +50,14 @@ Scope: Taori 全系统
 - 2026-05-11 [深度研究交互再收敛]：
   - `apps/web`：深度研究 UI 从三栏工作台继续收敛为更接近 OpenAI 的单列对话式研究流：启动页保留大输入框；进入研究后用“用户请求气泡 + 研究卡片 + 结果卡片”推进，计划、进度、导出与继续追问集中在同一列，证据与风险折叠进次级面板
   - `apps/web/e2e`：`research-center.spec.ts` 改为覆盖“计划预览 → 确认执行 → 单列研究流 → 暂停/恢复/导出/取消”主路径
+- 2026-05-12 [深度研究执行加深]：
+  - `apps/sidecar`：Research runner 改为按预算进行多轮自适应检索；单题不再只打一条 query，而会补充官方/第三方视角，直到来源数与站点覆盖达标后再综合；source metadata 同步保留 `question_ids` 以支持一份证据服务多个研究问题
+  - `apps/web`：研究任务行新增“检索轮次 / 站点覆盖 / 命中来源”显示，让用户能直接感知当前研究是否真的做了更深的搜索
+  - `apps/sidecar/test`：新增对 deep budget 多轮检索的回归覆盖
+- 2026-05-12 [深度研究 scoping 闭环]：
+  - `apps/sidecar`：对“市场格局 / 主要玩家 / 行业趋势”这类宽泛选题，创建 session 后会先进入 `scoping` 阶段，主动追问地区、时间范围和重点维度，再基于补充信息生成计划
+  - `apps/web`：reviewing 且无 plan 时不再只有“AI 正在规划中…”，而是可直接回复补充信息的对话式 scoping 卡片；计划卡指标也新增来源站点数和已验证主张数
+  - `apps/web/e2e` / `apps/sidecar/test`：补充 scoping → 计划 → 执行主路径回归
 - 2026-05-10 [thinking 配置]：新增“全局默认 + 单模型覆盖”的模型 thinking 开关：
   - `packages/shared`：`Model*` / backup contract 新增 `thinking_enabled: boolean | null`
   - `apps/sidecar`：`models.thinking_enabled` 落库，并在聊天、Quick Compare、Roundtable、自动记忆抽取与模型探测中统一解析；当前按 provider 差异适配 OpenRouter `reasoning`、DeepSeek `thinking`、GPT-5/o 系列 `reasoning_effort`

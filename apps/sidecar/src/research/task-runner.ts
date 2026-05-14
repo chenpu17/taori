@@ -107,6 +107,17 @@ export class ResearchRunner {
       if (!session) return;
       if (session.status !== 'running') return;
       const tasks = this.deps.repo.listTasks(sessionId);
+
+      // Batch-execute all queued search tasks in parallel for speed and depth.
+      const queuedSearches = tasks.filter((t) => t.status === 'queued' && t.kind === 'search');
+      if (queuedSearches.length > 1) {
+        await Promise.allSettled(
+          queuedSearches.map((t) => this.runTask(session, t)),
+        );
+        await sleep(TICK_DELAY_MS);
+        continue;
+      }
+
       const next = tasks.find((t) => t.status === 'queued');
       if (!next) {
         this.finalizeSession(this.deps.repo.get(sessionId) ?? session, this.deps.repo.listTasks(sessionId));
@@ -333,26 +344,29 @@ export class ResearchRunner {
       });
       recorded.push(inserted);
     }
-    for (const source of recorded.slice(0, FETCH_TOP_N)) {
-      try {
-        const fetched = await this.deps.bus.invoke(
-          'builtin.web_fetch',
-          { url: source.locator, format: 'markdown', max_chars: FETCH_MAX_CHARS },
-          { conversationId: session.conversation_id ?? null },
-        );
-        if (fetched.ok) {
-          const out = fetched.output as { title?: string | null; content?: string };
-          const snippet = (out.content ?? '').slice(0, 3_900) || source.snippet;
-          this.deps.repo.updateSource(source.id, {
-            title: out.title ?? source.title,
-            snippet,
-            metadata: { ...source.metadata, fetched: true },
-          });
+    // Fetch top pages in parallel for better throughput.
+    await Promise.allSettled(
+      recorded.slice(0, FETCH_TOP_N).map(async (source) => {
+        try {
+          const fetched = await this.deps.bus.invoke(
+            'builtin.web_fetch',
+            { url: source.locator, format: 'markdown', max_chars: FETCH_MAX_CHARS },
+            { conversationId: session.conversation_id ?? null },
+          );
+          if (fetched.ok) {
+            const out = fetched.output as { title?: string | null; content?: string };
+            const snippet = (out.content ?? '').slice(0, 3_900) || source.snippet;
+            this.deps.repo.updateSource(source.id, {
+              title: out.title ?? source.title,
+              snippet,
+              metadata: { ...source.metadata, fetched: true },
+            });
+          }
+        } catch {
+          // ignore individual fetch failures; search hits are still recorded.
         }
-      } catch {
-        // ignore individual fetch failures; search hits are still recorded.
-      }
-    }
+      }),
+    );
     return {
       recorded,
       engine: output?.engine ?? null,
@@ -373,6 +387,8 @@ export class ResearchRunner {
 
     const rawQuestions = Array.isArray(task.input?.questions) ? task.input.questions as Array<{ id: string; question: string; reason: string }> : [];
     const maxFollowUps = typeof task.input?.max_follow_ups === 'number' ? task.input.max_follow_ups : 2;
+    const currentRound = typeof task.input?.reflect_round === 'number' ? task.input.reflect_round : 1;
+    const maxRounds = session.budget_mode === 'deep' ? 3 : 2;
 
     let chatModel: ReturnType<typeof createChatModel>['model'] | null = null;
     try {
@@ -402,7 +418,7 @@ export class ResearchRunner {
         model: chatModel,
         prompt,
         maxTokens: 1500,
-        abortSignal: AbortSignal.timeout(20_000),
+        abortSignal: AbortSignal.timeout(25_000),
       });
       reflectResult = parseReflectResponse(text);
     } catch (err) {
@@ -415,7 +431,7 @@ export class ResearchRunner {
     }
 
     // Insert targeted follow-up search tasks before the summarize task.
-    // They will be picked up by the main loop in the next tick.
+    // They will be picked up by the main loop (batch-parallel) in the next tick.
     const searchToolName = pickPreferredSearchToolName(
       this.deps.bus,
       session.preferred_search_tool ?? this.deps.memories?.getEffective(session.conversation_id ?? null, 'default_search_tool'),
@@ -429,16 +445,33 @@ export class ResearchRunner {
       const inserted = this.deps.repo.insertTask(session.id, {
         kind: 'search',
         status: 'queued',
-        title: `补充检索：${gap.topic ?? gap.query}`,
+        title: `补充检索（第${currentRound}轮）：${gap.topic ?? gap.query}`,
         input: {
           question: gap.topic ?? gap.query,
           reason: '信息空白补充',
           query: gap.query,
           is_follow_up: true,
+          reflect_round: currentRound,
           search_tool: searchToolName,
         },
       });
       addedTasks.push(inserted.id);
+    }
+
+    // If there are gaps and we haven't hit the reflect round cap, schedule another reflect pass
+    // after the follow-up searches complete. This creates an organic multi-round loop.
+    const hasPartialOrMissing = reflectResult.coverage.some((c) => c.level !== 'good');
+    if (hasPartialOrMissing && currentRound < maxRounds && followUps.length > 0) {
+      this.deps.repo.insertTask(session.id, {
+        kind: 'reflect',
+        status: 'queued',
+        title: `深度反思（第${currentRound + 1}轮）`,
+        input: {
+          questions: rawQuestions,
+          max_follow_ups: maxFollowUps,
+          reflect_round: currentRound + 1,
+        },
+      });
     }
 
     this.deps.repo.updateTask(task.id, {
@@ -446,6 +479,8 @@ export class ResearchRunner {
         coverage: reflectResult.coverage,
         follow_up_searches: followUps,
         added_tasks: addedTasks,
+        reflect_round: currentRound,
+        next_round_scheduled: hasPartialOrMissing && currentRound < maxRounds && followUps.length > 0,
       },
     });
   }
@@ -507,7 +542,7 @@ export class ResearchRunner {
           const { text } = await generateText({
             model: chatModel,
             prompt,
-            maxTokens: 4096,
+            maxTokens: 8192,
           });
           if (text && text.trim().length > 100) {
             this.deps.repo.update(session.id, { draft_markdown: text.trim() });
@@ -599,18 +634,21 @@ function buildSynthesisPrompt(
     decision: '决策建议（结论 + 依据 + 可选路径 + 执行建议）',
   };
   const structureGuide: Record<string, string> = {
-    report: '## 核心结论\n\n## 详细分析\n\n## 风险与不确定性\n\n## 建议与后续步骤',
-    brief: '## 摘要\n\n## 关键事实\n\n## 风险\n\n## 下一步行动',
-    comparison: '## 结论（哪种方案更合适）\n\n## 对比维度分析\n\n## 各方案详细分析\n\n## 风险与注意事项\n\n## 选择建议',
-    decision: '## 结论（推荐方向）\n\n## 决策依据\n\n## 可选路径分析\n\n## 风险与前提条件\n\n## 执行建议',
+    report: '## 执行摘要\n\n## 核心发现\n\n## 详细分析\n\n## 矛盾与争议\n\n## 不确定性与局限\n\n## 风险\n\n## 建议与后续步骤',
+    brief: '## 摘要（3-5 句话）\n\n## 关键事实\n\n## 风险\n\n## 下一步行动',
+    comparison: '## 结论（哪种方案更合适，一句话）\n\n## 关键维度对比表\n\n## 各方案深度分析\n\n## 矛盾与数据分歧\n\n## 风险与注意事项\n\n## 选择建议（按场景分类）',
+    decision: '## 推荐结论（直接给出答案）\n\n## 决策依据\n\n## 可选路径对比\n\n## 矛盾与数据分歧\n\n## 风险与前提条件\n\n## 执行建议',
   };
   const kind = plan.output_kind ?? 'report';
+
+  // Sort sources by credibility descending so the LLM sees the best sources first per question.
+  const sortedSources = [...sources].sort((a, b) => (b.credibility_score ?? 0.5) - (a.credibility_score ?? 0.5));
 
   // Group sources by question for better LLM comprehension
   const sourcesByQuestion = new Map<string, ResearchSource[]>();
   const unassignedSources: ResearchSource[] = [];
 
-  for (const source of sources) {
+  for (const source of sortedSources) {
     const qid = typeof source.metadata?.question_id === 'string' ? source.metadata.question_id : null;
     const qids = Array.isArray(source.metadata?.question_ids) ? source.metadata.question_ids as string[] : [];
     const allQids = new Set([...(qid ? [qid] : []), ...qids]);
@@ -626,6 +664,14 @@ function buildSynthesisPrompt(
 
   let globalIndex = 1;
   const sourceIndexMap = new Map<string, number>();
+
+  function credibilityTag(score: number | null | undefined): string {
+    const s = score ?? 0.5;
+    if (s >= 0.85) return '★高可信';
+    if (s >= 0.7) return '★中等';
+    return '';
+  }
+
   const questionsText = plan.key_questions.map((q) => {
     const qSources = sourcesByQuestion.get(q.id) ?? [];
     const sourceLines = qSources.map((s) => {
@@ -633,9 +679,10 @@ function buildSynthesisPrompt(
       const idx = sourceIndexMap.get(s.id)!;
       const title = (s.title ?? s.locator).slice(0, 200);
       const snippet = (s.snippet ?? '').slice(0, 1500).replace(/\s+/g, ' ');
-      return `  [${idx}] 标题：${title}\n      来源：${s.locator}\n      内容：${snippet || '（无摘要）'}`;
+      const tag = credibilityTag(s.credibility_score);
+      return `  [${idx}]${tag ? ` ${tag}` : ''} 标题：${title}\n      来源：${s.locator}\n      内容：${snippet || '（无摘要）'}`;
     }).join('\n\n');
-    return `【问题：${q.question}（${q.reason}）】\n${sourceLines || '  （本问题未找到对应资料）'}`;
+    return `【问题 ${q.id}：${q.question}（${q.reason}）】\n${sourceLines || '  （本问题未找到对应资料）'}`;
   }).join('\n\n---\n\n');
 
   // Any sources not linked to a specific question
@@ -645,28 +692,55 @@ function buildSynthesisPrompt(
         const idx = sourceIndexMap.get(s.id)!;
         const title = (s.title ?? s.locator).slice(0, 200);
         const snippet = (s.snippet ?? '').slice(0, 800).replace(/\s+/g, ' ');
-        return `  [${idx}] 标题：${title}\n      来源：${s.locator}\n      内容：${snippet || '（无摘要）'}`;
+        const tag = credibilityTag(s.credibility_score);
+        return `  [${idx}]${tag ? ` ${tag}` : ''} 标题：${title}\n      来源：${s.locator}\n      内容：${snippet || '（无摘要）'}`;
       }).join('\n\n')
     : '';
 
-  const totalSources = sourceIndexMap.size + (unassignedSources.length > 0 ? unassignedSources.filter(s => !sourceIndexMap.has(s.id)).length : 0);
+  const totalSources = sourceIndexMap.size + unassignedSources.filter(s => !sourceIndexMap.has(s.id)).length;
 
-  return `你是一名资深研究分析师，擅长从多源信息中提炼洞见、识别矛盾、输出有深度的分析报告。
+  const kindSpecificInstructions = kind === 'comparison'
+    ? `对比分析报告要求：
+- 必须用 Markdown 表格展示关键维度对比（列 = 各方案，行 = 各维度）
+- 表格后逐方案深入分析，不只是表格总结
+- 明确指出哪些数据来自官方、哪些是第三方评测
+- 给出按不同使用场景的选型建议（不同团队规模/预算/需求）`
+    : kind === 'decision'
+    ? `决策建议报告要求：
+- 开头直接给出"推荐使用 X"或"不建议现在做 Y"的明确结论
+- 决策树或条件式建议：列出"如果你的情况是 A，则选 X；如果是 B，则选 Y"
+- 明确列出推荐的前提条件和风险假设
+- 对不推荐选项说明具体原因`
+    : kind === 'brief'
+    ? `简报要求：
+- 摘要控制在 5 句话以内，高度精炼
+- 关键事实用 bullet point 列出，每条一个独立可操作的信息点
+- 风险按优先级排序`
+    : `综合报告要求：
+- 执行摘要要能让忙碌的决策者在 30 秒内理解全文结论
+- 详细分析部分按证据强度分层：强证据 → 弱证据 → 推断
+- 对有争议的点要平衡呈现多方观点`;
+
+  return `你是一名顶级研究分析师，具备以下专业能力：多源信息综合、证据可信度评估、矛盾识别与调和、深度洞察提炼。
 
 【研究主题】${session.title}
 【研究目标】${session.objective}
 【输出类型】${kindLabel[kind] ?? kindLabel.report}
-【研究计划】${plan.summary}
+【研究计划摘要】${plan.summary}
 
-【按问题整理的资料（共 ${totalSources} 条来源）】
+━━━ 收集到的研究资料（共 ${totalSources} 条来源，按可信度排序）━━━
 
 ${questionsText}${unassignedText}
 
----
+━━━ 分析任务 ━━━
 
-请基于上述资料，撰写一份完整的 Markdown 研究报告（中文）。
+请完成以下三步分析，然后输出最终报告：
 
-报告结构：
+第一步（不要输出）：对每个研究问题，梳理已知事实、识别不同来源间的矛盾或分歧。
+第二步（不要输出）：评估证据质量，标注哪些结论有强支撑，哪些是推断或待验证。
+第三步：基于前两步，撰写完整的 Markdown 报告。
+
+━━━ 最终报告格式 ━━━
 
 # ${session.title}
 
@@ -674,17 +748,18 @@ ${structureGuide[kind] ?? structureGuide.report}
 
 ## 参考来源
 
-分析要求：
-- 对每个研究问题，基于资料给出明确结论，不要回避判断
-- 当不同来源的说法存在矛盾时，明确指出分歧并分析原因
-- 对信息不充分的点，说明已知内容和尚不确定的部分
-- 每个重要论断用 [[序号]](URL) 格式引用来源，例如 [[1]](https://example.com)
-- 对于${kind === 'comparison' ? '对比类报告：用表格展示关键维度对比，再逐项深入分析' : kind === 'decision' ? '决策报告：明确给出推荐选项和不推荐理由，条件式建议要列出前提条件' : '综合报告：先给结论，再给支撑证据，最后给不确定性'}
-- 参考来源部分列出所有引用，格式：[[序号]] 标题 — URL
-- 内容必须基于资料分析，不要凭空发挥；资料不足之处明确标注`;
+━━━ 撰写要求 ━━━
+
+${kindSpecificInstructions}
+
+通用要求：
+- 每个重要论断用 [[序号]](URL) 格式内联引用来源，例如 [[1]](https://example.com)
+- 当不同来源说法存在矛盾时，必须在"矛盾与数据分歧"或正文中明确指出，分析可能原因
+- 信息不足之处说明"已知：X，尚不确定：Y"，不要回避或跳过
+- ★高可信 标记的来源优先引用；多个来源一致时，说明"多来源一致"以增强说服力
+- 参考来源部分格式：[[序号]] 标题 — URL（每条一行）
+- 内容必须基于提供的资料，禁止凭空发挥；资料不足之处明确标注，不要虚构数据`;
 }
-
-
 
 // ─── Reflect helpers ─────────────────────────────────────────────────────────
 

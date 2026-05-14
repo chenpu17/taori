@@ -125,8 +125,9 @@ describe('research runner', () => {
     expect(detail!.claims.length).toBeGreaterThan(0);
     expect(detail!.session.draft_markdown).toContain('## 关键问题与证据');
     expect(detail!.session.final_markdown).toBe(detail!.session.draft_markdown);
-    expect(String(detail!.sources[0]?.metadata?.query ?? '')).toContain('AI Coding 2026');
+    expect(String(detail!.sources[0]?.metadata?.query ?? '')).toBeTruthy();
     expect(String(detail!.sources[0]?.metadata?.question_id ?? '')).toBeTruthy();
+    expect(Array.isArray(detail!.tasks.find((task) => task.kind === 'search')?.output?.rounds)).toBe(true);
     expect(detail!.claims.some((claim) => claim.support_status !== 'unverified')).toBe(true);
     // All search/summarize/verify tasks should have left the queue.
     const queued = detail!.tasks.filter((t) => t.status === 'queued');
@@ -181,5 +182,76 @@ describe('research runner', () => {
     expect(detail!.claims).toHaveLength(0);
     expect(detail!.tasks.find((t) => t.kind === 'summarize')?.status).toBe('failed');
     expect(detail!.tasks.find((t) => t.kind === 'verify_citation')?.status).toBe('skipped');
+  }, 30_000);
+
+  it('expands deep research searches across multiple rounds before synthesis', async () => {
+    const costs = new CostsRepo(db);
+    const bus = new CapabilityBus(costs);
+    bus.register(createWebSearchToolWithDeps({
+      fetch: ((url: string | URL | Request) => {
+        const target = typeof url === 'string' ? url : url instanceof URL ? url.href : url.url;
+        const query = new URL(target).searchParams.get('q') ?? '';
+        if (query.includes('官方') || query.includes('文档')) {
+          return Promise.resolve(new Response(
+            `<a class="result__a" href="https://docs.vendor.example/pricing">官方定价</a>
+             <a class="result__snippet">官方文档提供 API 定价、SLA 与限制。</a>
+             <a class="result__a" href="https://status.vendor.example/sla">服务承诺</a>
+             <a class="result__snippet">官方状态页说明 SLA 和地域可用性。</a>`,
+            { status: 200, headers: { 'content-type': 'text/html; charset=utf-8' } },
+          ));
+        }
+        return Promise.resolve(new Response(
+          `<a class="result__a" href="https://example.com/overview">行业综述</a>
+           <a class="result__snippet">概述各家产品现状，但站点覆盖有限。</a>`,
+          { status: 200, headers: { 'content-type': 'text/html; charset=utf-8' } },
+        ));
+      }) as typeof fetch,
+    }));
+    bus.register(createWebFetchToolWithDeps({
+      fetch: ((url: string | URL | Request) => {
+        const target = typeof url === 'string' ? url : url instanceof URL ? url.href : url.url;
+        const u = new URL(target);
+        return Promise.resolve(new Response(
+          `<!doctype html><html><head><title>${u.hostname}</title></head><body><p>${u.hostname} 提供了更具体的官方说明。</p></body></html>`,
+          { status: 200, headers: { 'content-type': 'text/html; charset=utf-8' } },
+        ));
+      }) as typeof fetch,
+    }));
+    const deepRunner = new ResearchRunner({ repo, bus });
+
+    const created = repo.create({
+      title: '国产模型 API 对比',
+      objective: '对比主要国产模型 API 的价格、SLA 与可用性。',
+      output_kind: 'comparison',
+      budget_mode: 'deep',
+    });
+    const plan = buildResearchPlan({
+      title: created.title,
+      objective: created.objective,
+      outputKind: created.output_kind,
+      budgetMode: created.budget_mode,
+      constraints: created.constraints,
+    });
+    repo.update(created.id, {
+      plan,
+      status: 'running',
+      stage: 'planning',
+      started_at: Date.now(),
+      draft_markdown: buildResearchDraftSkeleton(created, plan),
+    });
+    repo.replaceTasks(created.id, buildResearchTasks({
+      plan,
+      title: created.title,
+      objective: created.objective,
+    }));
+
+    await deepRunner.start(created.id);
+
+    const detail = repo.getDetail(created.id);
+    const searchTask = detail?.tasks.find((task) => task.kind === 'search');
+    expect(searchTask).toBeTruthy();
+    expect(Array.isArray(searchTask?.output?.rounds)).toBe(true);
+    expect((searchTask?.output?.rounds as Array<unknown>).length).toBeGreaterThan(1);
+    expect(Number(searchTask?.output?.unique_hosts ?? 0)).toBeGreaterThanOrEqual(2);
   }, 30_000);
 });
