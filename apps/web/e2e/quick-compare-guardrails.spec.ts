@@ -174,7 +174,9 @@ test.describe('quick compare guardrails', () => {
     await page.goto('/');
     await expect(page.getByTestId('tip-roundtable')).toBeVisible({ timeout: 5_000 });
     await page.getByTestId('composer-input').fill('请比较两个方案');
-    await page.getByTestId('composer-quick-compare').click();
+    await page.getByTestId('composer-tools-toggle').click();
+  await expect(page.getByTestId('composer-quick-compare')).toBeVisible();
+  await page.getByTestId('composer-quick-compare').click();
 
     await expect(page.getByTestId('quick-compare-picker')).toBeVisible();
     await expect(page.getByTestId('tip-roundtable')).toHaveCount(0);
@@ -240,7 +242,9 @@ test.describe('quick compare guardrails', () => {
     await expect(page.getByTestId('active-model')).toHaveValue('mdl_current');
     await page.getByTestId('composer-input').fill('比较两个方案');
     await expect(page.getByTestId('composer-quick-compare')).toBeEnabled();
-    await page.getByTestId('composer-quick-compare').click();
+    await page.getByTestId('composer-tools-toggle').click();
+  await expect(page.getByTestId('composer-quick-compare')).toBeVisible();
+  await page.getByTestId('composer-quick-compare').click();
     await expect(page.getByTestId('quick-compare-picker')).toBeVisible();
     await page.getByTestId('quick-compare-picker-submit').click();
 
@@ -305,7 +309,9 @@ test.describe('quick compare guardrails', () => {
 
     await page.goto('/');
     await page.getByTestId('composer-input').fill('比较两个方案');
-    await page.getByTestId('composer-quick-compare').click();
+    await page.getByTestId('composer-tools-toggle').click();
+  await expect(page.getByTestId('composer-quick-compare')).toBeVisible();
+  await page.getByTestId('composer-quick-compare').click();
     await expect(page.getByTestId('quick-compare-picker')).toBeVisible();
     await page.getByTestId('quick-compare-picker-submit').click();
     await expect(page.getByTestId('quick-compare-card')).toBeVisible({ timeout: 15_000 });
@@ -336,7 +342,9 @@ test.describe('quick compare guardrails', () => {
 
     await page.goto('/');
     await page.getByTestId('composer-input').fill('比较两个方案');
-    await page.getByTestId('composer-quick-compare').click();
+    await page.getByTestId('composer-tools-toggle').click();
+  await expect(page.getByTestId('composer-quick-compare')).toBeVisible();
+  await page.getByTestId('composer-quick-compare').click();
     await expect(page.getByTestId('quick-compare-picker')).toBeVisible();
     await page.getByTestId('quick-compare-picker-submit').click();
     await expect(page.getByTestId('quick-compare-card')).toBeVisible({ timeout: 15_000 });

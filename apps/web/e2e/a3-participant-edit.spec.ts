@@ -60,6 +60,8 @@ test('A3 user can edit role label and remove a participant before launch', async
   await page.goto('/');
   await expect(page.getByTestId('chat-panel')).toBeVisible({ timeout: 10_000 });
   await page.getByTestId('composer-input').fill('A3 — pick the right ORM');
+  await page.getByTestId('composer-tools-toggle').click();
+  await expect(page.getByTestId('composer-roundtable')).toBeVisible();
   await page.getByTestId('composer-roundtable').click();
 
   const dlg = page.getByTestId('roundtable-launch-dialog');

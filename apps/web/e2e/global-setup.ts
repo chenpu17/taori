@@ -109,6 +109,7 @@ export default async function globalSetup(): Promise<void> {
     SIDECAR_BEARER: TEST_BEARER,
     NODE_ENV: 'development',
     TAORI_E2E_HERMETIC_WEB: '1',
+    TAORI_HERMETIC_AI_PLANNER: '1',
   });
 
   await waitForUrl(`http://127.0.0.1:${TEST_SIDECAR_PORT}/health`);

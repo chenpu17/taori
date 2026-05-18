@@ -318,6 +318,8 @@ test('B2 roundtable tip hides behind roundtable launch dialog and returns after 
   await expectWorkspaceReady(page);
   await expect(page.getByTestId('tip-roundtable')).toBeVisible({ timeout: 5_000 });
 
+  await page.getByTestId('composer-tools-toggle').click();
+  await expect(page.getByTestId('composer-roundtable')).toBeVisible();
   await page.getByTestId('composer-roundtable').click();
   await expect(page.getByTestId('roundtable-launch-dialog')).toBeVisible({ timeout: 10_000 });
   await expect(page.getByTestId('tip-roundtable')).toHaveCount(0);

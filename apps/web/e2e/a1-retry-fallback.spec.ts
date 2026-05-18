@@ -57,6 +57,8 @@ test('A1 retry options dropdown lists candidates with current/recommended tags',
 
   // Launch roundtable and start round 1 (which will fail).
   await page.getByTestId('composer-input').fill('A1 retry options');
+  await page.getByTestId('composer-tools-toggle').click();
+  await expect(page.getByTestId('composer-roundtable')).toBeVisible();
   await page.getByTestId('composer-roundtable').click();
   const dlg = page.getByTestId('roundtable-launch-dialog');
   await expect(dlg).toBeVisible();

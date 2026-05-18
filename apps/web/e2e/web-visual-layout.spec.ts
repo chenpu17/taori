@@ -326,6 +326,8 @@ test('small viewport: roundtable launch dialog keeps primary actions reachable',
   await page.goto('/');
   await expect(page.getByTestId('chat-panel')).toBeVisible({ timeout: 10_000 });
   await page.getByTestId('composer-input').fill('小屏圆桌：是否采用新计费策略');
+  await page.getByTestId('composer-tools-toggle').click();
+  await expect(page.getByTestId('composer-roundtable')).toBeVisible();
   await page.getByTestId('composer-roundtable').click();
 
   const dialog = page.getByTestId('roundtable-launch-dialog');
@@ -346,6 +348,8 @@ test('small viewport: completed roundtable panel scrolls and loopback process en
   await page.goto('/');
   await expect(page.getByTestId('chat-panel')).toBeVisible({ timeout: 10_000 });
   await page.getByTestId('composer-input').fill('小屏圆桌面板：第二轮与总结滚动验证');
+  await page.getByTestId('composer-tools-toggle').click();
+  await expect(page.getByTestId('composer-roundtable')).toBeVisible();
   await page.getByTestId('composer-roundtable').click();
 
   const dialog = page.getByTestId('roundtable-launch-dialog');
@@ -669,6 +673,52 @@ test('small viewport: command palette fixed commands open their target surfaces'
   await page.keyboard.press(process.platform === 'darwin' ? 'Meta+K' : 'Control+K');
   await page.locator('[data-testid="cmd-result"][data-category="settings"]').click();
   await expect(page.getByTestId('settings-overlay')).toBeVisible();
+});
+
+test('layout refinement: chat shell, composer, command palette, and help stay within viewport', async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 1280, height: 760 });
+  await seedChatModels(1);
+
+  await page.goto('/');
+  await expect(page.getByTestId('chat-panel')).toBeVisible({ timeout: 10_000 });
+
+  await expectHorizontallyWithinViewport(page, page.locator('.composer'));
+  await expectHorizontallyWithinViewport(page, page.getByTestId('messages'));
+  await expectElementHasNoHorizontalOverflow(page.locator('.workspace'));
+  await expectPageHasNoHorizontalOverflow(page);
+  const desktopLayout = await page.evaluate(() => {
+    const messages = document.querySelector('[data-testid="messages"]');
+    const composer = document.querySelector('.composer');
+    if (!messages || !composer) throw new Error('missing chat layout elements');
+    const messagesBox = messages.getBoundingClientRect();
+    const composerBox = composer.getBoundingClientRect();
+    return {
+      messagesWidth: messagesBox.width,
+      composerWidth: composerBox.width,
+      leftDelta: Math.abs(messagesBox.left - composerBox.left),
+    };
+  });
+  expect(desktopLayout.messagesWidth).toBeLessThanOrEqual(922);
+  expect(desktopLayout.composerWidth).toBeLessThanOrEqual(922);
+  expect(desktopLayout.leftDelta).toBeLessThanOrEqual(2);
+
+  await page.keyboard.press(process.platform === 'darwin' ? 'Meta+K' : 'Control+K');
+  await expect(page.getByTestId('cmd-palette-input')).toBeVisible();
+  await expectHorizontallyWithinViewport(page, page.locator('.cmd-palette-panel'));
+  await page.keyboard.press('Escape');
+
+  await page.getByTestId('open-help').click();
+  await expect(page.getByTestId('help-center')).toBeVisible();
+  await expectHorizontallyWithinViewport(page, page.getByTestId('help-center'));
+  await page.getByTestId('help-center-close').click();
+
+  await page.setViewportSize({ width: 390, height: 720 });
+  await expectHorizontallyWithinViewport(page, page.locator('.composer'));
+  await expectHorizontallyWithinViewport(page, page.getByTestId('messages'));
+  await expectElementHasNoHorizontalOverflow(page.locator('.chat'));
+  await expectPageHasNoHorizontalOverflow(page);
 });
 
 test('small viewport: first-run onboarding form is usable without horizontal overflow', async ({

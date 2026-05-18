@@ -8,6 +8,7 @@ export const BUILTIN_WEB_SEARCH_BOCHA_API_KEY_KEY = 'builtin_web_search_bocha_ap
 const InputSchema = z.object({
   query: z.string().min(1).max(500),
   num_results: z.number().int().min(1).max(10).optional(),
+  engine: z.enum(['duckduckgo', 'exa', 'bocha']).optional(),
 });
 
 export type WebSearchEngine = 'duckduckgo' | 'exa' | 'bocha';
@@ -68,7 +69,9 @@ export function createWebSearchToolWithDeps(
     async execute(input, ctx) {
       const numResults = input.num_results ?? 5;
       const config = normalizeConfig(deps.resolveConfig?.(ctx));
-      if (config.engine === 'exa') {
+      const explicitEngine = input.engine ?? null;
+      const selectedEngine = explicitEngine ?? config.engine;
+      if (selectedEngine === 'exa') {
         return {
           output: {
             query: input.query,
@@ -77,7 +80,7 @@ export function createWebSearchToolWithDeps(
           },
         };
       }
-      if (config.engine === 'bocha') {
+      if (selectedEngine === 'bocha') {
         if (!config.bochaApiKey) {
           throw validationError('搏查搜索缺少 API Key，请先在工具设置中保存。');
         }
@@ -92,8 +95,18 @@ export function createWebSearchToolWithDeps(
               },
             };
           }
+          if (explicitEngine) {
+            return {
+              output: {
+                query: input.query,
+                engine: 'bocha',
+                results: [],
+              },
+            };
+          }
           throw networkError('Bocha search returned no usable results');
         } catch (bochaError) {
+          if (explicitEngine) throw bochaError;
           try {
             const fallbackResults = await searchExa(fetchImpl, input.query, numResults);
             if (fallbackResults.length === 0) throw bochaError;
@@ -111,14 +124,36 @@ export function createWebSearchToolWithDeps(
         }
       }
       try {
+        const duckResults = await searchDuckDuckGo(fetchImpl, input.query, numResults);
+        if (duckResults.length > 0 || explicitEngine) {
+          return {
+            output: {
+              query: input.query,
+              engine: 'duckduckgo',
+              results: duckResults,
+            },
+          };
+        }
+        const fallbackResults = await searchExa(fetchImpl, input.query, numResults);
+        if (fallbackResults.length > 0) {
+          return {
+            output: {
+              query: input.query,
+              engine: 'exa',
+              fallback_from: 'duckduckgo',
+              results: fallbackResults,
+            },
+          };
+        }
         return {
           output: {
             query: input.query,
             engine: 'duckduckgo',
-            results: await searchDuckDuckGo(fetchImpl, input.query, numResults),
+            results: duckResults,
           },
         };
       } catch (duckError) {
+        if (explicitEngine) throw duckError;
         try {
           const fallbackResults = await searchExa(fetchImpl, input.query, numResults);
           if (fallbackResults.length === 0) throw duckError;
@@ -379,12 +414,14 @@ function parseStructuredTextResults(text: string): WebSearchResult[] {
   for (const block of blocks) {
     const titleMatch = block.match(/^Title:\s*(.+?)(?:\n|$)/m);
     const urlMatch = block.match(/URL:\s*(https?:\/\/[^\s\n]+)/im);
+    const publishedMatch = block.match(/Published:\s*(.+?)(?:\n|$)/im);
     const descMatch = block.match(
       /(?:Description|Text|Content):\s*([\s\S]+?)(?=\n(?:Title|URL|Description|Text|Content|Published|Site|Author):|$)/i,
     );
     const title = cleanText(titleMatch?.[1] ?? '');
     const url = urlMatch?.[1]?.trim() ?? '';
-    const snippet = cleanText(descMatch?.[1] ?? '');
+    const published = cleanText(publishedMatch?.[1] ?? '');
+    const snippet = cleanText([published, descMatch?.[1] ?? ''].filter(Boolean).join(' — '));
     if (title || url) {
       results.push({ title, url, snippet });
     }

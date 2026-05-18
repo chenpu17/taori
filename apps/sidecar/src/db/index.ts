@@ -266,6 +266,7 @@ CREATE TABLE IF NOT EXISTS research_sessions (
   budget_spent_usd REAL NOT NULL DEFAULT 0,
   constraints_json TEXT NOT NULL DEFAULT '{}',
   plan_json TEXT,
+  plan_origin TEXT NOT NULL DEFAULT 'pending',
   draft_markdown TEXT,
   final_markdown TEXT,
   started_at INTEGER,
@@ -317,6 +318,9 @@ CREATE TABLE IF NOT EXISTS research_claims (
   claim_kind TEXT NOT NULL,
   support_status TEXT NOT NULL,
   citations_json TEXT NOT NULL DEFAULT '[]',
+  evidence_spans_json TEXT NOT NULL DEFAULT '[]',
+  confidence TEXT,
+  verified_at INTEGER,
   created_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL
 );
@@ -499,6 +503,29 @@ CREATE UNIQUE INDEX IF NOT EXISTS memories_scope_key_uniq_v2
   // R2 — plan_messages_json column for AI planning conversation history.
   if (!resCols.some((c) => c.name === 'plan_messages_json')) {
     sqlite.exec(`ALTER TABLE research_sessions ADD COLUMN plan_messages_json TEXT`);
+  }
+  if (!resCols.some((c) => c.name === 'plan_origin')) {
+    sqlite.exec(`ALTER TABLE research_sessions ADD COLUMN plan_origin TEXT NOT NULL DEFAULT 'pending'`);
+  }
+  // R3 — synthesis_model_id lets users pick a dedicated model for the
+  // research-report synthesis pass independent of the default chat model.
+  if (!resCols.some((c) => c.name === 'synthesis_model_id')) {
+    sqlite.exec(`ALTER TABLE research_sessions ADD COLUMN synthesis_model_id TEXT`);
+  }
+  // R3 — research_claims gains evidence_spans / confidence / verified_at so the
+  // CitationAgent pass can record per-source span-level grounding instead of
+  // template summaries.
+  const claimCols = sqlite
+    .prepare(`PRAGMA table_info(research_claims)`)
+    .all() as Array<{ name: string }>;
+  if (!claimCols.some((c) => c.name === 'evidence_spans_json')) {
+    sqlite.exec(`ALTER TABLE research_claims ADD COLUMN evidence_spans_json TEXT NOT NULL DEFAULT '[]'`);
+  }
+  if (!claimCols.some((c) => c.name === 'confidence')) {
+    sqlite.exec(`ALTER TABLE research_claims ADD COLUMN confidence TEXT`);
+  }
+  if (!claimCols.some((c) => c.name === 'verified_at')) {
+    sqlite.exec(`ALTER TABLE research_claims ADD COLUMN verified_at INTEGER`);
   }
   return drizzle(sqlite, { schema });
 }

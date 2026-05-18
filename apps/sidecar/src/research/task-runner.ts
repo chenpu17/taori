@@ -23,7 +23,7 @@
  * session.budget_spent_usd cumulatively so the UI doesn't need to join.
  */
 
-import { generateText } from 'ai';
+import { generateText, streamText } from 'ai';
 import type {
   ResearchClaim,
   ResearchPlan,
@@ -36,8 +36,11 @@ import type { MemoriesRepo, ModelsRepo, ProvidersRepo } from '../db/repos/index.
 import type { ResearchRepo } from '../db/repos/index.js';
 import type { KeyStore } from '../keystore.js';
 import { createChatModel } from '../providers/chat-model.js';
-import { buildSearchQueries } from './planner.js';
+import { buildSearchQueries, buildSearchRecoveryQueries, classifySearchFailureReason } from './planner.js';
 import { pickPreferredSearchToolName } from '../search/tool-selection.js';
+import { runCitationVerification, confidenceToSupportStatus } from './citation-agent.js';
+import { generateLLMQueries } from './query-planner.js';
+import { buildTaskNarrative } from './narrative.js';
 
 const SEARCH_RESULTS_PER_TASK = 8;
 const FETCH_TOP_N = 4;
@@ -65,11 +68,17 @@ interface SearchRoundSummary {
   hits: number;
   total_sources: number;
   unique_hosts: number;
+  requested_engine?: SearchEngine | null;
   search_engine: string | null;
   search_fallback_from: string | null;
+  search_track: SourceKind;
+  phase: 'primary' | 'recovery';
+  error?: string | null;
 }
 
 type TaskOutcome = 'completed' | 'failed' | 'skipped';
+type SourceKind = 'official' | 'third_party' | 'community';
+type SearchEngine = 'duckduckgo' | 'exa' | 'bocha';
 
 export class ResearchRunner {
   private active = new Map<string, Promise<void>>();
@@ -130,6 +139,37 @@ export class ResearchRunner {
         return;
       }
       await sleep(TICK_DELAY_MS);
+    }
+  }
+
+  /**
+   * After a task's inner work has finished (and any business outputs are
+   * already in the repo), compute a one-sentence narrative and merge it into
+   * `output.narrative`. The frontend renders these as a timeline so users see
+   * a continuous "what just happened" thread instead of a static task list.
+   *
+   * Safe to call on tasks with no useful narrative — we silently skip those.
+   */
+  private attachNarrative(sessionId: string, taskId: string): void {
+    try {
+      const fresh = this.deps.repo.getTask(taskId);
+      if (!fresh) return;
+      const sources = (fresh.kind === 'summarize' || fresh.kind === 'verify_citation')
+        ? this.deps.repo.listSources(sessionId)
+        : undefined;
+      const claims = fresh.kind === 'verify_citation'
+        ? this.deps.repo.listClaims(sessionId)
+        : undefined;
+      const session = (fresh.kind === 'summarize')
+        ? this.deps.repo.get(sessionId)
+        : null;
+      const draftCharCount = session?.draft_markdown?.length ?? undefined;
+      const narrative = buildTaskNarrative(fresh, { sources, claims, draftCharCount });
+      if (!narrative) return;
+      const nextOutput = { ...(fresh.output ?? {}), narrative };
+      this.deps.repo.updateTask(taskId, { output: nextOutput });
+    } catch (err) {
+      this.deps.log?.warn?.({ err, sessionId, taskId }, 'research.narrative_failed');
     }
   }
 
@@ -209,6 +249,7 @@ export class ResearchRunner {
           });
           return 'skipped';
       }
+      this.attachNarrative(session.id, task.id);
       this.deps.repo.updateTask(task.id, {
         status: 'completed',
         finished_at: Date.now(),
@@ -230,13 +271,38 @@ export class ResearchRunner {
     const question = String(task.input?.question ?? task.title ?? '').trim();
     const reason = String(task.input?.reason ?? '').trim();
     const questionId = typeof task.input?.question_id === 'string' ? task.input.question_id : undefined;
-    const configured = buildSearchQueries({
-      title: session.title,
-      objective: session.objective,
-      question: { question, reason: reason || '研究需要' },
-      budgetMode: session.budget_mode,
-      constraints: session.constraints,
-    });
+
+    // Try LLM-driven query planning first ("wide → narrow"). Falls back to
+    // the deterministic template when no model is configured, in hermetic
+    // mode, or when parsing the LLM response fails. The template fallback
+    // is what we had before — the only behavior change for users without a
+    // configured model is "no change at all".
+    const llmPlan = (this.deps.modelsRepo && this.deps.providersRepo)
+      ? await generateLLMQueries(
+          {
+            session,
+            question: { question, reason: reason || '研究需要' },
+            budgetMode: session.budget_mode,
+          },
+          {
+            modelsRepo: this.deps.modelsRepo,
+            providersRepo: this.deps.providersRepo,
+            keystore: this.deps.keystore ?? null,
+            memories: this.deps.memories ?? null,
+            log: this.deps.log,
+          },
+        )
+      : null;
+
+    const configured = (llmPlan && llmPlan.ok)
+      ? llmPlan.queries
+      : buildSearchQueries({
+          title: session.title,
+          objective: session.objective,
+          question: { question, reason: reason || '研究需要' },
+          budgetMode: session.budget_mode,
+          constraints: session.constraints,
+        });
     const queries = uniqueSearchQueries([
       String(task.input?.query ?? '').trim(),
       ...configured,
@@ -246,36 +312,129 @@ export class ResearchRunner {
       this.deps.repo.updateTask(task.id, { output: { reason: 'empty_query' } });
       return;
     }
-    const searchToolName = pickPreferredSearchToolName(
-      this.deps.bus,
-      session.preferred_search_tool ?? this.deps.memories?.getEffective(session.conversation_id ?? null, 'default_search_tool'),
-      this.deps.bus.list().map((tool) => tool.name),
-    ) ?? 'builtin.web_search';
+    const querySource: 'llm' | 'template' = llmPlan?.ok ? 'llm' : 'template';
+    const queryStrategy = llmPlan?.ok ? llmPlan.strategy : null;
+    const annotatedQueries = llmPlan?.ok ? llmPlan.annotated : null;
+    const searchToolName = this.resolveSearchToolName(session, task);
     const rounds: SearchRoundSummary[] = [];
-    for (const query of queries) {
-      const round = await this.executeSearchRound(session, task, searchToolName, query, questionId);
-      const matchedSources = collectSourcesForQuestion(
-        this.deps.repo.listSources(session.id),
-        question,
-        questionId,
-      );
-      rounds.push({
-        query,
-        hits: round.recorded.length,
-        total_sources: matchedSources.length,
-        unique_hosts: countUniqueHosts(matchedSources),
-        search_engine: round.engine,
-        search_fallback_from: round.fallbackFrom,
-      });
-      if (hasEnoughSearchCoverage(matchedSources, session.budget_mode)) break;
-    }
-    const matchedSources = collectSourcesForQuestion(
+    const attemptedEngines = new Set<string>();
+    let attemptedQueries = [...queries];
+    let matchedSources = collectSourcesForQuestion(
       this.deps.repo.listSources(session.id),
       question,
       questionId,
     );
+    for (const query of queries) {
+      const result = await this.executeSearchAttemptsForQuery(
+        session,
+        task,
+        searchToolName,
+        query,
+        question,
+        questionId,
+        'primary',
+      );
+      matchedSources = result.matchedSources;
+      result.rounds.forEach((round) => {
+        if (round.search_engine) attemptedEngines.add(round.search_engine);
+        if (round.requested_engine) attemptedEngines.add(round.requested_engine);
+      });
+      rounds.push(...result.rounds);
+      if (hasEnoughSearchCoverage(matchedSources, session.budget_mode)) break;
+    }
+    // Recovery: prefer LLM-generated alternatives that know which queries
+    // already failed; fall back to the deterministic recovery generator.
+    let recoveryQueries: string[] = [];
+    let recoveryStrategy: string | null = null;
+    let recoverySource: 'llm' | 'template' | null = null;
     if (matchedSources.length === 0) {
-      throw new Error(`web_search returned no usable results for query: ${queries[0]}`);
+      const llmRecovery = (this.deps.modelsRepo && this.deps.providersRepo)
+        ? await generateLLMQueries(
+            {
+              session,
+              question: { question, reason: reason || '研究需要' },
+              budgetMode: session.budget_mode,
+              attemptedQueries: queries,
+              isRecovery: true,
+            },
+            {
+              modelsRepo: this.deps.modelsRepo,
+              providersRepo: this.deps.providersRepo,
+              keystore: this.deps.keystore ?? null,
+              memories: this.deps.memories ?? null,
+              log: this.deps.log,
+            },
+          )
+        : null;
+      if (llmRecovery?.ok) {
+        recoveryQueries = llmRecovery.queries;
+        recoveryStrategy = llmRecovery.strategy;
+        recoverySource = 'llm';
+      } else {
+        recoveryQueries = buildSearchRecoveryQueries({
+          title: session.title,
+          objective: session.objective,
+          question: { question, reason: reason || '研究需要' },
+          budgetMode: session.budget_mode,
+          constraints: session.constraints,
+          originalQueries: queries,
+        });
+        recoverySource = recoveryQueries.length > 0 ? 'template' : null;
+      }
+    }
+    if (matchedSources.length === 0 && recoveryQueries.length > 0) {
+      attemptedQueries = uniqueSearchQueries([...attemptedQueries, ...recoveryQueries]);
+      for (const query of recoveryQueries) {
+        const result = await this.executeSearchAttemptsForQuery(
+          session,
+          task,
+          searchToolName,
+          query,
+          question,
+          questionId,
+          'recovery',
+        );
+        matchedSources = result.matchedSources;
+        result.rounds.forEach((round) => {
+          if (round.search_engine) attemptedEngines.add(round.search_engine);
+          if (round.requested_engine) attemptedEngines.add(round.requested_engine);
+        });
+        rounds.push(...result.rounds);
+        if (hasEnoughSearchCoverage(matchedSources, session.budget_mode)) break;
+      }
+    }
+    if (matchedSources.length === 0) {
+      const failureReason = classifySearchFailureReason({
+        title: session.title,
+        objective: session.objective,
+        question,
+        reason: reason || '研究需要',
+        attemptedRecovery: recoveryQueries.length > 0,
+      });
+      this.deps.repo.updateTask(task.id, {
+        output: {
+          hits: 0,
+          query: queries[0],
+          queries: attemptedQueries,
+          rounds,
+          rounds_completed: rounds.length,
+          unique_hosts: 0,
+          search_tool: searchToolName,
+          engine_attempts: Array.from(attemptedEngines),
+          search_engine: rounds.at(-1)?.search_engine ?? null,
+          search_fallback_from: rounds.find((round) => round.search_fallback_from)?.search_fallback_from ?? null,
+          recovery_attempted: recoveryQueries.length > 0,
+          recovery_queries: recoveryQueries,
+          recovery_strategy: recoveryStrategy,
+          recovery_source: recoverySource,
+          query_source: querySource,
+          query_strategy: queryStrategy,
+          query_plan: annotatedQueries,
+          failure_reason: failureReason,
+          coverage_status: 'no_usable_sources',
+        },
+      });
+      return;
     }
     const lastRound = rounds.at(-1) ?? null;
     this.deps.repo.updateTask(task.id, {
@@ -287,8 +446,17 @@ export class ResearchRunner {
         rounds_completed: rounds.length,
         unique_hosts: countUniqueHosts(matchedSources),
         search_tool: searchToolName,
+        engine_attempts: Array.from(attemptedEngines),
         search_engine: lastRound?.search_engine ?? null,
         search_fallback_from: rounds.find((round) => round.search_fallback_from)?.search_fallback_from ?? null,
+        recovery_attempted: recoveryQueries.length > 0,
+        recovery_queries: recoveryQueries,
+        recovery_strategy: recoveryStrategy,
+        recovery_source: recoverySource,
+        recovery_successful: recoveryQueries.length > 0 && rounds.some((round) => round.phase === 'recovery' && round.hits > 0),
+        query_source: querySource,
+        query_strategy: queryStrategy,
+        query_plan: annotatedQueries,
       },
     });
     // Snapshot session budget from cost_records sum is expensive; defer to
@@ -301,20 +469,24 @@ export class ResearchRunner {
     searchToolName: string,
     query: string,
     questionId?: string,
-  ): Promise<{ recorded: ResearchSource[]; engine: string | null; fallbackFrom: string | null }> {
+    requestedEngine?: SearchEngine,
+  ): Promise<{ recorded: ResearchSource[]; engine: string | null; fallbackFrom: string | null; track: SourceKind }> {
+    const searchTrack = inferSearchTrack(query);
     const res = await this.deps.bus.invoke(
       searchToolName,
-      { query, num_results: SEARCH_RESULTS_PER_TASK },
+      { query, num_results: SEARCH_RESULTS_PER_TASK, ...(requestedEngine ? { engine: requestedEngine } : {}) },
       { conversationId: session.conversation_id ?? null },
     );
     if (!res.ok) {
       throw new Error(`${searchToolName} failed: ${res.error?.message ?? 'unknown'}`);
     }
+    this.bumpBudgetSpend(session.id, res.cost?.actual_usd);
     const output = res.output as { results?: WebSearchHit[]; engine?: string; fallback_from?: string };
     const hits = output?.results ?? [];
     const recorded: ResearchSource[] = [];
     for (const hit of hits.slice(0, SEARCH_RESULTS_PER_TASK)) {
       if (!hit?.url) continue;
+      const sourceKind = classifySourceKind(hit.url, query);
       const existing = this.deps.repo.findSourceByLocator(session.id, hit.url);
       if (existing) {
         const nextMetadata = mergeQuestionMetadata(existing.metadata, questionId, {
@@ -322,6 +494,8 @@ export class ResearchRunner {
           search_tool: searchToolName,
           search_engine: output?.engine ?? null,
           search_fallback_from: output?.fallback_from ?? null,
+          search_track: searchTrack,
+          source_kind: sourceKind,
         });
         if (JSON.stringify(nextMetadata) !== JSON.stringify(existing.metadata ?? {})) {
           this.deps.repo.updateSource(existing.id, { metadata: nextMetadata });
@@ -333,13 +507,15 @@ export class ResearchRunner {
         title: hit.title?.slice(0, 240) ?? null,
         locator: hit.url,
         snippet: hit.snippet?.slice(0, 3_900) ?? null,
-        credibility_score: scoreCredibility(hit.url),
+        credibility_score: scoreCredibility(hit.url, sourceKind),
         included: true,
         metadata: mergeQuestionMetadata({}, questionId, {
           query,
           search_tool: searchToolName,
           search_engine: output?.engine ?? null,
           search_fallback_from: output?.fallback_from ?? null,
+          search_track: searchTrack,
+          source_kind: sourceKind,
         }),
       });
       recorded.push(inserted);
@@ -353,6 +529,7 @@ export class ResearchRunner {
             { url: source.locator, format: 'markdown', max_chars: FETCH_MAX_CHARS },
             { conversationId: session.conversation_id ?? null },
           );
+          this.bumpBudgetSpend(session.id, fetched.cost?.actual_usd);
           if (fetched.ok) {
             const out = fetched.output as { title?: string | null; content?: string };
             const snippet = (out.content ?? '').slice(0, 3_900) || source.snippet;
@@ -371,7 +548,104 @@ export class ResearchRunner {
       recorded,
       engine: output?.engine ?? null,
       fallbackFrom: output?.fallback_from ?? null,
+      track: searchTrack,
     };
+  }
+
+  private resolveSearchToolName(session: ResearchSession, task: ResearchTask): string {
+    const taskPreferredTool =
+      typeof task.input?.search_tool === 'string' && task.input.search_tool.trim()
+        ? task.input.search_tool.trim()
+        : null;
+    return pickPreferredSearchToolName(
+      this.deps.bus,
+      taskPreferredTool
+        ?? session.preferred_search_tool
+        ?? this.deps.memories?.getEffective(session.conversation_id ?? null, 'default_search_tool'),
+      this.deps.bus.list().map((tool) => tool.name),
+    ) ?? 'builtin.web_search';
+  }
+
+  private resolveBuiltinSearchEngineCandidates(session: ResearchSession): SearchEngine[] {
+    const configured = this.deps.memories?.getEffective(session.conversation_id ?? null, 'builtin_web_search_engine');
+    const current: SearchEngine =
+      configured === 'exa' || configured === 'bocha' ? configured : 'duckduckgo';
+    const bochaApiKey =
+      String(this.deps.memories?.getEffective(session.conversation_id ?? null, 'builtin_web_search_bocha_api_key') ?? '')
+        .trim();
+    const candidates: SearchEngine[] = [current];
+    if (current !== 'exa') candidates.push('exa');
+    if (bochaApiKey && current !== 'bocha') candidates.push('bocha');
+    if (current !== 'duckduckgo') candidates.push('duckduckgo');
+    return candidates.filter((engine, index, arr) => arr.indexOf(engine) === index);
+  }
+
+  private async executeSearchAttemptsForQuery(
+    session: ResearchSession,
+    task: ResearchTask,
+    searchToolName: string,
+    query: string,
+    question: string,
+    questionId: string | undefined,
+    phase: 'primary' | 'recovery',
+  ): Promise<{ rounds: SearchRoundSummary[]; matchedSources: ResearchSource[] }> {
+    const rounds: SearchRoundSummary[] = [];
+    let matchedSources = collectSourcesForQuestion(
+      this.deps.repo.listSources(session.id),
+      question,
+      questionId,
+    );
+    const candidates: Array<SearchEngine | undefined> =
+      searchToolName === 'builtin.web_search'
+        ? this.resolveBuiltinSearchEngineCandidates(session)
+        : [undefined];
+
+    for (const requestedEngine of candidates) {
+      const beforeCount = matchedSources.length;
+      try {
+        const round = await this.executeSearchRound(
+          session,
+          task,
+          searchToolName,
+          query,
+          questionId,
+          requestedEngine,
+        );
+        matchedSources = collectSourcesForQuestion(
+          this.deps.repo.listSources(session.id),
+          question,
+          questionId,
+        );
+        rounds.push({
+          query,
+          hits: round.recorded.length,
+          total_sources: matchedSources.length,
+          unique_hosts: countUniqueHosts(matchedSources),
+          requested_engine: requestedEngine ?? null,
+          search_engine: round.engine,
+          search_fallback_from: round.fallbackFrom,
+          search_track: round.track,
+          phase,
+        });
+        if (matchedSources.length > beforeCount || round.recorded.length > 0) break;
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        rounds.push({
+          query,
+          hits: 0,
+          total_sources: matchedSources.length,
+          unique_hosts: countUniqueHosts(matchedSources),
+          requested_engine: requestedEngine ?? null,
+          search_engine: requestedEngine ?? null,
+          search_fallback_from: null,
+          search_track: inferSearchTrack(query),
+          phase,
+          error: message,
+        });
+        if (searchToolName !== 'builtin.web_search') throw error;
+      }
+    }
+    return { rounds, matchedSources };
   }
 
   private async runReflect(session: ResearchSession, task: ResearchTask): Promise<void> {
@@ -497,12 +771,15 @@ export class ResearchRunner {
       { conversationId: session.conversation_id ?? null },
     );
     if (!res.ok) throw new Error(`web_fetch failed: ${res.error?.message ?? 'unknown'}`);
+    this.bumpBudgetSpend(session.id, res.cost?.actual_usd);
     const out = res.output as { title?: string | null; content?: string };
     const existing = this.deps.repo.findSourceByLocator(session.id, url);
+    const sourceKind = classifySourceKind(url, typeof existing?.metadata?.query === 'string' ? existing.metadata.query : '');
     if (existing) {
       this.deps.repo.updateSource(existing.id, {
         title: out.title ?? existing.title,
         snippet: out.content?.slice(0, 3_900) ?? existing.snippet,
+        metadata: { ...(existing.metadata ?? {}), source_kind: sourceKind, fetched: true },
       });
     } else {
       this.deps.repo.appendSource(session.id, {
@@ -510,9 +787,9 @@ export class ResearchRunner {
         title: out.title?.slice(0, 240) ?? null,
         locator: url,
         snippet: out.content?.slice(0, 3_900) ?? null,
-        credibility_score: scoreCredibility(url),
+        credibility_score: scoreCredibility(url, sourceKind),
         included: true,
-        metadata: { fetched: true },
+        metadata: { fetched: true, source_kind: sourceKind },
       });
     }
   }
@@ -522,7 +799,10 @@ export class ResearchRunner {
     if (!plan) return;
     const sources = this.deps.repo.listSources(session.id);
 
-    // Attempt LLM synthesis when model deps are available
+    // Attempt streaming LLM synthesis when model deps are available. Streaming
+    // matters because synthesis can take 30-90s — flushing partial markdown
+    // every ~200 chars or 1s lets the UI render the draft as it lands instead
+    // of staring at a blank pane.
     if (this.deps.modelsRepo && this.deps.providersRepo) {
       try {
         const picked = await pickSynthesisModel(
@@ -539,13 +819,9 @@ export class ResearchRunner {
             apiKey: picked.apiKey,
           });
           const prompt = buildSynthesisPrompt(session, plan, sources);
-          const { text } = await generateText({
-            model: chatModel,
-            prompt,
-            maxTokens: 8192,
-          });
-          if (text && text.trim().length > 100) {
-            this.deps.repo.update(session.id, { draft_markdown: text.trim() });
+          const accumulated = await this.streamSynthesisToDraft(session.id, chatModel, prompt);
+          if (accumulated && accumulated.trim().length > 100) {
+            this.deps.repo.update(session.id, { draft_markdown: accumulated.trim() });
             return;
           }
         }
@@ -559,10 +835,101 @@ export class ResearchRunner {
     this.deps.repo.update(session.id, { draft_markdown: draft });
   }
 
+  /**
+   * Stream synthesis output, flushing the rolling buffer to draft_markdown
+   * every ~200 chars or 1 second. Returns the final accumulated text even if
+   * the stream is interrupted mid-way (so partial drafts aren't lost).
+   */
+  private async streamSynthesisToDraft(
+    sessionId: string,
+    chatModel: ReturnType<typeof createChatModel>['model'],
+    prompt: string,
+  ): Promise<string> {
+    let buf = '';
+    let lastFlushLen = 0;
+    let lastFlushAt = Date.now();
+    try {
+      const { textStream } = streamText({
+        model: chatModel,
+        prompt,
+        maxTokens: 8192,
+        abortSignal: AbortSignal.timeout(120_000),
+      });
+      for await (const chunk of textStream) {
+        buf += chunk;
+        const sizeDelta = buf.length - lastFlushLen;
+        const timeDelta = Date.now() - lastFlushAt;
+        if (sizeDelta >= 200 || timeDelta >= 1000) {
+          this.deps.repo.update(sessionId, { draft_markdown: buf });
+          lastFlushLen = buf.length;
+          lastFlushAt = Date.now();
+        }
+      }
+    } catch (err) {
+      this.deps.log?.warn?.({ err, sessionId }, 'research.synthesis_stream_interrupted');
+      // Fall through — return whatever we accumulated so the caller can
+      // decide between using the partial draft and the template fallback.
+    }
+    if (buf.length > lastFlushLen) {
+      this.deps.repo.update(sessionId, { draft_markdown: buf });
+    }
+    return buf;
+  }
+
   private async runVerify(session: ResearchSession): Promise<void> {
     const plan = session.plan;
     if (!plan) return;
     const sources = this.deps.repo.listSources(session.id);
+    const draft = (this.deps.repo.get(session.id)?.draft_markdown ?? session.draft_markdown ?? '').trim();
+
+    // Prefer CitationAgent grounding when model deps + draft + sources exist.
+    // Falls through to the legacy template-based summary only when CitationAgent
+    // can't produce anything usable (no model, empty draft, or zero sources).
+    if (this.deps.modelsRepo && this.deps.providersRepo && draft && sources.length > 0) {
+      try {
+        const result = await runCitationVerification(session, draft, sources, {
+          modelsRepo: this.deps.modelsRepo,
+          providersRepo: this.deps.providersRepo,
+          keystore: this.deps.keystore ?? null,
+          memories: this.deps.memories ?? null,
+          log: this.deps.log,
+          pickModel: () => pickSynthesisModel(
+            session,
+            this.deps.modelsRepo!,
+            this.deps.providersRepo!,
+            this.deps.keystore ?? null,
+            this.deps.memories ?? null,
+          ),
+        });
+        if (result.ok && result.claims.length > 0) {
+          const verifiedAt = Date.now();
+          const claims = result.claims.map<Omit<ResearchClaim, 'id' | 'research_session_id' | 'created_at' | 'updated_at'>>((c) => ({
+            section_key: c.section_key,
+            claim_text: c.claim_text,
+            claim_kind: c.claim_kind,
+            support_status: confidenceToSupportStatus(c.confidence, c.evidence_spans),
+            citations: c.evidence_spans.map((span) => {
+              const src = sources.find((s) => s.id === span.source_id);
+              return {
+                source_id: span.source_id,
+                locator: src?.locator ?? null,
+                note: span.span_text.slice(0, 240),
+              };
+            }),
+            evidence_spans: c.evidence_spans,
+            confidence: c.confidence,
+            verified_at: verifiedAt,
+          }));
+          this.deps.repo.replaceClaims(session.id, claims);
+          return;
+        }
+      } catch (err) {
+        this.deps.log?.warn?.({ err, sessionId: session.id }, 'research.citation_agent_threw');
+      }
+    }
+
+    // Fallback: legacy template-based section summaries. Kept so verify never
+    // leaves the claims table empty when CitationAgent is unavailable.
     const sections = outputSections(plan.output_kind);
     const claims: Array<Omit<ResearchClaim, 'id' | 'research_session_id' | 'created_at' | 'updated_at'>> = [];
     for (let i = 0; i < sections.length; i += 1) {
@@ -578,9 +945,17 @@ export class ResearchRunner {
         claim_kind: i === 0 ? 'recommendation' : 'fact',
         support_status: support,
         citations: matching.map((s) => ({ source_id: s.id, locator: s.locator, note: s.title })),
+        evidence_spans: [],
+        confidence: null,
+        verified_at: null,
       });
     }
     this.deps.repo.replaceClaims(session.id, claims);
+  }
+
+  private bumpBudgetSpend(sessionId: string, actualUsd: number | undefined): void {
+    if (typeof actualUsd !== 'number' || actualUsd <= 0) return;
+    this.deps.repo.incrementBudgetSpent(sessionId, actualUsd);
   }
 }
 
@@ -597,11 +972,28 @@ async function pickSynthesisModel(
   keystore: KeyStore | null,
   memories: MemoriesRepo | null,
 ): Promise<{ model: import('@taori/shared').Model; provider: import('@taori/shared').Provider; apiKey: string } | null> {
-  // Priority: per-session override → memories default → first available chat model
-  const candidateId = session.preferred_model_id
-    ?? (memories?.getEffective(null, 'default_model_id') ?? null);
+  // Priority chain: per-session synthesis override → per-session preferred chat model →
+  // memories 'default_research_synthesis_model' → memories 'default_model_id' →
+  // first available chat model. The synthesis-specific knobs let users pick a
+  // beefier model (e.g. Opus) for research even when chat defaults to a cheaper
+  // one.
+  const synthesisOverride = session.synthesis_model_id
+    ?? memories?.getEffective(session.conversation_id ?? null, 'default_research_synthesis_model')
+    ?? null;
+  const candidateIds = [
+    synthesisOverride,
+    session.preferred_model_id,
+    memories?.getEffective(null, 'default_model_id') ?? null,
+  ].filter((id): id is string => typeof id === 'string' && id.length > 0);
 
-  let model = candidateId ? modelsRepo.get(candidateId) : null;
+  let model: import('@taori/shared').Model | null = null;
+  for (const id of candidateIds) {
+    const candidate = modelsRepo.get(id);
+    if (candidate?.enabled && candidate.provider_id) {
+      model = candidate;
+      break;
+    }
+  }
   if (!model?.enabled || !model.provider_id) {
     model = modelsRepo.defaultFor('chat') ?? modelsRepo.pickCheapestActive('chat', '__none__');
   }
@@ -641,8 +1033,8 @@ function buildSynthesisPrompt(
   };
   const kind = plan.output_kind ?? 'report';
 
-  // Sort sources by credibility descending so the LLM sees the best sources first per question.
-  const sortedSources = [...sources].sort((a, b) => (b.credibility_score ?? 0.5) - (a.credibility_score ?? 0.5));
+  // Prefer both credibility and recency so"当前主流/当前定价"不容易被旧资料盖过去。
+  const sortedSources = [...sources].sort((a, b) => sourceSortScore(b) - sourceSortScore(a));
 
   // Group sources by question for better LLM comprehension
   const sourcesByQuestion = new Map<string, ResearchSource[]>();
@@ -680,7 +1072,8 @@ function buildSynthesisPrompt(
       const title = (s.title ?? s.locator).slice(0, 200);
       const snippet = (s.snippet ?? '').slice(0, 1500).replace(/\s+/g, ' ');
       const tag = credibilityTag(s.credibility_score);
-      return `  [${idx}]${tag ? ` ${tag}` : ''} 标题：${title}\n      来源：${s.locator}\n      内容：${snippet || '（无摘要）'}`;
+      const year = inferSourceYear(s);
+      return `  [${idx}]${tag ? ` ${tag}` : ''}${year ? ` [年份:${year}]` : ''} 标题：${title}\n      来源：${s.locator}\n      内容：${snippet || '（无摘要）'}`;
     }).join('\n\n');
     return `【问题 ${q.id}：${q.question}（${q.reason}）】\n${sourceLines || '  （本问题未找到对应资料）'}`;
   }).join('\n\n---\n\n');
@@ -693,7 +1086,8 @@ function buildSynthesisPrompt(
         const title = (s.title ?? s.locator).slice(0, 200);
         const snippet = (s.snippet ?? '').slice(0, 800).replace(/\s+/g, ' ');
         const tag = credibilityTag(s.credibility_score);
-        return `  [${idx}]${tag ? ` ${tag}` : ''} 标题：${title}\n      来源：${s.locator}\n      内容：${snippet || '（无摘要）'}`;
+        const year = inferSourceYear(s);
+        return `  [${idx}]${tag ? ` ${tag}` : ''}${year ? ` [年份:${year}]` : ''} 标题：${title}\n      来源：${s.locator}\n      内容：${snippet || '（无摘要）'}`;
       }).join('\n\n')
     : '';
 
@@ -757,6 +1151,7 @@ ${kindSpecificInstructions}
 - 当不同来源说法存在矛盾时，必须在"矛盾与数据分歧"或正文中明确指出，分析可能原因
 - 信息不足之处说明"已知：X，尚不确定：Y"，不要回避或跳过
 - ★高可信 标记的来源优先引用；多个来源一致时，说明"多来源一致"以增强说服力
+- 如果问题强调"当前/主流/最新/近 12 个月"，优先采用年份更新、能代表当前产品状态的来源；引用旧型号、旧价格或旧能力时，必须明确年份并说明它是否仍是当前主推。
 - 参考来源部分格式：[[序号]] 标题 — URL（每条一行）
 - 内容必须基于提供的资料，禁止凭空发挥；资料不足之处明确标注，不要虚构数据`;
 }
@@ -842,7 +1237,8 @@ ${grouped}
 - coverage 包含所有问题的评估，level 为 good/partial/missing 之一
 - follow_up_searches 只包含 level 为 partial 或 missing 的最重要补充，最多 3 条
 - 如果覆盖已经充分，follow_up_searches 可以为空数组 []
-- 搜索词要具体、可操作，适合直接输入搜索引擎`;
+- 搜索词要具体、可操作，适合直接输入搜索引擎
+- 如果问题涉及"中国主流大模型 API"这类宽表对比，优先把补搜拆成具体厂商 + 指标（如 DeepSeek 定价、豆包 首token延迟），不要继续输出笼统的总表查询`;
 }
 
 function parseReflectResponse(text: string): ReflectResult | null {
@@ -887,9 +1283,11 @@ function parseReflectResponse(text: string): ReflectResult | null {
   }
 }
 
-function scoreCredibility(url: string): number {
+function scoreCredibility(url: string, sourceKind: SourceKind = classifySourceKind(url)): number {
   try {
     const host = new URL(url).hostname;
+    if (sourceKind === 'official') return 0.92;
+    if (/(status|docs|developer|developers|support|help)\./.test(host)) return 0.9;
     if (/(\.gov|\.edu)(\.|$)/.test(host)) return 0.9;
     if (/(arxiv|nature|nih|who|imf|worldbank)\./.test(host)) return 0.85;
     if (/(wikipedia|britannica)\./.test(host)) return 0.75;
@@ -899,6 +1297,28 @@ function scoreCredibility(url: string): number {
   } catch {
     return 0.5;
   }
+}
+
+function inferSourceYear(source: ResearchSource): number | null {
+  const hay = `${source.title ?? ''} ${source.snippet ?? ''} ${source.locator}`;
+  const years = Array.from(hay.matchAll(/\b(20\d{2})\b/g))
+    .map((match) => Number(match[1]))
+    .filter((year) => year >= 2020 && year <= 2100);
+  return years.length > 0 ? Math.max(...years) : null;
+}
+
+function freshnessScore(source: ResearchSource): number {
+  const year = inferSourceYear(source);
+  if (!year) return 0;
+  const currentYear = new Date().getFullYear();
+  if (year >= currentYear) return 14;
+  if (year === currentYear - 1) return 10;
+  if (year === currentYear - 2) return 5;
+  return 0;
+}
+
+function sourceSortScore(source: ResearchSource): number {
+  return ((source.credibility_score ?? 0.5) * 100) + freshnessScore(source);
 }
 
 function uniqueSearchQueries(queries: string[]): string[] {
@@ -933,6 +1353,36 @@ function hasEnoughSearchCoverage(sources: ResearchSource[], budgetMode: Research
   if (budgetMode === 'fast') return sources.length >= 2;
   if (budgetMode === 'balanced') return sources.length >= 3 && uniqueHosts >= 2;
   return sources.length >= 4 && uniqueHosts >= 2;
+}
+
+function inferSearchTrack(query: string): SourceKind {
+  if (/(官方|官网|文档|公告|状态页|status|docs?|developer|api)/i.test(query)) return 'official';
+  if (/(论坛|社区|博客|实战|经验|github|stackoverflow|reddit|hacker news|用户反馈)/i.test(query)) {
+    return 'community';
+  }
+  return 'third_party';
+}
+
+function classifySourceKind(url: string, query = ''): SourceKind {
+  const fallback = inferSearchTrack(query);
+  try {
+    const parsed = new URL(url);
+    const host = parsed.hostname.toLowerCase();
+    const pathname = parsed.pathname.toLowerCase();
+    if (
+      /(docs|developer|developers|support|help|status)\./.test(host)
+      || /^\/(docs|documentation|api|developer|developers|help|support|status)(\/|$)/.test(pathname)
+    ) {
+      return 'official';
+    }
+    if (/(github|stackoverflow|reddit|lobste|news\.ycombinator|medium|substack|zhihu|csdn)\./.test(host)) {
+      return 'community';
+    }
+    if (fallback === 'official') return 'official';
+  } catch {
+    return fallback;
+  }
+  return fallback;
 }
 
 function mergeQuestionMetadata(
@@ -1009,13 +1459,37 @@ function matchesQuestion(source: ResearchSource, question: string, questionId?: 
   if (!question) return true;
   const hay = `${source.title ?? ''} ${source.snippet ?? ''}`.toLowerCase();
   if (!hay.trim()) return false;
-  const tokens = question
-    .toLowerCase()
-    .split(/[\s,，。、？?!！:：;；()\[\]【】"'`]+/)
-    .filter((t) => t.length > 1)
-    .slice(0, 6);
+  const tokens = meaningfulQuestionTokens(question);
   if (tokens.length === 0) return true;
   return tokens.some((t) => hay.includes(t));
+}
+
+function meaningfulQuestionTokens(question: string): string[] {
+  const generic = new Set([
+    'api',
+    'apis',
+    '模型',
+    '大模型',
+    '主流',
+    '中国',
+    '国产',
+    '官方',
+    '对比',
+    '比较',
+    '信息',
+    '指标',
+    '数据',
+    '最新',
+    '当前',
+    'token',
+    'tokens',
+  ]);
+  return question
+    .toLowerCase()
+    .split(/[\s,，。、？?!！:：;；()\[\]【】"'`]+/)
+    .map((token) => token.trim())
+    .filter((token) => token.length > 1 && !generic.has(token))
+    .slice(0, 8);
 }
 
 function buildClaimText(section: string, question: string, sources: ResearchSource[]): string {

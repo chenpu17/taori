@@ -64,6 +64,8 @@ test('M3.A.4 launch dialog → analyzer fallback → preview → continue → ba
   await expect(page.getByTestId('chat-panel')).toBeVisible({ timeout: 10_000 });
 
   await page.getByTestId('composer-input').fill('是否在生产从 mysql 迁移到 postgres');
+  await page.getByTestId('composer-tools-toggle').click();
+  await expect(page.getByTestId('composer-roundtable')).toBeVisible();
   await page.getByTestId('composer-roundtable').click();
 
   const dlg = page.getByTestId('roundtable-launch-dialog');
@@ -99,6 +101,8 @@ test('M3.A.4 cancel from edit step closes dialog without creating roundtable', a
   await page.goto('/');
   await expect(page.getByTestId('chat-panel')).toBeVisible({ timeout: 10_000 });
 
+  await page.getByTestId('composer-tools-toggle').click();
+  await expect(page.getByTestId('composer-roundtable')).toBeVisible();
   await page.getByTestId('composer-roundtable').click();
   const dlg = page.getByTestId('roundtable-launch-dialog');
   await expect(dlg).toBeVisible();
@@ -121,6 +125,8 @@ test('M3.A.4 Esc during analyzing is ignored (no orphan close)', async ({
   await page.goto('/');
   await expect(page.getByTestId('chat-panel')).toBeVisible({ timeout: 10_000 });
   await page.getByTestId('composer-input').fill('topic');
+  await page.getByTestId('composer-tools-toggle').click();
+  await expect(page.getByTestId('composer-roundtable')).toBeVisible();
   await page.getByTestId('composer-roundtable').click();
   const dlg = page.getByTestId('roundtable-launch-dialog');
   await dlg.getByTestId('roundtable-launch-start').click();
@@ -167,6 +173,8 @@ test('M3.A.4 disabled_conversations skips confirm checkbox visibility', async ({
   await page.goto('/');
   await expect(page.getByTestId('chat-panel')).toBeVisible({ timeout: 10_000 });
   await page.getByTestId('composer-input').fill('选 sql 还是 nosql');
+  await page.getByTestId('composer-tools-toggle').click();
+  await expect(page.getByTestId('composer-roundtable')).toBeVisible();
   await page.getByTestId('composer-roundtable').click();
   const dlg = page.getByTestId('roundtable-launch-dialog');
   await dlg.getByTestId('roundtable-launch-start').click();

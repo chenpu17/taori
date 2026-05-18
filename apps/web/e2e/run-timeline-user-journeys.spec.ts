@@ -183,6 +183,8 @@ async function sendAndWait(page: Page, text: string): Promise<void> {
 
 async function runQuickCompare(page: Page, prompt: string, expectedOutputs = 2): Promise<void> {
   await page.getByTestId('composer-input').fill(prompt);
+  await page.getByTestId('composer-tools-toggle').click();
+  await expect(page.getByTestId('composer-quick-compare')).toBeVisible();
   await page.getByTestId('composer-quick-compare').click();
   const picker = page.getByTestId('quick-compare-picker');
   await expect(picker).toBeVisible({ timeout: 10_000 });
@@ -194,6 +196,8 @@ async function runQuickCompare(page: Page, prompt: string, expectedOutputs = 2):
 }
 
 async function launchDeepRoundtable(page: Page, topic: string): Promise<void> {
+  await page.getByTestId('composer-tools-toggle').click();
+  await expect(page.getByTestId('composer-roundtable')).toBeVisible();
   await page.getByTestId('composer-roundtable').click();
   const dialog = page.getByTestId('roundtable-launch-dialog');
   await expect(dialog).toBeVisible({ timeout: 10_000 });
@@ -366,6 +370,8 @@ test('roundtable discussion writes analyzer and participant events into Run Time
   await page.goto('/');
   await expect(page.getByTestId('chat-panel')).toBeVisible({ timeout: 10_000 });
 
+  await page.getByTestId('composer-tools-toggle').click();
+  await expect(page.getByTestId('composer-roundtable')).toBeVisible();
   await page.getByTestId('composer-roundtable').click();
   const dialog = page.getByTestId('roundtable-launch-dialog');
   await dialog.getByTestId('roundtable-mode-select').selectOption('deep');

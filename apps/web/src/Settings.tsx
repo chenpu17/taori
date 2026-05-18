@@ -16,6 +16,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { api } from './api.js';
 import type { StructuredMemory } from './api.js';
+import { ConfirmDialog } from './ConfirmDialog.js';
 import { EmptyState } from './EmptyState.js';
 import { StatusNotice } from './StatusNotice.js';
 import type {
@@ -132,35 +133,7 @@ export function SettingsContent({
       )}
 
       {activeTab === 'general' && (
-        <>
-          <AutoFallbackSection />
-          <StreamRecoverySection />
-          <ThinkingSection />
-          <MonthlyBudgetSection />
-          <DailyBudgetSection />
-          <MemoryDrawerSection />
-          <section className="settings-section">
-            <div className="settings-section-head">
-              <h3>Provider 与模型</h3>
-            </div>
-            <p className="hint">
-              模型与 Provider 的管理已迁移至独立的 <strong>模型中心</strong>。如需重新走一遍完整 Onboarding，可点击下方按钮。
-            </p>
-            <button
-              type="button"
-              className="settings-action-btn settings-action-btn--primary"
-              onClick={onReopenOnboarding}
-              data-testid="settings-add-provider"
-            >
-              重新打开 Onboarding
-            </button>
-          </section>
-          <DangerZone
-            onChanged={() => {
-              onChanged();
-            }}
-          />
-        </>
+        <GeneralTab onReopenOnboarding={onReopenOnboarding} onChanged={onChanged} />
       )}
 
       {activeTab === 'tools' && <ToolsSection onChanged={onChanged} />}
@@ -224,6 +197,11 @@ function ToolsSection({ onChanged }: { onChanged: () => void }): JSX.Element {
   const [searchStatus, setSearchStatus] = useState<{ tone: 'success' | 'error' | 'loading'; title: string; detail: string } | null>(null);
   const [bochaStatus, setBochaStatus] = useState<{ tone: 'success' | 'error'; title: string; detail: string } | null>(null);
   const [activeToolsPane, setActiveToolsPane] = useState<ToolsPane>('search');
+  const [toolsConfirm, setToolsConfirm] = useState<{
+    title: string;
+    message: string;
+    onConfirm: () => void;
+  } | null>(null);
   const searchSectionRef = useRef<HTMLDivElement | null>(null);
   const builtinSectionRef = useRef<HTMLDivElement | null>(null);
   const mcpSectionRef = useRef<HTMLDivElement | null>(null);
@@ -529,26 +507,34 @@ function ToolsSection({ onChanged }: { onChanged: () => void }): JSX.Element {
     }
   };
 
-  const deleteMcpServer = async (server: McpServer): Promise<void> => {
-    if (!window.confirm(`删除 MCP Server “${server.name}”？`)) return;
-    setSaving(`${server.id}:delete`);
-    setError(null);
-    try {
-      await api.deleteMcpServer(server.id);
-      setMcpRuntimeById((prev) => {
-        const next = { ...prev };
-        delete next[server.id];
-        return next;
-      });
-      setExpandedMcpId((prev) => (prev === server.id ? null : prev));
-      setEditingMcpId((prev) => (prev === server.id ? null : prev));
-      await load();
-      onChanged();
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
-    } finally {
-      setSaving(null);
-    }
+  const deleteMcpServer = (server: McpServer): void => {
+    setToolsConfirm({
+      title: '删除 MCP Server',
+      message: `删除 MCP Server “${server.name}”？`,
+      onConfirm: () => {
+        setToolsConfirm(null);
+        setSaving(`${server.id}:delete`);
+        setError(null);
+        (async () => {
+          try {
+            await api.deleteMcpServer(server.id);
+            setMcpRuntimeById((prev) => {
+              const next = { ...prev };
+              delete next[server.id];
+              return next;
+            });
+            setExpandedMcpId((prev) => (prev === server.id ? null : prev));
+            setEditingMcpId((prev) => (prev === server.id ? null : prev));
+            await load();
+            onChanged();
+          } catch (e) {
+            setError(e instanceof Error ? e.message : String(e));
+          } finally {
+            setSaving(null);
+          }
+        })();
+      },
+    });
   };
 
   const saveImageTimeout = async (): Promise<void> => {
@@ -1174,6 +1160,15 @@ function ToolsSection({ onChanged }: { onChanged: () => void }): JSX.Element {
           testId="settings-tools-error"
         />
       )}
+      <ConfirmDialog
+        open={toolsConfirm != null}
+        title={toolsConfirm?.title ?? ''}
+        message={toolsConfirm?.message ?? ''}
+        danger
+        confirmLabel="删除"
+        onConfirm={toolsConfirm?.onConfirm ?? (() => {})}
+        onCancel={() => setToolsConfirm(null)}
+      />
     </section>
   );
 }
@@ -1776,6 +1771,11 @@ function PromptTemplatesSection(): JSX.Element {
   const [name, setName] = useState('');
   const [description, setDescription] = useState('');
   const [content, setContent] = useState('');
+  const [confirmDialog, setConfirmDialog] = useState<{
+    title: string;
+    message: string;
+    onConfirm: () => void;
+  } | null>(null);
 
   const resetForm = (): void => {
     setEditingId(null);
@@ -1829,16 +1829,24 @@ function PromptTemplatesSection(): JSX.Element {
     }
   };
 
-  const onDelete = async (id: string): Promise<void> => {
-    if (!window.confirm('确认删除这个 Prompt 模板？')) return;
-    try {
-      await api.deletePromptTemplate(id);
-      if (editingId === id) resetForm();
-      await load();
-      notifyPromptAssetsChanged();
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
-    }
+  const onDelete = (id: string): void => {
+    setConfirmDialog({
+      title: '删除 Prompt 模板',
+      message: '确认删除这个 Prompt 模板？',
+      onConfirm: () => {
+        setConfirmDialog(null);
+        (async () => {
+          try {
+            await api.deletePromptTemplate(id);
+            if (editingId === id) resetForm();
+            await load();
+            notifyPromptAssetsChanged();
+          } catch (e) {
+            setError(e instanceof Error ? e.message : String(e));
+          }
+        })();
+      },
+    });
   };
 
   return (
@@ -1935,6 +1943,15 @@ function PromptTemplatesSection(): JSX.Element {
           {error && <p className="err">{error}</p>}
         </div>
       </div>
+      <ConfirmDialog
+        open={confirmDialog != null}
+        title={confirmDialog?.title ?? ''}
+        message={confirmDialog?.message ?? ''}
+        danger
+        confirmLabel="删除"
+        onConfirm={confirmDialog?.onConfirm ?? (() => {})}
+        onCancel={() => setConfirmDialog(null)}
+      />
     </section>
   );
 }
@@ -1950,6 +1967,11 @@ function WorkflowRecipesSection(): JSX.Element {
   const [prompt, setPrompt] = useState('');
   const [requiredTools, setRequiredTools] = useState('');
   const [optionalTools, setOptionalTools] = useState('');
+  const [confirmDialog, setConfirmDialog] = useState<{
+    title: string;
+    message: string;
+    onConfirm: () => void;
+  } | null>(null);
 
   const resetForm = (): void => {
     setEditingId(null);
@@ -2024,16 +2046,24 @@ function WorkflowRecipesSection(): JSX.Element {
     }
   };
 
-  const onDelete = async (id: string): Promise<void> => {
-    if (!window.confirm('确认删除这个 Workflow Recipe？')) return;
-    try {
-      await api.deleteWorkflowRecipe(id);
-      if (editingId === id) resetForm();
-      await load();
-      notifyPromptAssetsChanged();
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
-    }
+  const onDelete = (id: string): void => {
+    setConfirmDialog({
+      title: '删除 Workflow Recipe',
+      message: '确认删除这个 Workflow Recipe？',
+      onConfirm: () => {
+        setConfirmDialog(null);
+        (async () => {
+          try {
+            await api.deleteWorkflowRecipe(id);
+            if (editingId === id) resetForm();
+            await load();
+            notifyPromptAssetsChanged();
+          } catch (e) {
+            setError(e instanceof Error ? e.message : String(e));
+          }
+        })();
+      },
+    });
   };
 
   return (
@@ -2135,6 +2165,15 @@ function WorkflowRecipesSection(): JSX.Element {
           {error && <p className="err">{error}</p>}
         </div>
       </div>
+      <ConfirmDialog
+        open={confirmDialog != null}
+        title={confirmDialog?.title ?? ''}
+        message={confirmDialog?.message ?? ''}
+        danger
+        confirmLabel="删除"
+        onConfirm={confirmDialog?.onConfirm ?? (() => {})}
+        onCancel={() => setConfirmDialog(null)}
+      />
     </section>
   );
 }
@@ -2148,6 +2187,11 @@ function PersonasSection(): JSX.Element {
   const [name, setName] = useState('');
   const [description, setDescription] = useState('');
   const [prompt, setPrompt] = useState('');
+  const [confirmDialog, setConfirmDialog] = useState<{
+    title: string;
+    message: string;
+    onConfirm: () => void;
+  } | null>(null);
 
   const resetForm = (): void => {
     setEditingId(null);
@@ -2201,16 +2245,24 @@ function PersonasSection(): JSX.Element {
     }
   };
 
-  const onDelete = async (id: string): Promise<void> => {
-    if (!window.confirm('确认删除这个 Persona？已绑定到会话的选择会自动失效。')) return;
-    try {
-      await api.deletePersona(id);
-      if (editingId === id) resetForm();
-      await load();
-      notifyPromptAssetsChanged();
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
-    }
+  const onDelete = (id: string): void => {
+    setConfirmDialog({
+      title: '删除 Persona',
+      message: '确认删除这个 Persona？已绑定到会话的选择会自动失效。',
+      onConfirm: () => {
+        setConfirmDialog(null);
+        (async () => {
+          try {
+            await api.deletePersona(id);
+            if (editingId === id) resetForm();
+            await load();
+            notifyPromptAssetsChanged();
+          } catch (e) {
+            setError(e instanceof Error ? e.message : String(e));
+          }
+        })();
+      },
+    });
   };
 
   return (
@@ -2310,6 +2362,15 @@ function PersonasSection(): JSX.Element {
           {error && <p className="err">{error}</p>}
         </div>
       </div>
+      <ConfirmDialog
+        open={confirmDialog != null}
+        title={confirmDialog?.title ?? ''}
+        message={confirmDialog?.message ?? ''}
+        danger
+        confirmLabel="删除"
+        onConfirm={confirmDialog?.onConfirm ?? (() => {})}
+        onCancel={() => setConfirmDialog(null)}
+      />
     </section>
   );
 }
@@ -2317,7 +2378,7 @@ function PersonasSection(): JSX.Element {
 /**
  * Danger zone (M1 §6.2): wipes SQLite + Keychain. We require two confirms:
  * a checkbox to unlock the button (so a stray click can't fire it) and a
- * native window.confirm() with the explicit "无法恢复" wording. The endpoint
+ * custom ConfirmDialog with the explicit "无法恢复" wording. The endpoint
  * itself is destructive but idempotent — running it twice on an empty store
  * is a no-op.
  */
@@ -2328,28 +2389,41 @@ function DangerZone({ onChanged }: { onChanged: () => void }): JSX.Element {
   const [busyImport, setBusyImport] = useState(false);
   const [importStrategy, setImportStrategy] = useState<BackupConflictStrategy>('overwrite');
   const [msg, setMsg] = useState<string | null>(null);
+  const [confirmDialog, setConfirmDialog] = useState<{
+    title: string;
+    message: string;
+    onConfirm: () => void;
+  } | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
-  async function onClear(): Promise<void> {
+  function onClear(): void {
     if (!armed || busyClear || busyExport || busyImport) return;
-    if (!window.confirm('确定要清空所有数据吗？\n这会删除：所有会话、所有消息、所有模型与 Provider、所有 Keychain 中保存的 API Key。\n此操作无法恢复。')) return;
-    setBusyClear(true);
-    setMsg(null);
-    try {
-      const res = await api.clearAllData();
-      const failures = res.data.keystore_failures.length;
-      setMsg(
-        failures > 0
-          ? `已清空。Keychain 有 ${failures} 项删除失败，可手动到「钥匙串访问」清理。`
-          : `已清空。Keychain 同步删除 ${res.data.keystore_entries_removed} 项。`,
-      );
-      onChanged();
-    } catch (e) {
-      setMsg(`清空失败：${e instanceof Error ? e.message : String(e)}`);
-    } finally {
-      setBusyClear(false);
-      setArmed(false);
-    }
+    setConfirmDialog({
+      title: '清空所有数据',
+      message: '确定要清空所有数据吗？\n这会删除：所有会话、所有消息、所有模型与 Provider、所有 Keychain 中保存的 API Key。\n此操作无法恢复。',
+      onConfirm: () => {
+        setConfirmDialog(null);
+        setBusyClear(true);
+        setMsg(null);
+        (async () => {
+          try {
+            const res = await api.clearAllData();
+            const failures = res.data.keystore_failures.length;
+            setMsg(
+              failures > 0
+                ? `已清空。Keychain 有 ${failures} 项删除失败，可手动到「钥匙串访问」清理。`
+                : `已清空。Keychain 同步删除 ${res.data.keystore_entries_removed} 项。`,
+            );
+            onChanged();
+          } catch (e) {
+            setMsg(`清空失败：${e instanceof Error ? e.message : String(e)}`);
+          } finally {
+            setBusyClear(false);
+            setArmed(false);
+          }
+        })();
+      },
+    });
   }
 
   async function onExport(): Promise<void> {
@@ -2479,6 +2553,15 @@ function DangerZone({ onChanged }: { onChanged: () => void }): JSX.Element {
         {busyClear ? '清理中…' : '清空所有数据'}
       </button>
       {msg && <p className="hint" data-testid="settings-danger-msg">{msg}</p>}
+      <ConfirmDialog
+        open={confirmDialog != null}
+        title={confirmDialog?.title ?? ''}
+        message={confirmDialog?.message ?? ''}
+        danger
+        confirmLabel="清空"
+        onConfirm={confirmDialog?.onConfirm ?? (() => {})}
+        onCancel={() => setConfirmDialog(null)}
+      />
     </section>
   );
 }
@@ -2492,6 +2575,72 @@ function DangerZone({ onChanged }: { onChanged: () => void }): JSX.Element {
 // `failure_decision` annotation; the renderer's auto-fallback effect
 // in ChatPanel consumes it to fire a single-hop retry.
 //
+/** General tab — progressive disclosure layout. */
+function GeneralTab({ onReopenOnboarding, onChanged }: { onReopenOnboarding: () => void; onChanged: () => void | Promise<void> }): JSX.Element {
+  const [budgetScope, setBudgetScope] = useState<'monthly' | 'daily'>('monthly');
+
+  return (
+    <>
+      <AutoFallbackSection />
+      <details>
+        <summary>回复中断恢复</summary>
+        <StreamRecoverySection />
+      </details>
+      <details>
+        <summary>模型思考</summary>
+        <ThinkingSection />
+      </details>
+      <div className="settings-budget-combined">
+        <div className="settings-budget-tabs">
+          <button
+            type="button"
+            className={`settings-budget-tab${budgetScope === 'monthly' ? ' active' : ''}`}
+            onClick={() => setBudgetScope('monthly')}
+          >
+            月度预算
+          </button>
+          <button
+            type="button"
+            className={`settings-budget-tab${budgetScope === 'daily' ? ' active' : ''}`}
+            onClick={() => setBudgetScope('daily')}
+          >
+            日预算
+          </button>
+        </div>
+        {budgetScope === 'monthly' ? <MonthlyBudgetSection /> : <DailyBudgetSection />}
+      </div>
+      <details>
+        <summary>长期记忆</summary>
+        <MemoryDrawerSection />
+      </details>
+      <section className="settings-section">
+        <div className="settings-section-head">
+          <h3>Provider 与模型</h3>
+        </div>
+        <p className="hint">
+          模型与 Provider 的管理已迁移至独立的 <strong>模型中心</strong>。如需重新走一遍完整 Onboarding，可点击下方按钮。
+        </p>
+        <button
+          type="button"
+          className="settings-action-btn settings-action-btn--primary"
+          onClick={onReopenOnboarding}
+          data-testid="settings-add-provider"
+        >
+          重新打开 Onboarding
+        </button>
+      </section>
+      <details>
+        <summary>危险区</summary>
+        <DangerZone
+          onChanged={() => {
+            onChanged();
+          }}
+        />
+      </details>
+    </>
+  );
+}
+
 // We optimistically reflect the toggled value before the round-trip
 // completes so users don't see a click-then-wait UX; on failure we
 // revert and surface the error.

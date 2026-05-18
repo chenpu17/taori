@@ -607,10 +607,20 @@ export const ResearchConstraintsSchema = z.object({
 });
 export type ResearchConstraints = z.infer<typeof ResearchConstraintsSchema>;
 
+export const ResearchPlanQuestionScopeSchema = z.enum([
+  'recon',
+  'comparative',
+  'deep_dive',
+  'verification',
+]);
+export type ResearchPlanQuestionScope = z.infer<typeof ResearchPlanQuestionScopeSchema>;
+
 export const ResearchPlanQuestionSchema = z.object({
   id: z.string().min(1).max(64),
   question: z.string().min(1).max(240),
   reason: z.string().min(1).max(240),
+  /** Optional wide→narrow ordering hint. Older plans without scope still validate. */
+  scope: ResearchPlanQuestionScopeSchema.optional(),
 });
 export type ResearchPlanQuestion = z.infer<typeof ResearchPlanQuestionSchema>;
 
@@ -629,8 +639,15 @@ export const ResearchPlanSchema = z.object({
   key_questions: z.array(ResearchPlanQuestionSchema).min(1).max(12),
   stages: z.array(ResearchPlanStepSchema).min(1).max(10),
   stop_conditions: z.array(z.string().min(1).max(240)).min(1).max(10),
+  /** Preview of the report's section structure. Optional for backwards compat with old plans. */
+  expected_outline: z.array(z.string().min(1).max(160)).max(20).optional(),
+  /** One-paragraph narrative of how the agent intends to search. Optional. */
+  search_strategy: z.string().min(1).max(800).optional(),
 });
 export type ResearchPlan = z.infer<typeof ResearchPlanSchema>;
+
+export const ResearchPlanOriginSchema = z.enum(['pending', 'ai', 'fallback']);
+export type ResearchPlanOrigin = z.infer<typeof ResearchPlanOriginSchema>;
 
 export const ResearchTaskStatusSchema = z.enum([
   'queued',
@@ -704,6 +721,19 @@ export const ResearchClaimCitationSchema = z.object({
 });
 export type ResearchClaimCitation = z.infer<typeof ResearchClaimCitationSchema>;
 
+export const ResearchClaimConfidenceSchema = z.enum(['high', 'medium', 'low', 'unverified']);
+export type ResearchClaimConfidence = z.infer<typeof ResearchClaimConfidenceSchema>;
+
+export const ResearchClaimEvidenceStanceSchema = z.enum(['supports', 'contradicts', 'partial']);
+export type ResearchClaimEvidenceStance = z.infer<typeof ResearchClaimEvidenceStanceSchema>;
+
+export const ResearchClaimEvidenceSpanSchema = z.object({
+  source_id: z.string(),
+  span_text: z.string().min(1).max(600),
+  stance: ResearchClaimEvidenceStanceSchema.default('supports'),
+});
+export type ResearchClaimEvidenceSpan = z.infer<typeof ResearchClaimEvidenceSpanSchema>;
+
 export const ResearchClaimSchema = z.object({
   id: z.string(),
   research_session_id: z.string(),
@@ -712,6 +742,9 @@ export const ResearchClaimSchema = z.object({
   claim_kind: ResearchClaimKindSchema,
   support_status: ResearchClaimSupportStatusSchema,
   citations: z.array(ResearchClaimCitationSchema).max(20),
+  evidence_spans: z.array(ResearchClaimEvidenceSpanSchema).max(20).default([]),
+  confidence: ResearchClaimConfidenceSchema.nullable(),
+  verified_at: z.number().int().nullable(),
   created_at: z.number().int(),
   updated_at: z.number().int(),
 });
@@ -742,11 +775,13 @@ export const ResearchSessionSchema = z.object({
   budget_spent_usd: z.number().nonnegative(),
   constraints: ResearchConstraintsSchema,
   plan: ResearchPlanSchema.nullable(),
+  plan_origin: ResearchPlanOriginSchema,
   plan_messages: z.array(PlanMessageSchema).nullable(),
   draft_markdown: z.string().nullable(),
   final_markdown: z.string().nullable(),
   preferred_model_id: z.string().nullable(),
   preferred_search_tool: z.string().nullable(),
+  synthesis_model_id: z.string().nullable(),
   started_at: z.number().int().nullable(),
   completed_at: z.number().int().nullable(),
   created_at: z.number().int(),
@@ -764,6 +799,7 @@ export const ResearchSessionCreateSchema = z.object({
   constraints: ResearchConstraintsSchema.default({}),
   preferred_model_id: z.string().nullable().optional(),
   preferred_search_tool: z.string().nullable().optional(),
+  synthesis_model_id: z.string().nullable().optional(),
 });
 export type ResearchSessionCreate = z.infer<typeof ResearchSessionCreateSchema>;
 

@@ -72,6 +72,8 @@ test('A4 user can write the round-table conclusion back into a chat conversation
   await page
     .getByTestId('composer-input')
     .fill('A4 — 选 SaaS 计费模型');
+  await page.getByTestId('composer-tools-toggle').click();
+  await expect(page.getByTestId('composer-roundtable')).toBeVisible();
   await page.getByTestId('composer-roundtable').click();
 
   const dlg = page.getByTestId('roundtable-launch-dialog');

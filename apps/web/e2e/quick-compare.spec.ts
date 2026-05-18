@@ -121,6 +121,8 @@ test('Quick Compare shows three candidates and adopts one into chat history', as
   await expect(page.getByTestId('chat-panel')).toBeVisible({ timeout: 15_000 });
 
   await page.getByTestId('composer-input').fill('给我三个产品改进建议');
+  await page.getByTestId('composer-tools-toggle').click();
+  await expect(page.getByTestId('composer-quick-compare')).toBeVisible();
   await page.getByTestId('composer-quick-compare').click();
   await expect(page.getByTestId('quick-compare-picker')).toBeVisible();
   await expect(page.getByTestId('quick-compare-picker-count')).toContainText('已选 3/3');
@@ -131,7 +133,7 @@ test('Quick Compare shows three candidates and adopts one into chat history', as
   await expect(page.getByTestId('quick-compare-output').first()).toContainText('Quick Compare 本地预览');
   await expect(page.getByTestId('quick-compare-output').first()).toContainText('首字');
   await expect(page.getByTestId('quick-compare-output').first()).toContainText('总耗时');
-  await expect(page.getByTestId('quick-compare-arbitration')).toContainText('Decision Report');
+  await expect(page.getByTestId('quick-compare-arbitration')).toContainText('对比报告');
   await expect(page.getByTestId('quick-compare-arbitration')).toContainText('置信度');
   await expect(page.getByTestId('quick-compare-decision-report')).toContainText('推荐方案');
   await expect(page.getByTestId('quick-compare-decision-report')).toContainText('总成本');
@@ -169,6 +171,8 @@ test('Quick Compare picker lets user choose two models before running', async ({
   await expect(page.getByTestId('chat-panel')).toBeVisible({ timeout: 15_000 });
 
   await page.getByTestId('composer-input').fill('只用两个模型对比这个方案');
+  await page.getByTestId('composer-tools-toggle').click();
+  await expect(page.getByTestId('composer-quick-compare')).toBeVisible();
   await page.getByTestId('composer-quick-compare').click();
   await expect(page.getByTestId('quick-compare-picker')).toBeVisible();
   await expect(page.getByTestId('quick-compare-picker-count')).toContainText('已选 3/3');
@@ -192,6 +196,8 @@ test('Quick Compare picker lets user disable tools for one column independently'
   await expect(page.getByTestId('chat-panel')).toBeVisible({ timeout: 15_000 });
 
   await page.getByTestId('composer-input').fill('请联网比较三个产品方案');
+  await page.getByTestId('composer-tools-toggle').click();
+  await expect(page.getByTestId('composer-quick-compare')).toBeVisible();
   await page.getByTestId('composer-quick-compare').click();
   await expect(page.getByTestId('quick-compare-picker')).toBeVisible();
   await expect(page.locator('[data-testid^="quick-compare-model-tools-"]').last()).toBeVisible();
@@ -225,6 +231,8 @@ test('Quick Compare defaults prefer distinct labels and disambiguate duplicate p
   await expect(page.getByTestId('chat-panel')).toBeVisible({ timeout: 15_000 });
 
   await page.getByTestId('composer-input').fill('帮我比较这几个大模型');
+  await page.getByTestId('composer-tools-toggle').click();
+  await expect(page.getByTestId('composer-quick-compare')).toBeVisible();
   await page.getByTestId('composer-quick-compare').click();
   await expect(page.getByTestId('quick-compare-picker')).toBeVisible();
 

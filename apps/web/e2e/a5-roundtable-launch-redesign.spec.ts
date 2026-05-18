@@ -57,6 +57,8 @@ test('A5 launch dialog shows mode-comparison cards with populated values', async
   await page.goto('/');
   await expect(page.getByTestId('chat-panel')).toBeVisible({ timeout: 10_000 });
   await page.getByTestId('composer-input').fill('是否要从 mysql 迁移到 postgres');
+  await page.getByTestId('composer-tools-toggle').click();
+  await expect(page.getByTestId('composer-roundtable')).toBeVisible();
   await page.getByTestId('composer-roundtable').click();
 
   const dlg = page.getByTestId('roundtable-launch-dialog');
@@ -137,6 +139,8 @@ test('A5 user-specified mode shows "用户已指定" chip', async ({ page }) => 
   await page.goto('/');
   await expect(page.getByTestId('chat-panel')).toBeVisible({ timeout: 10_000 });
   await page.getByTestId('composer-input').fill('讨论选型');
+  await page.getByTestId('composer-tools-toggle').click();
+  await expect(page.getByTestId('composer-roundtable')).toBeVisible();
   await page.getByTestId('composer-roundtable').click();
 
   const dlg = page.getByTestId('roundtable-launch-dialog');

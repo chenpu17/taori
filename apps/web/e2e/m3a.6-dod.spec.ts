@@ -97,6 +97,8 @@ test('M3.A.6 DoD: 8-step user-view round-table happy path', async ({
   await page
     .getByTestId('composer-input')
     .fill('如何选 SaaS 计费模型？');
+  await page.getByTestId('composer-tools-toggle').click();
+  await expect(page.getByTestId('composer-roundtable')).toBeVisible();
   await page.getByTestId('composer-roundtable').click();
 
   // --- Step 2: launch dialog — set mode=deep BEFORE submit, then analyzer

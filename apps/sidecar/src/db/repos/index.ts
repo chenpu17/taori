@@ -71,6 +71,7 @@ import type {
   ResearchClaimSupportStatus,
   ResearchConstraints,
   ResearchPlan,
+  ResearchPlanOrigin,
   ResearchStatus,
   ResearchStage,
   ResearchBudgetMode,
@@ -300,6 +301,31 @@ function parseResearchCitations(raw: string | null): ResearchClaim['citations'] 
   }
 }
 
+function parseResearchEvidenceSpans(raw: string | null): ResearchClaim['evidence_spans'] {
+  if (!raw) return [];
+  try {
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+    return parsed
+      .filter((item): item is { source_id: string; span_text: string; stance?: string } =>
+        Boolean(item)
+        && typeof item === 'object'
+        && !Array.isArray(item)
+        && typeof (item as { source_id?: unknown }).source_id === 'string'
+        && typeof (item as { span_text?: unknown }).span_text === 'string',
+      )
+      .map((item) => ({
+        source_id: item.source_id,
+        span_text: item.span_text.slice(0, 600),
+        stance: (item.stance === 'contradicts' || item.stance === 'partial')
+          ? item.stance
+          : 'supports' as const,
+      }));
+  } catch {
+    return [];
+  }
+}
+
 function toQuickCompareRun(row: QuickCompareRunRow): QuickCompareRun {
   return {
     id: row.id,
@@ -407,11 +433,13 @@ function toResearchSession(row: ResearchSessionRow): ResearchSession {
     budget_spent_usd: row.budget_spent_usd ?? 0,
     constraints: parseResearchConstraints(row.constraints_json),
     plan: parseResearchPlan(row.plan_json),
+    plan_origin: ((row as Record<string, unknown>).plan_origin as ResearchPlanOrigin | null) ?? 'pending',
     plan_messages: parsePlanMessages((row as Record<string, unknown>).plan_messages_json as string | null | undefined),
     draft_markdown: row.draft_markdown ?? null,
     final_markdown: row.final_markdown ?? null,
     preferred_model_id: (row as Record<string, unknown>).preferred_model_id as string | null ?? null,
     preferred_search_tool: (row as Record<string, unknown>).preferred_search_tool as string | null ?? null,
+    synthesis_model_id: (row as Record<string, unknown>).synthesis_model_id as string | null ?? null,
     started_at: row.started_at ?? null,
     completed_at: row.completed_at ?? null,
     created_at: row.created_at,
@@ -453,6 +481,11 @@ function toResearchSource(row: ResearchSourceRow): ResearchSource {
 }
 
 function toResearchClaim(row: ResearchClaimRow): ResearchClaim {
+  const rec = row as Record<string, unknown>;
+  const rawConfidence = rec.confidence;
+  const confidence = (rawConfidence === 'high' || rawConfidence === 'medium' || rawConfidence === 'low' || rawConfidence === 'unverified')
+    ? rawConfidence
+    : null;
   return {
     id: row.id,
     research_session_id: row.research_session_id,
@@ -461,6 +494,9 @@ function toResearchClaim(row: ResearchClaimRow): ResearchClaim {
     claim_kind: row.claim_kind as ResearchClaimKind,
     support_status: row.support_status as ResearchClaimSupportStatus,
     citations: parseResearchCitations(row.citations_json),
+    evidence_spans: parseResearchEvidenceSpans((rec.evidence_spans_json as string | null) ?? null),
+    confidence,
+    verified_at: typeof rec.verified_at === 'number' ? rec.verified_at : null,
     created_at: row.created_at,
     updated_at: row.updated_at,
   };
@@ -1392,11 +1428,13 @@ export interface ResearchSessionPatch {
   budget_spent_usd?: number;
   constraints?: ResearchConstraints;
   plan?: ResearchPlan | null;
+  plan_origin?: ResearchPlanOrigin;
   plan_messages?: PlanMessage[] | null;
   draft_markdown?: string | null;
   final_markdown?: string | null;
   preferred_model_id?: string | null;
   preferred_search_tool?: string | null;
+  synthesis_model_id?: string | null;
   started_at?: number | null;
   completed_at?: number | null;
 }
@@ -1494,11 +1532,13 @@ export class ResearchRepo {
         budget_spent_usd: 0,
         constraints_json: JSON.stringify(ResearchConstraintsSchema.parse(input.constraints ?? {})),
         plan_json: null,
+        plan_origin: 'pending',
         plan_messages_json: null,
         draft_markdown: null,
         final_markdown: null,
         preferred_model_id: input.preferred_model_id ?? null,
         preferred_search_tool: input.preferred_search_tool ?? null,
+        synthesis_model_id: input.synthesis_model_id ?? null,
         started_at: null,
         completed_at: null,
         created_at: now,
@@ -1528,6 +1568,7 @@ export class ResearchRepo {
         ...(patch.plan !== undefined && {
           plan_json: patch.plan ? JSON.stringify(ResearchPlanSchema.parse(patch.plan)) : null,
         }),
+        ...(patch.plan_origin !== undefined && { plan_origin: patch.plan_origin }),
         ...(patch.plan_messages !== undefined && {
           plan_messages_json: patch.plan_messages ? JSON.stringify(patch.plan_messages) : null,
         }),
@@ -1535,8 +1576,23 @@ export class ResearchRepo {
         ...(patch.final_markdown !== undefined && { final_markdown: patch.final_markdown }),
         ...(patch.preferred_model_id !== undefined && { preferred_model_id: patch.preferred_model_id }),
         ...(patch.preferred_search_tool !== undefined && { preferred_search_tool: patch.preferred_search_tool }),
+        ...(patch.synthesis_model_id !== undefined && { synthesis_model_id: patch.synthesis_model_id }),
         ...(patch.started_at !== undefined && { started_at: patch.started_at }),
         ...(patch.completed_at !== undefined && { completed_at: patch.completed_at }),
+        updated_at: Date.now(),
+      })
+      .where(eq(research_sessions.id, id))
+      .returning()
+      .get();
+    return row ? toResearchSession(row) : null;
+  }
+
+  incrementBudgetSpent(id: string, delta: number): ResearchSession | null {
+    if (!Number.isFinite(delta) || delta <= 0) return this.get(id);
+    const row = this.db
+      .update(research_sessions)
+      .set({
+        budget_spent_usd: sql`ROUND(COALESCE(${research_sessions.budget_spent_usd}, 0) + ${delta}, 6)`,
         updated_at: Date.now(),
       })
       .where(eq(research_sessions.id, id))
@@ -1654,6 +1710,9 @@ export class ResearchRepo {
         claim_kind: claim.claim_kind,
         support_status: claim.support_status,
         citations_json: JSON.stringify(claim.citations ?? []),
+        evidence_spans_json: JSON.stringify(claim.evidence_spans ?? []),
+        confidence: claim.confidence ?? null,
+        verified_at: claim.verified_at ?? null,
         created_at: now,
         updated_at: now,
       })
@@ -1761,6 +1820,9 @@ export class ResearchRepo {
             claim_kind: claim.claim_kind,
             support_status: claim.support_status,
             citations_json: JSON.stringify(claim.citations),
+            evidence_spans_json: JSON.stringify(claim.evidence_spans ?? []),
+            confidence: claim.confidence ?? null,
+            verified_at: claim.verified_at ?? null,
             created_at: now,
             updated_at: now,
           })

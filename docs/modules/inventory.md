@@ -58,6 +58,16 @@ Scope: Taori 全系统
   - `apps/sidecar`：对“市场格局 / 主要玩家 / 行业趋势”这类宽泛选题，创建 session 后会先进入 `scoping` 阶段，主动追问地区、时间范围和重点维度，再基于补充信息生成计划
   - `apps/web`：reviewing 且无 plan 时不再只有“AI 正在规划中…”，而是可直接回复补充信息的对话式 scoping 卡片；计划卡指标也新增来源站点数和已验证主张数
   - `apps/web/e2e` / `apps/sidecar/test`：补充 scoping → 计划 → 执行主路径回归
+- 2026-05-14 [深度研究计划来源透明化]：
+  - `packages/shared`：`ResearchSessionSchema` 新增 `plan_origin`，显式区分 `pending / ai / fallback`
+  - `apps/sidecar`：当前版本的研究计划生成只会写入 `pending / ai`；`fallback` 仅保留给历史会话兼容，AI 规划在有限重试后直接失败
+  - `apps/web`：研究计划卡会明确显示 AI 生成状态；若读到历史 `fallback` 数据，也会按“旧版兜底计划”提示，避免误判
+- 2026-05-14 [深度研究多引擎补救]：
+  - `apps/sidecar`：deep research 使用 `builtin.web_search` 时不再只押单一引擎，而会显式尝试“当前配置引擎 → Exa → 搏查（有 Key 时）”的补救梯子，并把 `engine_attempts` 写入 task output
+  - `apps/web`：研究任务失败文案会显示已尝试的引擎，用户可以直接判断 Exa / 搏查是否真的参与过本轮补搜
+- 2026-05-18 [深度研究覆盖容错]：
+  - `apps/sidecar`：单个检索分支多轮补救后仍没有可用来源时，不再直接失败整条任务；Runner 记录 `coverage_status='no_usable_sources'`、失败原因、query 与引擎尝试，并继续基于已有证据综合。只有整场研究没有任何来源时才在草稿前暂停
+  - `apps/web`：研究任务行把这种空结果显示为“未命中 / 待补证”，报告概览继续通过覆盖成熟度、风险与弱证据提示表达不确定性
 - 2026-05-10 [thinking 配置]：新增“全局默认 + 单模型覆盖”的模型 thinking 开关：
   - `packages/shared`：`Model*` / backup contract 新增 `thinking_enabled: boolean | null`
   - `apps/sidecar`：`models.thinking_enabled` 落库，并在聊天、Quick Compare、Roundtable、自动记忆抽取与模型探测中统一解析；当前按 provider 差异适配 OpenRouter `reasoning`、DeepSeek `thinking`、GPT-5/o 系列 `reasoning_effort`

@@ -90,6 +90,8 @@ test('Quick Compare Markdown copy button keeps compact width', async ({ page }) 
   await expect(page.getByTestId('chat-panel')).toBeVisible({ timeout: 15_000 });
 
   await page.getByTestId('composer-input').fill('请对比 Markdown 回归样例');
+  await page.getByTestId('composer-tools-toggle').click();
+  await expect(page.getByTestId('composer-quick-compare')).toBeVisible();
   await page.getByTestId('composer-quick-compare').click();
   await expect(page.getByTestId('quick-compare-picker')).toBeVisible();
   await page.getByTestId('quick-compare-picker-submit').click();
@@ -111,6 +113,8 @@ test('Quick Compare streams candidate output before all models finish', async ({
   await expect(page.getByTestId('chat-panel')).toBeVisible({ timeout: 15_000 });
 
   await page.getByTestId('composer-input').fill('请实时对比 Markdown 回归样例');
+  await page.getByTestId('composer-tools-toggle').click();
+  await expect(page.getByTestId('composer-quick-compare')).toBeVisible();
   await page.getByTestId('composer-quick-compare').click();
   await expect(page.getByTestId('quick-compare-picker')).toBeVisible();
   await page.getByTestId('quick-compare-picker-submit').click();

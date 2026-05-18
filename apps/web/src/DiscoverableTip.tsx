@@ -1,7 +1,7 @@
 import React, { useState } from 'react';
 
 export interface DiscoverableTipContent {
-  id: 'image' | 'fallback' | 'cost' | 'roundtable';
+  id: 'image' | 'fallback' | 'cost' | 'roundtable' | 'quickcompare' | 'research';
   icon: string;
   title: string;
   description: string;
@@ -86,5 +86,19 @@ export const TIPS = {
     title: '多模型圆桌',
     description: '在一次对话中同时让多个模型讨论同一问题，综合它们的观点。支持深度模式（渐进式提示）和快速模式（成本优化）。',
     storageKey: 'tip_roundtable_first_seen',
+  },
+  quickcompare: {
+    id: 'quickcompare' as const,
+    icon: '⚡',
+    title: '快速对比',
+    description: '在输入框旁点击「对比」按钮，一次让多个模型并行回答，系统自动生成推荐方案。',
+    storageKey: 'tip_quickcompare_first_seen',
+  },
+  research: {
+    id: 'research' as const,
+    icon: '🔎',
+    title: '深度研究',
+    description: '在输入框旁点击「研究」按钮，让 Taori 自动规划、检索、整理一份结构化研究报告。',
+    storageKey: 'tip_research_first_seen',
   },
 };

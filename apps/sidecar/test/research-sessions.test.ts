@@ -15,8 +15,10 @@ describe('research sessions', () => {
   let app: FastifyInstance;
   let dbPath: string;
   let db: ReturnType<typeof openDb>;
+  const originalHermeticPlanner = process.env.TAORI_HERMETIC_AI_PLANNER;
 
   beforeEach(async () => {
+    process.env.TAORI_HERMETIC_AI_PLANNER = '1';
     dbPath = path.join(os.tmpdir(), `taori-research-${Date.now()}-${Math.random()}.db`);
     db = openDb(dbPath);
     app = buildServer({
@@ -38,6 +40,8 @@ describe('research sessions', () => {
   });
 
   afterEach(async () => {
+    if (originalHermeticPlanner == null) delete process.env.TAORI_HERMETIC_AI_PLANNER;
+    else process.env.TAORI_HERMETIC_AI_PLANNER = originalHermeticPlanner;
     await app.close();
     fs.rmSync(dbPath, { force: true });
   });
@@ -59,9 +63,10 @@ describe('research sessions', () => {
       },
     });
     expect(create.statusCode).toBe(201);
-    const created = create.json() as { id: string; status: string; stage: string };
+    const created = create.json() as { id: string; status: string; stage: string; plan_origin: string };
     expect(created.status).toBe('reviewing');
     expect(created.stage).toBe('planning');
+    expect(created.plan_origin).toBe('pending');
 
     const list = await app.inject({
       method: 'GET',
@@ -108,13 +113,17 @@ describe('research sessions', () => {
     expect(revised.statusCode).toBe(200);
     const revisedBody = revised.json() as {
       session: {
+        status: string;
         stage: string;
         plan: { summary: string } | null;
+        plan_origin: string;
         constraints: { region: string | null; time_range: string | null; language: string | null; must_cover: string[] };
       };
     };
+    expect(revisedBody.session.status).toBe('reviewing');
     expect(revisedBody.session.stage).toBe('planning');
     expect(revisedBody.session.plan).not.toBeNull();
+    expect(revisedBody.session.plan_origin).toBe('ai');
     expect(revisedBody.session.constraints.region).toBe('中国');
     expect(revisedBody.session.constraints.time_range).toBe('近 12 个月');
     expect(revisedBody.session.constraints.language).toBe('中文 + 英文');
@@ -144,12 +153,13 @@ describe('research sessions', () => {
     });
     expect(preview.statusCode).toBe(200);
     const previewBody = preview.json() as {
-      session: { status: string; stage: string; plan: { key_questions: unknown[] } | null };
+      session: { status: string; stage: string; plan: { key_questions: unknown[] } | null; plan_origin: string };
       tasks: unknown[];
     };
     expect(previewBody.session.status).toBe('reviewing');
     expect(previewBody.session.stage).toBe('planning');
     expect(previewBody.session.plan?.key_questions.length).toBeGreaterThan(0);
+    expect(previewBody.session.plan_origin).toBe('ai');
     expect(previewBody.tasks).toHaveLength(0);
 
     const confirm = await app.inject({
@@ -170,6 +180,130 @@ describe('research sessions', () => {
     expect(confirmBody.tasks.some((task) => task.status === 'queued')).toBe(true);
     expect(confirmBody.tasks.some((task) => task.title.includes('国产模型价格变化'))).toBe(true);
     expect(confirmBody.tasks.some((task) => task.input?.query?.includes('国产模型价格变化'))).toBe(true);
+  });
+
+  it('revises a generated plan before confirm with AI updates', async () => {
+    const create = await app.inject({
+      method: 'POST',
+      url: '/v1/research/sessions',
+      headers: { authorization: `Bearer ${bearer}`, 'content-type': 'application/json' },
+      payload: {
+        title: '国产模型价格变化',
+        objective: '梳理近一年的国产大模型价格趋势和对开发者的影响。',
+        output_kind: 'report',
+        budget_mode: 'balanced',
+        constraints: {
+          time_range: '近 12 个月',
+          region: '全球',
+          language: '中文 + 英文',
+          must_cover: ['价格'],
+        },
+      },
+    });
+    const created = create.json() as { id: string };
+
+    const preview = await app.inject({
+      method: 'POST',
+      url: `/v1/research/sessions/${created.id}/start`,
+      headers: { authorization: `Bearer ${bearer}`, 'content-type': 'application/json' },
+      payload: {},
+    });
+    expect(preview.statusCode).toBe(200);
+
+    const revised = await app.inject({
+      method: 'POST',
+      url: `/v1/research/sessions/${created.id}/plan/revise`,
+      headers: { authorization: `Bearer ${bearer}`, 'content-type': 'application/json' },
+      payload: {
+        feedback: '改为聚焦中国市场，优先中文资料，并加入价格战和免费额度维度。',
+      },
+    });
+    expect(revised.statusCode).toBe(200);
+    const revisedBody = revised.json() as {
+      session: {
+        status: string;
+        constraints: {
+          region: string | null;
+          language: string | null;
+          must_cover: string[];
+        };
+        plan: {
+          summary: string;
+        } | null;
+        plan_origin: string;
+        plan_messages: Array<{ role: string; content: string }>;
+      };
+      tasks: unknown[];
+    };
+    expect(revisedBody.session.status).toBe('reviewing');
+    expect(revisedBody.session.constraints.region).toBe('中国');
+    expect(revisedBody.session.constraints.language).toBe('中文');
+    expect(revisedBody.session.constraints.must_cover).toContain('价格战');
+    expect(revisedBody.session.constraints.must_cover).toContain('免费额度');
+    expect(revisedBody.session.plan?.summary).toContain('区域：中国');
+    expect(revisedBody.session.plan_origin).toBe('ai');
+    expect(revisedBody.session.plan_messages.at(-1)?.role).toBe('assistant');
+    expect(revisedBody.tasks).toHaveLength(0);
+  });
+
+  it('marks the session failed when plan generation exhausts retries', async () => {
+    process.env.TAORI_HERMETIC_AI_PLANNER = '0';
+    await app.close();
+    app = buildServer({
+      config: {
+        port: 0,
+        bearer,
+        dbPath,
+        controlUrl: null,
+        controlBearer: null,
+        isDev: false,
+        version: '0.0.0-test',
+      },
+      db,
+      control: new ControlClient({ url: null, bearer: null }),
+      keystore: new MemoryStore(),
+      startedAt: Date.now(),
+    });
+    await app.ready();
+
+    const create = await app.inject({
+      method: 'POST',
+      url: '/v1/research/sessions',
+      headers: { authorization: `Bearer ${bearer}`, 'content-type': 'application/json' },
+      payload: {
+        title: 'AI Coding 失败案例',
+        objective: '对比主要 AI Coding 产品定位、价格和分发策略。',
+        output_kind: 'comparison',
+        budget_mode: 'balanced',
+        constraints: {
+          time_range: '近 12 个月',
+        },
+      },
+    });
+    expect(create.statusCode).toBe(201);
+    const created = create.json() as { id: string };
+
+    await new Promise((resolve) => setTimeout(resolve, 1500));
+    const detail = await app.inject({
+      method: 'GET',
+      url: `/v1/research/sessions/${created.id}`,
+      headers: { authorization: `Bearer ${bearer}` },
+    });
+    expect(detail.statusCode).toBe(200);
+    const body = detail.json() as {
+      session: {
+        status: string;
+        stage: string;
+        plan: { summary: string } | null;
+        plan_origin: string;
+        plan_messages: Array<{ role: string; content: string }> | null;
+      };
+    };
+    expect(body.session.status).toBe('failed');
+    expect(body.session.stage).toBe('planning');
+    expect(body.session.plan).toBeNull();
+    expect(body.session.plan_origin).toBe('pending');
+    expect(body.session.plan_messages?.at(-1)?.content).toContain('研究计划生成失败');
   });
 
   it('pauses, resumes, cancels, and exports a research session', async () => {

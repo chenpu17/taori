@@ -333,8 +333,9 @@ export function Onboarding({ onDone, onSkip }: OnboardingProps): JSX.Element {
             price_per_video_second: m.price_per_video_second ?? null,
           })),
       });
-      setChosen('');
-      setChosenSet(new Set());
+      const recommendedId = disc.recommended.chat;
+      setChosenSet(new Set(recommendedId ? [recommendedId] : []));
+      setChosen(recommendedId ?? '');
       setStep('pick-model');
     } catch (e) {
       setStep('enter-key');

@@ -170,7 +170,9 @@ test.describe('interaction guardrails', () => {
 
     await page.goto('/');
     await page.getByTestId('composer-input').fill('请比较这三个候选模型在移动端上的可读性');
-    await page.getByTestId('composer-quick-compare').click();
+    await page.getByTestId('composer-tools-toggle').click();
+  await expect(page.getByTestId('composer-quick-compare')).toBeVisible();
+  await page.getByTestId('composer-quick-compare').click();
     const picker = page.getByTestId('quick-compare-picker');
     await expect(picker).toBeVisible();
     await expectHorizontallyWithinViewport(page, picker.locator('.quick-compare-picker-dialog'));

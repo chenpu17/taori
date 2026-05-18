@@ -49,7 +49,7 @@ function shouldClarifyBeforePlanning(session: Pick<ResearchSession, 'objective' 
   if ((session.constraints.must_cover ?? []).length > 0) return false;
   if (session.constraints.min_citations != null) return false;
   if (objective.length > 160) return false;
-  return /(市场格局|主要玩家|竞争格局|机会点|行业趋势|生态|全景|定位|策略|差异)/.test(objective);
+  return /(市场格局|主要玩家|竞争格局|机会点|行业趋势|生态|全景|定位|策略|差异|market\s+landscape|key\s+players|competitive\s+analysis|industry\s+trends|ecosystem|positioning|strategy|differentiation)/i.test(objective);
 }
 
 function buildClarificationMessage(session: Pick<ResearchSession, 'objective' | 'constraints'>): string {
@@ -70,7 +70,11 @@ function buildClarificationMessage(session: Pick<ResearchSession, 'objective' | 
   ].join('\n');
 }
 
-function mergeClarifiedConstraints(current: ResearchConstraints, feedback: string): ResearchConstraints {
+function mergeClarifiedConstraints(
+  current: ResearchConstraints,
+  feedback: string,
+  options?: { overwrite?: boolean },
+): ResearchConstraints {
   const next: ResearchConstraints = {
     time_range: current.time_range ?? null,
     region: current.region ?? null,
@@ -79,25 +83,26 @@ function mergeClarifiedConstraints(current: ResearchConstraints, feedback: strin
     min_citations: current.min_citations ?? null,
   };
   const text = feedback.trim();
-  if (!next.time_range) {
+  const overwrite = options?.overwrite === true;
+  if (!next.time_range || overwrite) {
     if (/近\s*6\s*个?月|最近半年|过去半年/.test(text)) next.time_range = '近 6 个月';
     else if (/近\s*12\s*个?月|最近一年|过去一年|近一年/.test(text)) next.time_range = '近 12 个月';
     else if (/近\s*24\s*个?月|最近两年|过去两年/.test(text)) next.time_range = '近 24 个月';
     else if (/近\s*3\s*年|最近三年|过去三年/.test(text)) next.time_range = '近 3 年';
   }
-  if (!next.region) {
+  if (!next.region || overwrite) {
     if (/(中国|国内)/.test(text)) next.region = '中国';
     else if (/(北美|美国|加拿大)/.test(text)) next.region = '北美';
     else if (/(欧洲|欧盟)/.test(text)) next.region = '欧洲';
     else if (/全球/.test(text)) next.region = '全球';
     else if (/(亚太|亚洲)/.test(text)) next.region = '亚太';
   }
-  if (!next.language) {
+  if (!next.language || overwrite) {
     if (/(中英|中文.*英文|英文.*中文)/.test(text)) next.language = '中文 + 英文';
     else if (/中文/.test(text)) next.language = '中文';
     else if (/英文/.test(text)) next.language = '英文';
   }
-  const mustCoverTerms = ['价格', '速度', '可用性', '风险', '生态', 'SLA', '稳定性', '文档', '社区', '延迟', '并发', '成本'];
+  const mustCoverTerms = ['价格', '价格战', '免费额度', '速度', '可用性', '风险', '生态', 'SLA', '稳定性', '文档', '社区', '延迟', '并发', '成本'];
   const mustCover = new Set(next.must_cover);
   for (const term of mustCoverTerms) {
     if (text.includes(term)) mustCover.add(term);
@@ -106,15 +111,8 @@ function mergeClarifiedConstraints(current: ResearchConstraints, feedback: strin
   return next;
 }
 
-function buildPlanFallback(session: ResearchSession, constraints: ResearchConstraints, notes: string[] = []) {
-  return buildResearchPlan({
-    title: session.title,
-    objective: session.objective,
-    outputKind: session.output_kind,
-    budgetMode: session.budget_mode,
-    constraints,
-    planningNotes: notes,
-  });
+function buildPlanningFailureMessage(error: string, attempts: number): string {
+  return `研究计划生成失败。已自动重试 ${attempts} 次，但仍未成功。${error} 你可以直接重试，或先检查默认模型 / Provider / API Key 配置。`;
 }
 
 export function registerResearchRoute(app: FastifyInstance, deps: ResearchRouteDeps): void {
@@ -128,6 +126,76 @@ export function registerResearchRoute(app: FastifyInstance, deps: ResearchRouteD
     keystore: deps.keystore,
     log: app.log,
   };
+
+  const activePlanControllers = new Map<string, AbortController>();
+
+  function queuePlanningAttempt(
+    session: ResearchSession,
+    options?: {
+      constraints?: ResearchConstraints;
+      planMessages?: PlanMessage[] | null;
+    },
+  ): void {
+    const nextConstraints = options?.constraints ?? session.constraints;
+    const existingMessages = options?.planMessages ?? session.plan_messages ?? [];
+    const planningSession: ResearchSession = {
+      ...session,
+      status: 'reviewing',
+      stage: 'planning',
+      constraints: nextConstraints,
+      plan: null,
+      plan_origin: 'pending',
+      plan_messages: existingMessages,
+    };
+    const controller = new AbortController();
+    activePlanControllers.set(session.id, controller);
+    setImmediate(() => {
+      void generateAIPlan(planningSession, plannerDeps, { abortSignal: controller.signal }).then((result) => {
+        activePlanControllers.delete(session.id);
+        if (controller.signal.aborted) return;
+        if (result.ok) {
+          repo.update(session.id, {
+            status: 'reviewing',
+            stage: 'planning',
+            constraints: nextConstraints,
+            plan: result.value,
+            plan_origin: 'ai',
+            plan_messages: [
+              ...existingMessages,
+              { role: 'assistant', content: result.value.summary, ts: Date.now() },
+            ],
+          });
+          return;
+        }
+        repo.update(session.id, {
+          status: 'failed',
+          stage: 'planning',
+          constraints: nextConstraints,
+          plan: null,
+          plan_origin: 'pending',
+          plan_messages: [
+            ...existingMessages,
+            { role: 'assistant', content: buildPlanningFailureMessage(result.error, result.attempts), ts: Date.now() },
+          ],
+        });
+      }).catch((err: unknown) => {
+        activePlanControllers.delete(session.id);
+        if (controller.signal.aborted) return;
+        app.log.error({ err }, 'Background AI planning failed unexpectedly');
+        repo.update(session.id, {
+          status: 'failed',
+          stage: 'planning',
+          constraints: nextConstraints,
+          plan: null,
+          plan_origin: 'pending',
+          plan_messages: [
+            ...existingMessages,
+            { role: 'assistant', content: buildPlanningFailureMessage('规划模型调用失败。', 3), ts: Date.now() },
+          ],
+        });
+      });
+    });
+  }
 
   app.get('/v1/research/sessions', async () => ({
     research_sessions: repo.list(),
@@ -156,16 +224,8 @@ export function registerResearchRoute(app: FastifyInstance, deps: ResearchRouteD
       return scoped;
     }
 
-    repo.update(session.id, { stage: 'planning' });
-    setImmediate(() => {
-      const fallbackPlan = () => buildPlanFallback(session, session.constraints);
-      void generateAIPlan(session, plannerDeps).then((plan) => {
-        repo.update(session.id, { plan: plan ?? fallbackPlan() });
-      }).catch((err: unknown) => {
-        app.log.error({ err }, 'Background AI planning failed');
-        repo.update(session.id, { plan: fallbackPlan() });
-      });
-    });
+    repo.update(session.id, { stage: 'planning', status: 'reviewing', plan_origin: 'pending' });
+    queuePlanningAttempt(session);
     const withSession = repo.getDetail(session.id)?.session ?? session;
     reply.code(201);
     return withSession;
@@ -198,7 +258,10 @@ export function registerResearchRoute(app: FastifyInstance, deps: ResearchRouteD
     if (!current) {
       throw new TaoriError({ code: 'not_found', message: `Research session ${req.params.id} not found` });
     }
-    if (current.status !== 'reviewing') {
+    const canRevise =
+      current.status === 'reviewing'
+      || (current.status === 'failed' && current.stage === 'planning' && !current.plan);
+    if (!canRevise) {
       throw new TaoriError({
         code: 'validation_error',
         message: `Cannot revise plan when session is in status ${current.status}`,
@@ -213,35 +276,64 @@ export function registerResearchRoute(app: FastifyInstance, deps: ResearchRouteD
       const nextMessages: PlanMessage[] = [...existingMessages, userMessage];
       const planningSession: ResearchSession = {
         ...current,
+        status: 'reviewing',
         constraints: nextConstraints,
         stage: 'planning',
         plan_messages: nextMessages,
       };
-      const aiPlan = await generateAIPlan(planningSession, plannerDeps);
-      const plan = aiPlan ?? buildPlanFallback(current, nextConstraints, [body.feedback]);
-      repo.update(current.id, {
-        stage: 'planning',
-        constraints: nextConstraints,
-        plan,
-        plan_messages: [
-          ...nextMessages,
-          { role: 'assistant', content: plan.summary, ts: Date.now() },
-        ],
-      });
-    } else {
-      const result = await revisePlan(current, body.feedback, plannerDeps);
-
-      if (result) {
-        const assistantMessage = { role: 'assistant' as const, content: result.assistantMessage, ts: Date.now() };
+      const result = await generateAIPlan(planningSession, plannerDeps);
+      if (result.ok) {
         repo.update(current.id, {
-          plan: result.plan,
-          plan_messages: [...existingMessages, userMessage, assistantMessage],
+          status: 'reviewing',
+          stage: 'planning',
+          constraints: nextConstraints,
+          plan: result.value,
+          plan_origin: 'ai',
+          plan_messages: [
+            ...nextMessages,
+            { role: 'assistant', content: result.value.summary, ts: Date.now() },
+          ],
         });
       } else {
         repo.update(current.id, {
-          plan_messages: [...existingMessages, userMessage],
+          status: 'failed',
+          stage: 'planning',
+          constraints: nextConstraints,
+          plan: null,
+          plan_origin: 'pending',
+          plan_messages: [
+            ...nextMessages,
+            { role: 'assistant', content: buildPlanningFailureMessage(result.error, result.attempts), ts: Date.now() },
+          ],
         });
       }
+    } else {
+      const nextConstraints = mergeClarifiedConstraints(current.constraints, body.feedback, { overwrite: true });
+      const planningSession: ResearchSession = {
+        ...current,
+        constraints: nextConstraints,
+        plan_messages: [...existingMessages, userMessage],
+      };
+      const result = await revisePlan(planningSession, body.feedback, plannerDeps);
+      if (!result.ok) {
+        throw new TaoriError({
+          code: 'internal',
+          message: buildPlanningFailureMessage(result.error, result.attempts),
+          can_retry: true,
+        });
+      }
+      const assistantMessage = {
+        role: 'assistant' as const,
+        content: result.value.assistantMessage,
+        ts: Date.now(),
+      };
+      repo.update(current.id, {
+        status: 'reviewing',
+        constraints: nextConstraints,
+        plan: result.value.plan,
+        plan_origin: 'ai',
+        plan_messages: [...existingMessages, userMessage, assistantMessage],
+      });
     }
 
     const detail = repo.getDetail(current.id);
@@ -269,10 +361,19 @@ export function registerResearchRoute(app: FastifyInstance, deps: ResearchRouteD
         message: '请先补充研究范围，Taori 再为你生成计划。',
       });
     }
-    // Use AI-generated plan if available, otherwise fall back to template
-    const plan = current.plan ?? buildPlanFallback(current, current.constraints);
+    if (!current.plan) {
+      throw new TaoriError({
+        code: 'validation_error',
+        message:
+          current.status === 'failed'
+            ? '研究计划生成失败，请先重试生成计划。'
+            : '研究计划仍在生成中，请稍后再试。',
+      });
+    }
+    const plan = current.plan;
     repo.update(current.id, {
       plan,
+      plan_origin: current.plan_origin,
       stage: 'planning',
       status: body.confirm ? 'running' : 'reviewing',
     });
@@ -319,6 +420,15 @@ export function registerResearchRoute(app: FastifyInstance, deps: ResearchRouteD
         message: `Research session cannot resume from status ${current.status}`,
       });
     }
+    if (current.status === 'failed' && !current.plan && current.stage === 'planning') {
+      repo.update(req.params.id, {
+        status: 'reviewing',
+        stage: 'planning',
+        plan_origin: 'pending',
+      });
+      queuePlanningAttempt(current);
+      return repo.getDetail(req.params.id);
+    }
     const detail = repo.getDetail(req.params.id);
     if (shouldRestartFailedSearchRun(detail)) {
       const plan = current.plan ?? buildResearchPlan({
@@ -353,6 +463,11 @@ export function registerResearchRoute(app: FastifyInstance, deps: ResearchRouteD
   });
 
   app.post<{ Params: { id: string } }>('/v1/research/sessions/:id/cancel', async (req) => {
+    const active = activePlanControllers.get(req.params.id);
+    if (active) {
+      active.abort();
+      activePlanControllers.delete(req.params.id);
+    }
     const row = repo.update(req.params.id, {
       status: 'cancelled',
       completed_at: Date.now(),

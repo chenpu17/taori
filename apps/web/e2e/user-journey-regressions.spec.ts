@@ -352,6 +352,8 @@ test('roundtable launched from an existing chat writes back into that chat and r
 
   const originalCid = await findConversationContaining('旅程基线：先聊一下 SaaS 定价');
   await page.getByTestId('composer-input').fill('A4 回写回归：如何选择 SaaS 计费模型？');
+  await page.getByTestId('composer-tools-toggle').click();
+  await expect(page.getByTestId('composer-roundtable')).toBeVisible();
   await page.getByTestId('composer-roundtable').click();
 
   const dlg = page.getByTestId('roundtable-launch-dialog');

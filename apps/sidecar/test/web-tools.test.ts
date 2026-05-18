@@ -226,6 +226,80 @@ describe('builtin web tools', () => {
     expect(fetchMock).toHaveBeenCalledTimes(3);
   });
 
+  it('web_search falls back to Exa when DuckDuckGo returns no results', async () => {
+    await app.close();
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(new Response('<html><body>No results</body></html>', {
+        status: 200,
+        headers: { 'content-type': 'text/html; charset=utf-8' },
+      }))
+      .mockResolvedValueOnce(new Response('<html><body>No results</body></html>', {
+        status: 200,
+        headers: { 'content-type': 'text/html; charset=utf-8' },
+      }))
+      .mockResolvedValueOnce(new Response([
+        'event: message',
+        'data: {"result":{"content":[{"text":"Title: Exa Empty Rescue\\nURL: https://example.com/exa-empty-rescue\\nDescription: Exa fallback after empty DDG"}]}}',
+      ].join('\n'), {
+        status: 200,
+        headers: { 'content-type': 'text/event-stream; charset=utf-8' },
+      }));
+    vi.stubGlobal('fetch', fetchMock);
+    app = await makeApp(db, dbPath);
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/v1/tools/invoke',
+      headers: { authorization: `Bearer ${bearer}`, 'content-type': 'application/json' },
+      payload: JSON.stringify({
+        name: 'builtin.web_search',
+        input: { query: 'empty search rescue' },
+      }),
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect(res.json().data.ok).toBe(true);
+    expect(res.json().data.output.engine).toBe('exa');
+    expect(res.json().data.output.fallback_from).toBe('duckduckgo');
+    expect(res.json().data.output.results[0]).toEqual({
+      title: 'Exa Empty Rescue',
+      url: 'https://example.com/exa-empty-rescue',
+      snippet: 'Exa fallback after empty DDG',
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+  });
+
+  it('web_search honors explicit engine override to Exa', async () => {
+    await app.close();
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(new Response([
+        'event: message',
+        'data: {"result":{"content":[{"text":"Title: Forced Exa\\nURL: https://example.com/forced-exa\\nDescription: Forced Exa snippet"}]}}',
+      ].join('\n'), {
+        status: 200,
+        headers: { 'content-type': 'text/event-stream; charset=utf-8' },
+      }));
+    vi.stubGlobal('fetch', fetchMock);
+    app = await makeApp(db, dbPath);
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/v1/tools/invoke',
+      headers: { authorization: `Bearer ${bearer}`, 'content-type': 'application/json' },
+      payload: JSON.stringify({
+        name: 'builtin.web_search',
+        input: { query: 'forced exa', engine: 'exa' },
+      }),
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect(res.json().data.ok).toBe(true);
+    expect(res.json().data.output.engine).toBe('exa');
+    expect(res.json().data.output.results[0]?.url).toBe('https://example.com/forced-exa');
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(String(fetchMock.mock.calls[0]?.[0])).toContain('mcp.exa.ai/mcp');
+  });
+
   it('web_search uses Exa when configured via memory', async () => {
     await app.close();
     vi.stubGlobal(

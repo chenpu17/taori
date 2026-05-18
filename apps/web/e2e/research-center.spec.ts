@@ -19,6 +19,8 @@ test('research center supports chatlike plan preview, lifecycle, and export', as
   await page.getByTestId('composer-input').fill(
     '梳理 2026 年 AI Coding 产品的定位、价格、速度与风险差异。',
   );
+  await page.getByTestId('composer-tools-toggle').click();
+  await expect(page.getByTestId('composer-deep-research')).toBeVisible();
   await page.getByTestId('composer-deep-research').click();
   await expect(page.getByTestId('research-center')).toBeVisible();
   await page.setViewportSize({ width: 1440, height: 440 });
@@ -44,6 +46,9 @@ test('research center supports chatlike plan preview, lifecycle, and export', as
 
   // Open advanced options and configure
   await page.locator('.research-center__advanced-opts summary').click();
+  // Synthesis-model picker should be present so users can pick a beefier model
+  // (e.g. Opus) for the research write-up without changing chat defaults.
+  await expect(page.getByTestId('research-input-synthesis-model')).toBeVisible();
   await page.getByTestId('research-input-output-kind').selectOption('comparison');
   await page.getByTestId('research-input-budget-mode').selectOption('deep');
   await page.getByTestId('research-input-budget-limit').fill('15');
@@ -63,20 +68,28 @@ test('research center supports chatlike plan preview, lifecycle, and export', as
   await expect(page.getByTestId('research-plan-preview')).toBeVisible({ timeout: 10_000 });
   await expect(page.getByTestId('research-center')).toContainText('待确认');
   await expect(page.getByTestId('research-action-confirm')).toBeVisible({ timeout: 30_000 });
+  await expect(page.getByTestId('research-plan-origin-pill')).toContainText('AI 生成');
   await expect(page.getByTestId(/sidebar-research-row-rs_/).first()).toBeVisible();
-  const previewBox = await page.getByTestId('research-plan-preview').boundingBox();
-  const dockBox = await page.getByTestId('research-followup-dock').boundingBox();
-  expect(Boolean(previewBox && dockBox && dockBox.y >= previewBox.y + previewBox.height - 1)).toBe(true);
+  await expect(page.getByTestId('research-followup-dock')).toHaveCount(0);
 
   await page.getByTestId('research-action-confirm').click();
 
   await expect(page.getByTestId('research-thread')).toBeVisible({ timeout: 10_000 });
   await expect(page.getByTestId('research-reading-pane')).toBeVisible();
+  await expect(page.getByTestId('research-report-overview')).toBeVisible();
+  await expect(page.getByTestId('research-report-overview')).toContainText('可采纳度');
+  await expect(page.getByTestId('research-report-overview')).toContainText('证据成熟度');
+  await expect(page.getByTestId('research-report-overview')).toContainText('主张可信度');
   await expect(page.getByTestId('research-evidence-panel')).toBeVisible();
-  await expect(page.getByTestId('research-followup-dock')).toBeVisible();
+  await expect(page.getByTestId('research-followup-dock')).toHaveCount(0);
+  await expect(page.getByTestId('research-action-back-home')).toBeVisible();
   await expect(page.getByTestId('research-task-list')).toBeVisible({ timeout: 10_000 });
   await expect(page.getByTestId('research-center')).toContainText(/进行中|已完成/);
   await expect(page.getByTestId('research-draft')).not.toContainText('（尚未生成草稿）');
+  // Citation verification panel sits next to the draft. In hermetic mode there is
+  // no real synthesis model so the agent falls back to the template path —
+  // verify the panel itself mounts so the UI wiring stays green.
+  await expect(page.getByTestId('research-citation-panel')).toBeVisible({ timeout: 10_000 });
 
   const canPause = await page.getByTestId('research-action-pause').isVisible().catch(() => false);
   if (canPause) {
@@ -107,6 +120,10 @@ test('research center supports chatlike plan preview, lifecycle, and export', as
     await page.getByTestId('research-action-cancel').click();
     await expect(page.getByTestId('research-center')).toContainText('已取消');
   }
+
+  await page.getByTestId('research-action-back-home').click();
+  await expect(page.getByText('像发消息一样开始一项研究')).toBeVisible();
+  await expect(page.getByTestId('research-input-objective')).toHaveValue('');
 });
 
 test('research center keeps market-analysis runs readable and collects evidence for the user scenario', async ({
@@ -135,6 +152,8 @@ test('research center keeps market-analysis runs readable and collects evidence 
   await expect(page.getByTestId('chat-panel')).toBeVisible({ timeout: 15_000 });
 
   await page.getByTestId('composer-input').fill('分析 2026 年 AI Coding 市场格局与主要玩家差异');
+  await page.getByTestId('composer-tools-toggle').click();
+  await expect(page.getByTestId('composer-deep-research')).toBeVisible();
   await page.getByTestId('composer-deep-research').click();
   await expect(page.getByTestId('research-center')).toBeVisible();
   await page.getByTestId('research-quick-start').click();
@@ -158,8 +177,48 @@ test('research center keeps market-analysis runs readable and collects evidence 
     timeout: 60_000,
   });
   await expect(page.getByTestId('research-source-list').locator('li').first()).toBeVisible({ timeout: 60_000 });
+  await expect(page.getByTestId('research-source-list')).toContainText(/官方|第三方|社区/, { timeout: 60_000 });
+  await expect(page.getByTestId('research-coverage-list')).toBeVisible({ timeout: 60_000 });
   await expect(page.getByTestId('research-reading-pane')).toBeVisible({ timeout: 60_000 });
+  await expect(page.getByTestId('research-report-overview')).toContainText(/可采纳度|覆盖成熟度/, { timeout: 60_000 });
   await expect(page.getByTestId('research-task-list')).toContainText(/轮检索|个站点/, { timeout: 60_000 });
   // Draft is now rendered as HTML — check for content rather than raw markdown syntax
   await expect(page.getByTestId('research-draft')).toContainText('证据');
+  await expect(page.getByTestId('research-followup-dock')).toHaveCount(0);
+  await expect(page.getByTestId('research-action-back-home')).toBeVisible();
+});
+
+test('research center lets users revise a reviewed plan before confirm without starting execution', async ({
+  page,
+}) => {
+  test.setTimeout(60_000);
+  await page.setViewportSize({ width: 1440, height: 820 });
+  await page.goto('/');
+  await expect(page.getByTestId('chat-panel')).toBeVisible({ timeout: 15_000 });
+
+  await page.getByTestId('composer-input').fill('对比中国主流大模型 API 的价格、速度与可用性');
+  await page.getByTestId('composer-tools-toggle').click();
+  await expect(page.getByTestId('composer-deep-research')).toBeVisible();
+  await page.getByTestId('composer-deep-research').click();
+  await expect(page.getByTestId('research-center')).toBeVisible();
+
+  await page.locator('.research-center__advanced-opts summary').click();
+  await page.getByTestId('research-input-time-range').fill('近 12 个月');
+  await page.getByTestId('research-input-region').fill('全球');
+  await page.getByTestId('research-input-language').fill('中文 + 英文');
+  await page.getByTestId('research-input-must-cover').fill('价格, 速度');
+  await page.getByTestId('research-quick-start').click();
+
+  await expect(page.getByTestId('research-plan-review')).toBeVisible({ timeout: 15_000 });
+  await expect(page.getByTestId('research-task-list')).toHaveCount(0);
+  await page.getByTestId('research-plan-feedback').fill('改为聚焦中国市场，优先中文资料，并加入价格战和免费额度维度。');
+  await page.getByTestId('research-plan-feedback-submit').click();
+
+  await expect(page.getByTestId('research-plan-origin-pill')).toContainText('AI 生成');
+  await expect(page.getByTestId('research-plan-review')).toContainText('区域：中国', { timeout: 20_000 });
+  await expect(page.getByTestId('research-plan-review')).toContainText('语言：中文');
+  await expect(page.getByTestId('research-plan-review')).toContainText('免费额度');
+  await expect(page.getByTestId('research-plan-review')).toContainText('价格战');
+  await expect(page.getByTestId('research-task-list')).toHaveCount(0);
+  await expect(page.getByTestId('research-action-confirm')).toBeVisible();
 });

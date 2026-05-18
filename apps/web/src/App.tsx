@@ -16,6 +16,8 @@ import { ThemeToggle } from './ThemeToggle.js';
 import { RoundtableLaunchDialog } from './Roundtable.js';
 import { RoundtablePanel } from './RoundtablePanel.js';
 import { ResearchCenter } from './ResearchCenter.js';
+import { ConfirmDialog } from './ConfirmDialog.js';
+import { RenameDialog } from './RenameDialog.js';
 import { priceTier, PRICE_TIER_LABEL, formatUsd, estimateInputTokens, estimateCostUsd } from '@taori/shared';
 import type {
   ContextSource,
@@ -916,9 +918,23 @@ function Workspace({
   const [debouncedQuery, setDebouncedQuery] = useState<string>('');
   const [batchMode, setBatchMode] = useState<boolean>(false);
   const [selectedConvIds, setSelectedConvIds] = useState<Set<string>>(new Set());
+  // Custom dialogs (replaces native window.confirm / prompt / alert)
+  const [confirmDialog, setConfirmDialog] = useState<{
+    title: string;
+    message: string;
+    onConfirm: () => void;
+  } | null>(null);
+  const [renameDialog, setRenameDialog] = useState<{
+    title: string;
+    defaultValue: string;
+    onConfirm: (v: string) => void;
+  } | null>(null);
+  const [inlineError, setInlineError] = useState<string | null>(null);
   // B1 — Command palette
   const [cmdPaletteOpen, setCmdPaletteOpen] = useState<boolean>(false);
   const [roundtableLaunchSeq, setRoundtableLaunchSeq] = useState(0);
+  const [quickCompareLaunchSeq, setQuickCompareLaunchSeq] = useState(0);
+  const [researchLaunchSeq, setResearchLaunchSeq] = useState(0);
   const [timelineFocus, setTimelineFocus] = useState<RunTimelineFocusTarget | null>(null);
   const [researchSessions, setResearchSessions] = useState<ResearchSession[]>([]);
   const [activeResearchId, setActiveResearchId] = useState<string | null>(null);
@@ -1158,31 +1174,44 @@ function Workspace({
     return () => window.removeEventListener('taori:focus-run-event', onFocusRun);
   }, []);
 
-  const onDeleteConv = async (id: string): Promise<void> => {
-    if (!window.confirm('确认删除该对话？此操作不可恢复。')) return;
-    try {
-      await api.deleteConversation(id);
-      if (activeConvId === id) {
-        setActiveConvId(null);
-        setChatKey((n) => n + 1);
-      }
-      await refreshConversations();
-    } catch (e) {
-      window.alert(`删除失败：${e instanceof Error ? e.message : String(e)}`);
-    }
+  const onDeleteConv = (id: string): void => {
+    setConfirmDialog({
+      title: '删除对话',
+      message: '确认删除该对话？此操作不可恢复。',
+      onConfirm: () => {
+        setConfirmDialog(null);
+        (async () => {
+          try {
+            await api.deleteConversation(id);
+            if (activeConvId === id) {
+              setActiveConvId(null);
+              setChatKey((n) => n + 1);
+            }
+            await refreshConversations();
+          } catch (e) {
+            setInlineError(`删除失败：${e instanceof Error ? e.message : String(e)}`);
+          }
+        })();
+      },
+    });
   };
 
-  const onRenameConv = async (id: string, current: string | null): Promise<void> => {
-    const next = window.prompt('重命名对话', current ?? '');
-    if (next === null) return;
-    const title = next.trim();
-    if (!title) return;
-    try {
-      await api.renameConversation(id, title);
-      await refreshConversations();
-    } catch (e) {
-      window.alert(`重命名失败：${e instanceof Error ? e.message : String(e)}`);
-    }
+  const onRenameConv = (id: string, current: string | null): void => {
+    setRenameDialog({
+      title: '重命名对话',
+      defaultValue: current ?? '',
+      onConfirm: (name: string) => {
+        setRenameDialog(null);
+        (async () => {
+          try {
+            await api.renameConversation(id, name);
+            await refreshConversations();
+          } catch (e) {
+            setInlineError(`重命名失败：${e instanceof Error ? e.message : String(e)}`);
+          }
+        })();
+      },
+    });
   };
 
   // C4 — pin / tag / batch handlers.
@@ -1191,7 +1220,7 @@ function Workspace({
       await api.setConversationPinned(id, next);
       await refreshConversations();
     } catch (e) {
-      window.alert(`设置置顶失败：${e instanceof Error ? e.message : String(e)}`);
+      setInlineError(`设置置顶失败：${e instanceof Error ? e.message : String(e)}`);
     }
   };
   const onSetTags = async (id: string, tags: string[]): Promise<void> => {
@@ -1199,7 +1228,7 @@ function Workspace({
       await api.setConversationTags(id, tags);
       await refreshConversations();
     } catch (e) {
-      window.alert(`保存标签失败：${e instanceof Error ? e.message : String(e)}`);
+      setInlineError(`保存标签失败：${e instanceof Error ? e.message : String(e)}`);
     }
   };
   const onToggleSelected = (id: string): void => {
@@ -1224,32 +1253,36 @@ function Workspace({
   const onClearSelected = (): void => {
     setSelectedConvIds(new Set());
   };
-  const onBatchDelete = async (): Promise<void> => {
+  const onBatchDelete = (): void => {
     if (selectedConvIds.size === 0) return;
-    if (
-      !window.confirm(
-        `确认批量删除 ${selectedConvIds.size} 条对话？此操作不可恢复。`,
-      )
-    )
-      return;
-    let activeWasDeleted = false;
-    for (const id of selectedConvIds) {
-      try {
-        await api.deleteConversation(id);
-        if (id === activeConvId) activeWasDeleted = true;
-      } catch (e) {
-        window.alert(
-          `删除失败 (${id})：${e instanceof Error ? e.message : String(e)}`,
-        );
-      }
-    }
-    if (activeWasDeleted) {
-      setActiveConvId(null);
-      setChatKey((n) => n + 1);
-    }
-    setSelectedConvIds(new Set());
-    setBatchMode(false);
-    await refreshConversations();
+    const idsToDelete = new Set(selectedConvIds);
+    setConfirmDialog({
+      title: '批量删除对话',
+      message: `确认批量删除 ${idsToDelete.size} 条对话？此操作不可恢复。`,
+      onConfirm: () => {
+        setConfirmDialog(null);
+        (async () => {
+          let activeWasDeleted = false;
+          for (const id of idsToDelete) {
+            try {
+              await api.deleteConversation(id);
+              if (id === activeConvId) activeWasDeleted = true;
+            } catch (e) {
+              setInlineError(
+                `删除失败 (${id})：${e instanceof Error ? e.message : String(e)}`,
+              );
+            }
+          }
+          if (activeWasDeleted) {
+            setActiveConvId(null);
+            setChatKey((n) => n + 1);
+          }
+          setSelectedConvIds(new Set());
+          setBatchMode(false);
+          await refreshConversations();
+        })();
+      },
+    });
   };
 
   useEffect(() => {
@@ -1326,6 +1359,8 @@ function Workspace({
             onOpenTools={onOpenTools}
             externalOverlayOpen={externalOverlayOpen}
             roundtableLaunchSeq={roundtableLaunchSeq}
+            quickCompareLaunchSeq={quickCompareLaunchSeq}
+            researchLaunchSeq={researchLaunchSeq}
             timelineFocus={timelineFocus}
             onTimelineFocusConsumed={() => setTimelineFocus(null)}
             onOpenResearch={(objective) => {
@@ -1355,10 +1390,47 @@ function Workspace({
         }}
         onOpenHelp={onOpenHelp}
         onOpenRoundtable={() => setRoundtableLaunchSeq((n) => n + 1)}
+        onOpenQuickCompare={() => setQuickCompareLaunchSeq((n) => n + 1)}
+        onOpenResearch={() => {
+          if (activeSurface === 'chat') {
+            setResearchLaunchSeq((n) => n + 1);
+          } else {
+            setActiveSurface('research');
+            setActiveResearchId(null);
+            void refreshResearchSessions();
+          }
+        }}
         conversations={conversations.map(c => ({ id: c.id, title: c.title, pinned: c.pinned, tags: c.tags }))}
         models={chatModels}
         providers={providers}
       />
+      <ConfirmDialog
+        open={confirmDialog != null}
+        title={confirmDialog?.title ?? ''}
+        message={confirmDialog?.message ?? ''}
+        danger
+        confirmLabel="删除"
+        onConfirm={confirmDialog?.onConfirm ?? (() => {})}
+        onCancel={() => setConfirmDialog(null)}
+      />
+      <RenameDialog
+        open={renameDialog != null}
+        title={renameDialog?.title ?? ''}
+        defaultValue={renameDialog?.defaultValue ?? ''}
+        onConfirm={renameDialog?.onConfirm ?? (() => {})}
+        onCancel={() => setRenameDialog(null)}
+      />
+      {inlineError && (
+        <div className="modal-backdrop" onClick={() => setInlineError(null)}>
+          <div className="confirm-dialog" role="alert" aria-modal="true" onClick={(e) => e.stopPropagation()}>
+            <h3>提示</h3>
+            <p>{inlineError}</p>
+            <div className="confirm-dialog__actions">
+              <button type="button" className="primary-btn" onClick={() => setInlineError(null)}>确定</button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -1480,11 +1552,11 @@ function renderHistoryRow(
   const isEditingTags = isConversation && cb.editingTagsForId === item.id;
   const checked = isConversation && cb.selectedIds.has(item.id);
   const title = item.title?.trim() || (isConversation ? '未命名对话' : '未命名研究');
-  const metaType = isConversation ? conversationTypeLabel(item.type) : '深度研究';
+  const metaType = isConversation ? conversationTypeLabel(item.type) : '研究';
   const metaTime = conversationTimeLabel(item.updated_at);
-  const metaSecondary = isConversation
-    ? metaTime
-    : `${researchStatusLabel(item.status)} · ${researchStageLabel(item.stage)}`;
+  const researchStatusText = !isConversation
+    ? `${researchStatusLabel(item.status)} · ${researchStageLabel(item.stage)}`
+    : null;
   const testId = isConversation ? 'conv-item' : `sidebar-research-row-${item.id}`;
   return (
     <li
@@ -1517,7 +1589,6 @@ function renderHistoryRow(
         className="conv-title"
         title={title}
       >
-        {isConversation && item.pinned ? <span className="conv-title-prefix" aria-hidden="true">📌</span> : null}
         {!isConversation ? <span className="conv-title-prefix conv-title-prefix--research" aria-hidden="true">🔎</span> : null}
         <span className={`conv-title-text${item.title?.trim() ? '' : ' is-placeholder'}`}>
           {renderHighlightedText(title, searchQuery)}
@@ -1566,8 +1637,12 @@ function renderHistoryRow(
       ) : null}
       <div className="conv-meta" aria-hidden="true">
         <span className={`conv-meta-type${isConversation && item.type === 'roundtable' ? ' is-roundtable' : ''}${isConversation ? '' : ' is-research'}`}>{metaType}</span>
-        <span className="conv-meta-sep">·</span>
-        <span className="conv-meta-time">{metaSecondary}</span>
+        {researchStatusText ? (
+          <>
+            <span className="conv-meta-sep">·</span>
+            <span className="conv-meta-status">{researchStatusText}</span>
+          </>
+        ) : null}
         <span className="conv-meta-sep">·</span>
         <span className="conv-meta-time">{metaTime}</span>
       </div>
@@ -1646,8 +1721,9 @@ function renderGroupedHistory(
   const rest = items.filter((item) => !(item.kind === 'conversation' && item.pinned));
   if (pinned.length > 0) {
     out.push(
-      <li key="g:pinned" className="conv-group-head" aria-hidden="true">
-        📌 已置顶
+      <li key="g:pinned" className="conv-group-head conv-group-head--pinned" aria-hidden="true">
+        <span className="conv-group-head__icon" aria-hidden="true">📌</span>
+        <span className="conv-group-head__label">置顶</span>
       </li>,
     );
     for (const item of pinned) {
@@ -1665,7 +1741,7 @@ function renderGroupedHistory(
       curLabel = label;
       out.push(
         <li key={`g:${label}`} className="conv-group-head" aria-hidden="true">
-          {label}
+          <span className="conv-group-head__label">{label}</span>
         </li>,
       );
     }
@@ -1793,46 +1869,46 @@ function Sidebar({
           value={searchQuery}
           onChange={(e) => onSearchQueryChange(e.target.value)}
         />
-      </div>
-      <div className="sidebar-batch-bar">
-        {batchMode ? (
-          <>
-            <span className="batch-count" data-testid="batch-count">
-              已选 {selectedIds.size}
-            </span>
-            <button
-              type="button"
-              data-testid="batch-select-all"
-              onClick={allVisibleSelected ? onClearSelected : onSelectAllVisible}
-              disabled={visibleConversationIds.size === 0}
-            >
-              {allVisibleSelected ? '清空选择' : '全选当前对话'}
-            </button>
-            <button
-              type="button"
-              data-testid="batch-delete"
-              onClick={onBatchDelete}
-              disabled={selectedIds.size === 0}
-            >
-              批量删除
-            </button>
-            <button type="button" data-testid="batch-cancel" onClick={onExitBatch}>
-              取消
-            </button>
-          </>
-        ) : (
+        {!batchMode && (
           <button
             type="button"
             data-testid="batch-enter"
-            className="batch-enter"
+            className="sidebar-batch-icon"
             onClick={onEnterBatch}
             disabled={visibleConversationIds.size === 0}
             title="批量选择"
+            aria-label="批量选择"
           >
-            ☑ 批量
+            ☑
           </button>
         )}
       </div>
+      {batchMode && (
+        <div className="sidebar-batch-bar">
+          <span className="batch-count" data-testid="batch-count">
+            已选 {selectedIds.size}
+          </span>
+          <button
+            type="button"
+            data-testid="batch-select-all"
+            onClick={allVisibleSelected ? onClearSelected : onSelectAllVisible}
+            disabled={visibleConversationIds.size === 0}
+          >
+            {allVisibleSelected ? '清空选择' : '全选当前对话'}
+          </button>
+          <button
+            type="button"
+            data-testid="batch-delete"
+            onClick={onBatchDelete}
+            disabled={selectedIds.size === 0}
+          >
+            批量删除
+          </button>
+          <button type="button" data-testid="batch-cancel" onClick={onExitBatch}>
+            取消
+          </button>
+        </div>
+      )}
       <ul className="conv-list" data-testid="conv-list">
         {historyItems.length === 0 ? (
           <li className="conv-empty">
@@ -1881,6 +1957,8 @@ function ChatPanel({
   onOpenResearch,
   externalOverlayOpen,
   roundtableLaunchSeq,
+  quickCompareLaunchSeq,
+  researchLaunchSeq,
   timelineFocus,
   onTimelineFocusConsumed,
   onLoopbackToConversation,
@@ -1902,6 +1980,8 @@ function ChatPanel({
   onOpenResearch: (objective: string) => void;
   externalOverlayOpen: boolean;
   roundtableLaunchSeq: number;
+  quickCompareLaunchSeq?: number;
+  researchLaunchSeq?: number;
   timelineFocus: RunTimelineFocusTarget | null;
   onTimelineFocusConsumed: () => void;
   /** A4 — RoundtablePanel SummaryCard "↪ 带回原对话" callback. */
@@ -2204,6 +2284,19 @@ function ChatPanel({
   const [personas, setPersonas] = useState<Persona[]>([]);
   const [selectedPersonaId, setSelectedPersonaId] = useState<string>(() => getPendingPersonaDraft());
   const [quickComparePickerOpen, setQuickComparePickerOpen] = useState(false);
+  const [toolsMenuOpen, setToolsMenuOpen] = useState(false);
+  const toolsMenuRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (!toolsMenuOpen) return;
+    const handleClick = (e: MouseEvent) => {
+      if (toolsMenuRef.current && toolsMenuRef.current.contains(e.target as Node)) return;
+      setToolsMenuOpen(false);
+    };
+    const handleKey = (e: KeyboardEvent) => { if (e.key === 'Escape') setToolsMenuOpen(false); };
+    document.addEventListener('click', handleClick);
+    document.addEventListener('keydown', handleKey);
+    return () => { document.removeEventListener('click', handleClick); document.removeEventListener('keydown', handleKey); };
+  }, [toolsMenuOpen]);
   const [promptAssetsLoaded, setPromptAssetsLoaded] = useState(false);
   const activePersona = useMemo(
     () => personas.find((p) => p.id === selectedPersonaId) ?? null,
@@ -3140,6 +3233,18 @@ function ChatPanel({
     if (roundtableLaunchSeq <= 0) return;
     setRoundtableDialog({ initialTopic: input.trim() });
   }, [roundtableLaunchSeq, input]);
+
+  useEffect(() => {
+    if (!quickCompareLaunchSeq || quickCompareLaunchSeq <= 0) return;
+    setQuickComparePickerOpen(true);
+  }, [quickCompareLaunchSeq]);
+
+  useEffect(() => {
+    if (!researchLaunchSeq || researchLaunchSeq <= 0) return;
+    const objective = input.trim();
+    onOpenResearch(objective);
+    if (objective) setInput('');
+  }, [input, onOpenResearch, researchLaunchSeq]);
 
   useLayoutEffect(() => {
     const ta = composerRef.current;
@@ -4491,7 +4596,7 @@ function ChatPanel({
   const quickCompareDisabledReason = !input.trim()
     ? '先输入要比较的问题'
     : quickCompareEligibleModels.length < 2
-      ? 'Quick Compare 至少需要 2 个可用聊天模型'
+      ? '快速对比至少需要 2 个可用聊天模型'
       : pendingHasImage && !model.supports_vision
         ? '当前模型不能处理待发送图片'
         : null;
@@ -4585,8 +4690,8 @@ function ChatPanel({
         compareId: null,
         running: false,
         error: currentModelEligible
-          ? 'Quick Compare 至少需要 2 个可用聊天模型。'
-          : '当前会话模型暂不可用于 Quick Compare，请切换到启用中的聊天或多模态模型后重试。',
+          ? '快速对比至少需要 2 个可用聊天模型。'
+          : '当前会话模型暂不可用于快速对比，请切换到启用中的聊天或多模态模型后重试。',
         outputs: [],
         requestText: prompt,
         requestedToolIntent: normalizedConfigs.some((item) => item.toolNames.length > 0),
@@ -4683,7 +4788,7 @@ function ChatPanel({
       setQuickCompare({
         compareId: null,
         running: false,
-        error: e instanceof Error ? e.message : 'Quick Compare 失败',
+        error: e instanceof Error ? e.message : '快速对比失败',
         outputs: [],
         requestText: prompt,
         requestedToolIntent: normalizedConfigs.some((item) => item.toolNames.length > 0),
@@ -4739,7 +4844,7 @@ function ChatPanel({
     try {
       if (mode === 'copy') {
         await copyToClipboard(markdown);
-        setQuickCompareReportAction({ kind: 'copied', message: 'Decision Report 已复制到剪贴板。' });
+        setQuickCompareReportAction({ kind: 'copied', message: '对比报告已复制到剪贴板。' });
         return;
       }
       const blob = new Blob([markdown], { type: 'text/markdown;charset=utf-8' });
@@ -4751,7 +4856,7 @@ function ChatPanel({
       anchor.click();
       anchor.remove();
       URL.revokeObjectURL(url);
-      setQuickCompareReportAction({ kind: 'exported', message: 'Decision Report Markdown 已下载。' });
+      setQuickCompareReportAction({ kind: 'exported', message: '对比报告 Markdown 已下载。' });
     } catch (error) {
       setQuickCompareReportAction({
         kind: 'error',
@@ -5507,7 +5612,7 @@ function ChatPanel({
         >
           <div className="quick-compare-head">
             <div>
-              <strong>Quick Compare</strong>
+              <h3 className="qc-heading">快速对比</h3>
               <span>一次对比多个模型回答，并自动生成可采纳的决策报告。</span>
             </div>
             <button
@@ -5530,7 +5635,7 @@ function ChatPanel({
             >
               <div className="quick-compare-arbitration__head">
                 <div>
-                  <strong>Decision Report</strong>
+                  <h4>对比报告</h4>
                   <span>推荐先采纳 {quickCompareArbitration.title}</span>
                 </div>
                 <span
@@ -5994,59 +6099,76 @@ function ChatPanel({
           </button>
         ) : (
           <>
-            <button
-              type="button"
-              data-testid="composer-import-clipboard"
-              className="roundtable-btn clipboard-import-btn"
-              title="把桌面剪贴板中的文本 / 截图带入当前问答"
-              disabled={desktopImporting || !desktopClipboardAvailable}
-              onClick={() => {
-                setDesktopImporting(true);
-                void import('@tauri-apps/api/core')
-                  .then(({ invoke }) => invoke('import_clipboard'))
-                  .catch((error) => {
-                    clearDesktopImportTimeout();
-                    setDesktopImporting(false);
-                    setDropError(error instanceof Error ? error.message : String(error));
-                  });
-              }}
-            >
-              {desktopImporting ? '📋 导入中…' : '📋 剪贴板'}
-            </button>
-            <button
-              type="button"
-              data-testid="composer-quick-compare"
-              className="roundtable-btn quick-compare-btn"
-              title={quickCompareDisabledReason ?? '一键并行对比 2-3 个模型回答'}
-              disabled={quickCompareDisabled}
-              onClick={() => setQuickComparePickerOpen(true)}
-            >
-              ⚡ 对比
-            </button>
-            <button
-              type="button"
-              data-testid="composer-deep-research"
-              className="roundtable-btn research-btn"
-              title="把当前问题作为研究目标，进入深度研究视图"
-              onClick={() => {
-                const objective = input.trim();
-                onOpenResearch(objective);
-                if (objective) setInput('');
-              }}
-            >
-              🔎 研究
-            </button>
-            <button
-              type="button"
-              data-testid="composer-roundtable"
-              className="roundtable-btn"
-              title="🔍 圆桌讨论：让多个模型从不同视角围绕同一话题讨论"
-              onClick={() =>
-                setRoundtableDialog({ initialTopic: input })
-              }
-            >
-              🔍 圆桌
-            </button>
+            <div className="composer-tools-wrapper" ref={toolsMenuRef}>
+              <button
+                type="button"
+                className="composer-tools-trigger"
+                onClick={() => setToolsMenuOpen(v => !v)}
+                data-testid="composer-tools-toggle"
+              >
+                ⚡ 工具
+              </button>
+              {toolsMenuOpen ? (
+                <div className="composer-tools-dropdown">
+                  <button
+                    type="button"
+                    data-testid="composer-import-clipboard"
+                    className="composer-tools-item"
+                    title="把桌面剪贴板中的文本 / 截图带入当前问答"
+                    disabled={desktopImporting || !desktopClipboardAvailable}
+                    onClick={() => {
+                      setToolsMenuOpen(false);
+                      setDesktopImporting(true);
+                      void import('@tauri-apps/api/core')
+                        .then(({ invoke }) => invoke('import_clipboard'))
+                        .catch((error) => {
+                          clearDesktopImportTimeout();
+                          setDesktopImporting(false);
+                          setDropError(error instanceof Error ? error.message : String(error));
+                        });
+                    }}
+                  >
+                    {desktopImporting ? '📋 导入中…' : '📋 剪贴板'}
+                  </button>
+                  <button
+                    type="button"
+                    data-testid="composer-quick-compare"
+                    className="composer-tools-item"
+                    title={quickCompareDisabledReason ?? '一键并行对比 2-3 个模型回答'}
+                    disabled={quickCompareDisabled}
+                    onClick={() => { setToolsMenuOpen(false); setQuickComparePickerOpen(true); }}
+                  >
+                    ⚡ 对比
+                  </button>
+                  <button
+                    type="button"
+                    data-testid="composer-deep-research"
+                    className="composer-tools-item"
+                    title="把当前问题作为研究目标，进入深度研究视图"
+                    onClick={() => {
+                      setToolsMenuOpen(false);
+                      const objective = input.trim();
+                      onOpenResearch(objective);
+                      if (objective) setInput('');
+                    }}
+                  >
+                    🔎 研究
+                  </button>
+                  <button
+                    type="button"
+                    data-testid="composer-roundtable"
+                    className="composer-tools-item"
+                    title="🔍 圆桌讨论：让多个模型从不同视角围绕同一话题讨论"
+                    onClick={() => {
+                      setToolsMenuOpen(false);
+                      setRoundtableDialog({ initialTopic: input });
+                    }}
+                  >
+                    🔍 圆桌
+                  </button>
+                </div>
+              ) : null}
+            </div>
             <button
               type="submit"
               disabled={!input.trim() || (pending.some((p) => p.kind === 'image') && !model.supports_vision)}
@@ -7327,7 +7449,7 @@ function buildQuickCompareDecisionReportMarkdown(
   providers: Provider[],
 ): string {
   const sections: string[] = [
-    '# Decision Report',
+    '# 对比报告',
     '',
     `- 推荐方案：${arbitration.title}`,
     `- 置信度：${arbitration.confidence === 'high' ? '高' : arbitration.confidence === 'medium' ? '中' : '低'}`,
@@ -7391,7 +7513,7 @@ function buildQuickCompareFollowUpPrompt(
   arbitration: QuickCompareArbitrationSummary,
 ): string {
   const lines = [
-    `请基于刚才的 Quick Compare Decision Report，继续把推荐方案“${arbitration.title}”推进成可执行结论。`,
+    `请基于刚才的快速对比报告，继续把推荐方案“${arbitration.title}”推进成可执行结论。`,
   ];
   if (quickCompare.requestText?.trim()) {
     lines.push('', `原始问题：${quickCompare.requestText.trim()}`);
@@ -7421,7 +7543,7 @@ function buildQuickCompareMinorityReviewPrompt(
   arbitration: QuickCompareArbitrationSummary,
 ): string {
   const lines = [
-    `请站在“少数意见优先复核”的角度，重新审视刚才的 Quick Compare 结论。当前推荐方案是“${arbitration.title}”。`,
+    `请站在“少数意见优先复核”的角度，重新审视刚才的快速对比结论。当前推荐方案是“${arbitration.title}”。`,
     `如果少数意见“${arbitration.minorityTitle ?? '无明显分歧列'}”有道理，请明确指出它在哪些前提下比推荐方案更值得采用。`,
   ];
   if (quickCompare.requestText?.trim()) {
@@ -7544,7 +7666,7 @@ function QuickCompareModelPickerDialog({
       <form
         className="picker-dialog quick-compare-picker-dialog"
         role="dialog"
-        aria-label="选择 Quick Compare 模型"
+        aria-label="选择快速对比模型"
         onSubmit={(e) => {
           e.preventDefault();
           if (canSubmit) onSubmit(draftConfigs);

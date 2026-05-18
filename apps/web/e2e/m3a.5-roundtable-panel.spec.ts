@@ -59,6 +59,8 @@ test('M3.A.5 round 1 all-failed → failure cells render with retry buttons', as
 
   // Launch dialog → analyzer fallback → continue.
   await page.getByTestId('composer-input').fill('需要选 ORM 框架');
+  await page.getByTestId('composer-tools-toggle').click();
+  await expect(page.getByTestId('composer-roundtable')).toBeVisible();
   await page.getByTestId('composer-roundtable').click();
   const dlg = page.getByTestId('roundtable-launch-dialog');
   await expect(dlg).toBeVisible();
@@ -97,6 +99,8 @@ test('M3.A.5 panel restores on page reload (state restoration §5.3)', async ({
   await expect(page.getByTestId('chat-panel')).toBeVisible({ timeout: 10_000 });
 
   await page.getByTestId('composer-input').fill('需要选 ORM 框架');
+  await page.getByTestId('composer-tools-toggle').click();
+  await expect(page.getByTestId('composer-roundtable')).toBeVisible();
   await page.getByTestId('composer-roundtable').click();
   const dlg = page.getByTestId('roundtable-launch-dialog');
   await dlg.getByTestId('roundtable-launch-start').click();
@@ -126,6 +130,8 @@ test('M3.A.5 cost label visible in panel header', async ({ page }) => {
   await expect(page.getByTestId('chat-panel')).toBeVisible({ timeout: 10_000 });
 
   await page.getByTestId('composer-input').fill('需要选 ORM 框架');
+  await page.getByTestId('composer-tools-toggle').click();
+  await expect(page.getByTestId('composer-roundtable')).toBeVisible();
   await page.getByTestId('composer-roundtable').click();
   const dlg = page.getByTestId('roundtable-launch-dialog');
   await dlg.getByTestId('roundtable-launch-start').click();
@@ -277,6 +283,8 @@ test('M3.A.5 completed summary shows save-template and history compare', async (
   await page.goto('/');
   await expect(page.getByTestId('chat-panel')).toBeVisible({ timeout: 10_000 });
   await page.getByTestId('composer-input').fill('需要选 ORM 框架');
+  await page.getByTestId('composer-tools-toggle').click();
+  await expect(page.getByTestId('composer-roundtable')).toBeVisible();
   await page.getByTestId('composer-roundtable').click();
   const dlg = page.getByTestId('roundtable-launch-dialog');
   await dlg.getByTestId('roundtable-launch-start').click();
@@ -413,6 +421,8 @@ test('M3.A.5 deep round content stays scrollable and summary JSON is hidden', as
   await page.goto('/');
   await expect(page.getByTestId('chat-panel')).toBeVisible({ timeout: 10_000 });
   await page.getByTestId('composer-input').fill('孔子和老子的贡献谁更大');
+  await page.getByTestId('composer-tools-toggle').click();
+  await expect(page.getByTestId('composer-roundtable')).toBeVisible();
   await page.getByTestId('composer-roundtable').click();
 
   const dlg = page.getByTestId('roundtable-launch-dialog');
@@ -549,6 +559,8 @@ test('M3.A.5 completed summary remains reachable when content is long', async ({
   await page.goto('/');
   await expect(page.getByTestId('chat-panel')).toBeVisible({ timeout: 10_000 });
   await page.getByTestId('composer-input').fill('孔子和老子的贡献谁更大');
+  await page.getByTestId('composer-tools-toggle').click();
+  await expect(page.getByTestId('composer-roundtable')).toBeVisible();
   await page.getByTestId('composer-roundtable').click();
 
   const dlg = page.getByTestId('roundtable-launch-dialog');

@@ -233,6 +233,8 @@ async function runQuickCompare(
 ): Promise<void> {
   const selectedCount = options?.selectedCount ?? 3;
   await page.getByTestId('composer-input').fill(prompt);
+  await page.getByTestId('composer-tools-toggle').click();
+  await expect(page.getByTestId('composer-quick-compare')).toBeVisible();
   await page.getByTestId('composer-quick-compare').click();
   const picker = page.getByTestId('quick-compare-picker');
   await expect(picker).toBeVisible({ timeout: 10_000 });

@@ -259,6 +259,8 @@ test('roundtable participant uses MCP tool and renders tool trace in web panel',
   await page.getByTestId('settings-close').click();
 
   await page.getByTestId('composer-input').fill('请用 MCP 工具补充证据，讨论这个技术方案是否值得推进');
+  await page.getByTestId('composer-tools-toggle').click();
+  await expect(page.getByTestId('composer-roundtable')).toBeVisible();
   await page.getByTestId('composer-roundtable').click();
   const dlg = page.getByTestId('roundtable-launch-dialog');
   await expect(dlg).toBeVisible();

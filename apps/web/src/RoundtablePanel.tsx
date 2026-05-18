@@ -529,6 +529,7 @@ export function RoundtablePanel(props: RoundtablePanelProps): ReactElement {
   return (
     <div className="roundtable-panel" data-testid="roundtable-panel">
       <header className="roundtable-header">
+        <button className="roundtable-back-btn" onClick={onExit}>← 返回对话</button>
         <div>
           <strong>话题：</strong>
           {rt.topic}

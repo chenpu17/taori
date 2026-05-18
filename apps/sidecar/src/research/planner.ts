@@ -210,6 +210,27 @@ function buildPlanStopConditions(input: {
   return items;
 }
 
+function buildDeterministicSearchStrategy(input: {
+  title: string;
+  objective: string;
+  outputKind: ResearchOutputKind;
+  constraints: ResearchConstraints;
+}): string {
+  const subject = extractSubject(input.title, input.objective);
+  const scope = describeScope(input.constraints);
+  const scopeNote = scope.length > 0 ? `；当前约束：${scope.join('；')}` : '';
+  if (input.outputKind === 'comparison') {
+    return `首先对 ${subject} 做宽广的厂商/产品盘点（recon），明确对比对象边界；随后逐家查官方文档与定价页（site: 限定到官方域），并辅以第三方评测/benchmark 获取独立口径；最后用近 12 个月的新闻或更新公告核实当前是否仍代表主推方案${scopeNote}。`;
+  }
+  if (input.outputKind === 'decision') {
+    return `先用宽广查询确认 ${subject} 的当前主流路径与替代方案；然后针对推荐方向查官方文档+案例研究，针对风险方向查事故/合规/局限性讨论；最后用近期分析文章或用户反馈交叉验证假设是否仍成立${scopeNote}。`;
+  }
+  if (input.outputKind === 'brief') {
+    return `用 2-3 条宽广查询快速建立 ${subject} 的核心事实；优先抓官方与权威媒体口径；用一条近期新闻确认时效性${scopeNote}。`;
+  }
+  return `先用宽广关键词探查 ${subject} 的研究图景与主要观点；然后分别查官方一手资料、第三方评测与学术讨论；最后用最新公告或事件核实关键数字是否过时${scopeNote}。`;
+}
+
 export function buildResearchPlan(input: {
   title: string;
   objective: string;
@@ -219,6 +240,15 @@ export function buildResearchPlan(input: {
   planningNotes?: string[];
 }): ResearchPlan {
   const questions = buildPlanQuestions(input);
+  // Assign coarse scope tags so even the deterministic / hermetic plan shows
+  // wide→narrow ordering hints in the UI. Order matches buildPlanQuestions:
+  // first focus (scope/quality) is recon, middle focuses are deep_dive, the
+  // closing recommendation is verification.
+  const scopeForIndex = (i: number, total: number): 'recon' | 'deep_dive' | 'verification' => {
+    if (i === 0) return 'recon';
+    if (i === total - 1) return 'verification';
+    return 'deep_dive';
+  };
   return {
     summary: buildPlanSummary(input),
     output_kind: input.outputKind,
@@ -227,7 +257,10 @@ export function buildResearchPlan(input: {
       id: `q${index + 1}`,
       question: item.prompt,
       reason: item.label,
+      scope: scopeForIndex(index, questions.length),
     })),
+    expected_outline: sectionHeadings(input.outputKind),
+    search_strategy: buildDeterministicSearchStrategy(input),
     stages: [
       {
         id: 'scoping',
@@ -279,12 +312,18 @@ function buildSearchQuery(parts: string[]): string {
     seen.add(normalized);
     deduped.push(part.trim());
   }
-  return deduped
+  const protectedOperators: string[] = [];
+  const placeholderText = deduped
     .join(' ')
+    .replace(/\bsite:[^\s]+/gi, (match) => {
+      protectedOperators.push(match);
+      return `__site_operator_${protectedOperators.length - 1}__`;
+    })
     .replace(/[：:；;，,。！？!?（）()\[\]【】"']/g, ' ')
     .replace(/\s+/g, ' ')
-    .trim()
-    .slice(0, 160);
+    .trim();
+  const restored = placeholderText.replace(/__site_operator_(\d+)__/g, (_match, index) => protectedOperators[Number(index)] ?? '');
+  return restored.slice(0, 160);
 }
 
 function constraintSearchHints(constraints?: ResearchConstraints): string[] {
@@ -294,7 +333,21 @@ function constraintSearchHints(constraints?: ResearchConstraints): string[] {
   if (constraints.region?.trim()) hints.push(constraints.region.trim());
   if (constraints.language?.trim()) hints.push(constraints.language.trim());
   if ((constraints.must_cover ?? []).length > 0) hints.push(constraints.must_cover.join(' '));
+  hints.push(...recencySearchHints(constraints));
   return hints;
+}
+
+function recencySearchHints(constraints?: ResearchConstraints): string[] {
+  const currentYear = new Date().getFullYear();
+  const previousYear = currentYear - 1;
+  const timeRange = constraints?.time_range?.trim() ?? '';
+  if (/近\s*6\s*个?月|最近半年|过去半年|近\s*12\s*个?月|最近一年|过去一年|近一年/i.test(timeRange)) {
+    return [`${currentYear}`, `${previousYear}`, '最新', '当前'];
+  }
+  if (/近\s*24\s*个?月|最近两年|过去两年|近\s*3\s*年|最近三年|过去三年/i.test(timeRange)) {
+    return [`${currentYear}`, `${previousYear}`, '最新'];
+  }
+  return ['最新'];
 }
 
 function normalizeSearchChunk(value: string): string {
@@ -350,6 +403,106 @@ function searchFollowupTracks(reason: string): string[][] {
   ];
 }
 
+const CHINA_MODEL_API_VENDOR_SPECS = [
+  { label: 'DeepSeek', aliases: ['DeepSeek'], officialDomain: 'api-docs.deepseek.com' },
+  { label: '通义千问', aliases: ['通义千问', '阿里云百炼', 'DashScope'], officialDomain: 'dashscope.aliyuncs.com' },
+  { label: '豆包', aliases: ['豆包', '火山方舟', 'Doubao'], officialDomain: 'www.volcengine.com' },
+  { label: 'GLM', aliases: ['GLM', '智谱', 'BigModel'], officialDomain: 'open.bigmodel.cn' },
+  { label: '文心一言', aliases: ['文心一言', '千帆', 'ERNIE'], officialDomain: 'cloud.baidu.com' },
+  { label: '混元', aliases: ['混元', '腾讯混元', 'Hunyuan'], officialDomain: 'cloud.tencent.com' },
+] as const;
+
+function looksLikePriceQuery(text: string): boolean {
+  return /(价格|定价|计费|token|pricing|price|models?|模型清单|model list)/i.test(text);
+}
+
+function looksLikePerformanceQuery(text: string): boolean {
+  return /(首\s*token|ttft|延迟|响应时间|总响应时间|总耗时|吞吐|benchmark|latency|throughput|tps|速度)/i.test(text);
+}
+
+function looksLikeAvailabilityQuery(text: string): boolean {
+  return /(可用性|sla|并发|限流|rate limit|rpm|tpm|qps|status|状态页|稳定性|availability)/i.test(text);
+}
+
+function looksLikeOfficialQuery(text: string): boolean {
+  return /(官方|官网|文档|公告|docs?|documentation|official|api)/i.test(text);
+}
+
+function looksLikeChinaModelApiLandscape(text: string): boolean {
+  return /((中国|国产|主流).*(大模型|模型).*(api|API))|((大模型|模型)\s*API)/.test(text);
+}
+
+type RecoveryIntent = 'price' | 'performance' | 'availability' | 'official' | 'general';
+
+function inferRecoveryIntent(text: string): RecoveryIntent {
+  if (looksLikePerformanceQuery(text)) return 'performance';
+  if (looksLikePriceQuery(text)) return 'price';
+  if (looksLikeAvailabilityQuery(text)) return 'availability';
+  if (looksLikeOfficialQuery(text)) return 'official';
+  return 'general';
+}
+
+function recoveryEnglishHints(text: string): string[] {
+  switch (inferRecoveryIntent(text)) {
+    case 'price':
+      return ['API pricing token price official docs'];
+    case 'performance':
+      return ['first token latency throughput benchmark'];
+    case 'availability':
+      return ['API SLA concurrency rate limit official docs'];
+    case 'official':
+      return ['official docs developer API'];
+    default:
+      return ['official docs benchmark review'];
+  }
+}
+
+function vendorRecoveryTerms(text: string): string[] {
+  switch (inferRecoveryIntent(text)) {
+    case 'price':
+      return ['API 定价 官方 文档'];
+    case 'performance':
+      return ['API 延迟 吞吐 实测 benchmark 评测'];
+    case 'availability':
+      return ['API SLA 并发 限流 状态页 官方 文档'];
+    case 'official':
+      return ['API 官方 文档'];
+    default:
+      return ['API 文档 评测'];
+  }
+}
+
+function vendorRecoveryQuery(
+  vendor: (typeof CHINA_MODEL_API_VENDOR_SPECS)[number],
+  text: string,
+  scopeHints: string[],
+): string {
+  const vendorHint = vendor.aliases.join(' ');
+  const terms = vendorRecoveryTerms(text);
+  if (inferRecoveryIntent(text) === 'performance') {
+    return buildSearchQuery([vendorHint, ...scopeHints, ...terms]);
+  }
+  return buildSearchQuery([vendorHint, `site:${vendor.officialDomain}`, ...scopeHints, ...terms]);
+}
+
+export function classifySearchFailureReason(input: {
+  title: string;
+  objective: string;
+  question: string;
+  reason: string;
+  attemptedRecovery?: boolean;
+}): 'no_usable_results' | 'query_too_narrow' | 'needs_official_sources' | 'needs_benchmark_sources' {
+  const hay = `${input.title} ${input.objective} ${input.question} ${input.reason}`;
+  const questionHay = `${input.question} ${input.reason}`;
+  const intent = inferRecoveryIntent(questionHay) !== 'general' ? inferRecoveryIntent(questionHay) : inferRecoveryIntent(hay);
+  if (intent === 'performance') return 'needs_benchmark_sources';
+  if (intent === 'price' || intent === 'availability' || intent === 'official') {
+    return 'needs_official_sources';
+  }
+  if (input.attemptedRecovery) return 'query_too_narrow';
+  return 'no_usable_results';
+}
+
 export function buildSearchQueries(input: {
   title: string;
   objective: string;
@@ -377,6 +530,72 @@ export function buildSearchQueries(input: {
   );
   const maxQueries = input.budgetMode === 'fast' ? 1 : input.budgetMode === 'balanced' ? 2 : 3;
   return [base, ...followups].filter(Boolean).filter((value, index, arr) => arr.indexOf(value) === index).slice(0, maxQueries);
+}
+
+export function buildSearchRecoveryQueries(input: {
+  title: string;
+  objective: string;
+  question: { question: string; reason: string };
+  budgetMode: ResearchBudgetMode;
+  constraints?: ResearchConstraints;
+  originalQueries?: string[];
+}): string[] {
+  const scopeHints = constraintSearchHints(input.constraints);
+  const hay = `${input.title} ${input.objective} ${input.question.question} ${input.question.reason}`;
+  const questionHay = `${input.question.question} ${input.question.reason}`;
+  const intentHay = inferRecoveryIntent(questionHay) !== 'general' ? questionHay : hay;
+  const subject = extractSubject(input.title, input.objective);
+  const queries: string[] = [];
+
+  if (looksLikeChinaModelApiLandscape(hay) && inferRecoveryIntent(intentHay) !== 'general') {
+    const vendorLimit = input.budgetMode === 'fast' ? 2 : input.budgetMode === 'balanced' ? 6 : CHINA_MODEL_API_VENDOR_SPECS.length;
+    for (const vendor of CHINA_MODEL_API_VENDOR_SPECS.slice(0, vendorLimit)) {
+      queries.push(vendorRecoveryQuery(vendor, intentHay, scopeHints));
+    }
+  }
+
+  queries.push(
+    buildSearchQuery([
+      input.question.question.trim(),
+      ...scopeHints,
+    ]),
+    buildSearchQuery([
+      subject,
+      input.question.reason.trim(),
+      ...scopeHints,
+      ...recoveryEnglishHints(intentHay),
+    ]),
+  );
+
+  if (inferRecoveryIntent(intentHay) === 'price') {
+    queries.push(
+      buildSearchQuery([subject, ...scopeHints, '官方 模型清单 token 价格']),
+      buildSearchQuery([subject, ...scopeHints, 'API pricing token price official docs']),
+    );
+  }
+
+  if (inferRecoveryIntent(intentHay) === 'performance') {
+    queries.push(
+      buildSearchQuery(['国产 大模型 API', ...scopeHints, '延迟 吞吐 实测 benchmark 评测']),
+      buildSearchQuery([subject, ...scopeHints, '首 token 延迟 吞吐 benchmark']),
+      buildSearchQuery([subject, ...scopeHints, 'first token latency throughput benchmark']),
+    );
+  }
+
+  if (inferRecoveryIntent(intentHay) === 'availability') {
+    queries.push(
+      buildSearchQuery([subject, ...scopeHints, '官方 SLA 并发 限流 状态页']),
+      buildSearchQuery([subject, ...scopeHints, 'API SLA concurrency rate limit official docs']),
+    );
+  }
+
+  const maxQueries = input.budgetMode === 'fast' ? 4 : input.budgetMode === 'balanced' ? 8 : 10;
+  const blocked = new Set((input.originalQueries ?? []).map((item) => item.trim()).filter(Boolean));
+  return queries
+    .filter(Boolean)
+    .filter((value, index, arr) => arr.indexOf(value) === index)
+    .filter((value) => !blocked.has(value))
+    .slice(0, maxQueries);
 }
 
 export function buildResearchTasks(input: {

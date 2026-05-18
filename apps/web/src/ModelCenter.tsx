@@ -15,6 +15,7 @@
 import { Fragment, useEffect, useMemo, useState } from 'react';
 import type { FormEvent, JSX } from 'react';
 import { api } from './api.js';
+import { ConfirmDialog } from './ConfirmDialog.js';
 import {
   formatUsd,
   isChatCapable,
@@ -395,6 +396,11 @@ export function ModelCenter({
   const [providerKeyCheckedAt, setProviderKeyCheckedAt] = useState<number | null>(null);
   const [providerKeyError, setProviderKeyError] = useState<string | null>(null);
   const [monthlyModelCosts, setMonthlyModelCosts] = useState<Map<string, number>>(new Map());
+  const [confirmDialog, setConfirmDialog] = useState<{
+    title: string;
+    message: string;
+    onConfirm: () => void;
+  } | null>(null);
   const syncing = syncingTarget !== null;
 
   const refresh = async (): Promise<void> => {
@@ -654,26 +660,42 @@ export function ModelCenter({
     }
   };
 
-  const onDelete = async (m: Model): Promise<void> => {
-    if (!window.confirm(`删除模型 “${m.display_name}”？`)) return;
-    try {
-      await api.deleteModel(m.id);
-      await refresh();
-      onChanged?.();
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
-    }
+  const onDelete = (m: Model): void => {
+    setConfirmDialog({
+      title: '删除模型',
+      message: `删除模型 “${m.display_name}”？`,
+      onConfirm: () => {
+        setConfirmDialog(null);
+        (async () => {
+          try {
+            await api.deleteModel(m.id);
+            await refresh();
+            onChanged?.();
+          } catch (e) {
+            setError(e instanceof Error ? e.message : String(e));
+          }
+        })();
+      },
+    });
   };
 
-  const onDeleteProvider = async (p: Provider): Promise<void> => {
-    if (!window.confirm(`删除 Provider “${p.name}”？该 Provider 下的全部模型将一并删除。`)) return;
-    try {
-      await api.deleteProvider(p.id);
-      await refresh();
-      onChanged?.();
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
-    }
+  const onDeleteProvider = (p: Provider): void => {
+    setConfirmDialog({
+      title: '删除 Provider',
+      message: `删除 Provider “${p.name}”？该 Provider 下的全部模型将一并删除。`,
+      onConfirm: () => {
+        setConfirmDialog(null);
+        (async () => {
+          try {
+            await api.deleteProvider(p.id);
+            await refresh();
+            onChanged?.();
+          } catch (e) {
+            setError(e instanceof Error ? e.message : String(e));
+          }
+        })();
+      },
+    });
   };
 
   const onMove = async (m: Model, dir: -1 | 1): Promise<void> => {
@@ -1638,6 +1660,15 @@ export function ModelCenter({
           onSave={(patch) => void onSaveEdit(patch)}
         />
       )}
+      <ConfirmDialog
+        open={confirmDialog != null}
+        title={confirmDialog?.title ?? ''}
+        message={confirmDialog?.message ?? ''}
+        danger
+        confirmLabel="删除"
+        onConfirm={confirmDialog?.onConfirm ?? (() => {})}
+        onCancel={() => setConfirmDialog(null)}
+      />
     </div>
   );
 }

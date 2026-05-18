@@ -236,6 +236,8 @@ test('chat research can branch into roundtable, return the conclusion, and conti
   expect(originalConvId).toBeTruthy();
 
   await page.getByTestId('composer-input').fill('围绕 SaaS 计费模型，请发起圆桌讨论');
+  await page.getByTestId('composer-tools-toggle').click();
+  await expect(page.getByTestId('composer-roundtable')).toBeVisible();
   await page.getByTestId('composer-roundtable').click();
   const dlg = page.getByTestId('roundtable-launch-dialog');
   await expect(dlg).toBeVisible();

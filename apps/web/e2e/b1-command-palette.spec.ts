@@ -75,6 +75,19 @@ test('B1: Command palette ⌘K / Ctrl+K search, navigate, keyboard', async ({ pa
   await expect(fixedResults.first()).toBeVisible();
   console.log('✓ Fixed commands visible when query empty');
 
+  // --- 5b. Fixed command aliases make global navigation discoverable
+  await page.getByTestId('cmd-palette-input').fill('预算');
+  await page.waitForTimeout(300);
+  const costResult = page.locator('[data-testid="cmd-result"][data-category="costs"]');
+  await expect(costResult).toBeVisible();
+  await expect(costResult).toContainText('查看预算');
+  await page.getByTestId('cmd-palette-input').fill('api key');
+  await page.waitForTimeout(300);
+  const modelCenterResult = page.locator('[data-testid="cmd-result"][data-category="models-center"]');
+  await expect(modelCenterResult).toBeVisible();
+  await expect(modelCenterResult).toContainText('管理供应商');
+  console.log('✓ Fixed command aliases returned useful actions');
+
   // --- 6. Press Enter to select (should close palette and switch conv/model)
   await page.getByTestId('cmd-palette-input').fill('hello');
   await page.waitForTimeout(300);

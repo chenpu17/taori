@@ -252,6 +252,8 @@ test('R5 user journey: onboarding → chat → fallback → image → roundtable
   await page.getByTestId('sidebar-new').click();
   await expect(page.getByTestId('composer-form')).toBeVisible();
   await page.getByTestId('composer-input').fill('如何选 SaaS 计费模型？');
+  await page.getByTestId('composer-tools-toggle').click();
+  await expect(page.getByTestId('composer-roundtable')).toBeVisible();
   await page.getByTestId('composer-roundtable').click();
 
   const dlg = page.getByTestId('roundtable-launch-dialog');
