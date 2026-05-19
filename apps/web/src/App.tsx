@@ -12,6 +12,7 @@ import { DiscoverableTip, TIPS, shouldShowTip } from './DiscoverableTip.js';
 import { EmptyState } from './EmptyState.js';
 import { StatusNotice } from './StatusNotice.js';
 import { TaoriIcon } from './TaoriIcon.js';
+import { Icon } from './Icon.js';
 import { ThemeToggle } from './ThemeToggle.js';
 import { RoundtableLaunchDialog } from './Roundtable.js';
 import { RoundtablePanel } from './RoundtablePanel.js';
@@ -123,6 +124,15 @@ interface QuickCompareCostLogRow {
   success: boolean;
 }
 
+function getGreetingPrefix(now: Date = new Date()): string {
+  const hour = now.getHours();
+  if (hour < 5) return '夜深了，';
+  if (hour < 11) return '早安，';
+  if (hour < 13) return '中午好，';
+  if (hour < 18) return '下午好，';
+  return '晚上好，';
+}
+
 function quickCompareLabelKey(model: Model, providers: Provider[]): string {
   return modelDisplayWithProvider(model, providers).trim().toLowerCase();
 }
@@ -152,30 +162,24 @@ function formatQuickCompareModelLabel(
   return suffix ? `${label} · ${suffix}` : label;
 }
 
-const STARTER_PROMPTS: Array<{ icon: string; title: string; desc: string; text: string }> = [
+const STARTER_PROMPTS: Array<{ label: string; title: string; desc: string; text: string }> = [
   {
-    icon: '⚖️',
-    title: '比较模型',
-    desc: '让多个模型同时回答',
-    text: '请用一段话比较 GPT-4o 和 Claude 3.5 Sonnet 在长文本写作上的差异。',
+    label: 'WRITE',
+    title: '把这段笔记织成文章',
+    desc: '保留你的语气，自动补结构与衔接',
+    text: '帮我把这段笔记整理成一篇结构清晰、语气自然的中文文章：\n\n',
   },
   {
-    icon: '✍️',
-    title: '写作助手',
-    desc: '草拟一份内容初稿',
-    text: '帮我写一段产品发布的中文公告，强调多模型协作、成本透明与本地优先。',
+    label: 'CODE',
+    title: '解释这段错误堆栈',
+    desc: '逐行解释 + 给出最小可复现修复',
+    text: '我贴一段错误堆栈，请你逐行解释原因并给出最小可复现修复：\n\n',
   },
   {
-    icon: '🐞',
-    title: '调试代码',
-    desc: '解释一段错误堆栈',
-    text: '我贴一段 TypeScript 错误堆栈，请你逐行解释原因并给出修复建议：\n\n',
-  },
-  {
-    icon: '💡',
-    title: '头脑风暴',
-    desc: '快速展开一个想法',
-    text: '我想给一个桌面 AI 助手加“工作流模板”，请提出 10 个可行的模板方向，每条一句话。',
+    label: 'COMPARE',
+    title: '两个模型比一比',
+    desc: '同一个 prompt 并排，引用与成本一目了然',
+    text: '请用同一个 prompt 对比两个模型的回答质量、依据充分性和成本差异：\n\n',
   },
 ];
 
@@ -696,7 +700,6 @@ export function App(): JSX.Element {
           <span className="brand__name">Taori</span>
         </h1>
         <span className="header-actions">
-          <ThemeToggle />
           <StatusBadge endpoint={endpoint} health={health} error={endpointError} />
           {endpoint && health?.ok && (
             <button
@@ -711,7 +714,7 @@ export function App(): JSX.Element {
               aria-label="成本看板"
               title="成本看板"
             >
-              💸
+              <Icon name="cost" />
             </button>
           )}
           {endpoint && health?.ok && (
@@ -723,7 +726,7 @@ export function App(): JSX.Element {
               aria-label="模型中心"
               title="模型中心"
             >
-              🧬
+              <Icon name="model" />
             </button>
           )}
           {endpoint && health?.ok && (
@@ -735,7 +738,7 @@ export function App(): JSX.Element {
               aria-label="使用帮助"
               title="使用帮助"
             >
-              ？
+              <Icon name="cmd" />
             </button>
           )}
           {endpoint && health?.ok && (
@@ -747,7 +750,7 @@ export function App(): JSX.Element {
               aria-label="设置"
               title="设置"
             >
-              ⚙
+              <Icon name="settings" />
             </button>
           )}
         </span>
@@ -1325,6 +1328,7 @@ function Workspace({
         onSelectAllVisible={onSelectAllVisible}
         onClearSelected={onClearSelected}
         onBatchDelete={() => void onBatchDelete()}
+        onOpenSettings={onOpenSettings}
       />
       <main className="workspace-main">
         {activeSurface === 'research' ? (
@@ -1776,6 +1780,7 @@ function Sidebar({
   onSelectAllVisible,
   onClearSelected,
   onBatchDelete,
+  onOpenSettings,
 }: {
   conversations: ConversationSummary[];
   researchSessions: ResearchSession[];
@@ -1799,6 +1804,7 @@ function Sidebar({
   onSelectAllVisible: () => void;
   onClearSelected: () => void;
   onBatchDelete: () => void;
+  onOpenSettings: () => void;
 }): JSX.Element {
   const [editingTagsForId, setEditingTagsForId] = useState<string | null>(null);
   const [tagDraft, setTagDraft] = useState<string>('');
@@ -1857,15 +1863,30 @@ function Sidebar({
   };
   return (
     <aside className="sidebar" data-testid="sidebar" data-mode={activeSurface}>
+      <div className="sidebar-brand" aria-label="Taori workspace">
+        <span className="sidebar-brand__mark" aria-hidden="true">
+          <TaoriIcon size={30} />
+        </span>
+        <span className="sidebar-brand__name">
+          Ta<em>o</em>ri
+        </span>
+      </div>
       <button type="button" className="new-chat" onClick={onNew} data-testid="sidebar-new">
-        🆕 新对话
+        <span className="new-chat__lead">
+          <Icon name="plus" size={14} />
+          <span>新建对话</span>
+        </span>
+        <kbd>⌘ N</kbd>
       </button>
       <div className="sidebar-search">
+        <span className="sidebar-search__icon" aria-hidden="true">
+          <Icon name="search" size={14} />
+        </span>
         <input
           type="search"
           className="conv-search"
           data-testid="conv-search"
-          placeholder="搜索最近记录…"
+          placeholder="搜索对话、模板、Persona…"
           value={searchQuery}
           onChange={(e) => onSearchQueryChange(e.target.value)}
         />
@@ -1879,7 +1900,7 @@ function Sidebar({
             title="批量选择"
             aria-label="批量选择"
           >
-            ☑
+            <Icon name="check-square" size={14} />
           </button>
         )}
       </div>
@@ -1911,30 +1932,35 @@ function Sidebar({
       )}
       <ul className="conv-list" data-testid="conv-list">
         {historyItems.length === 0 ? (
-          <li className="conv-empty">
+          <li className="conv-empty conv-empty--quiet">
             {searchQuery ? (
-              <EmptyState
-                title="没有匹配的记录"
-                hint="试试换个关键词，或清空搜索查看全部内容。"
-                icon="⌕"
-                compact
-                tone="muted"
-                testId="conv-empty-search"
-              />
+              <div className="conv-empty-quiet" data-testid="conv-empty-search">
+                <span className="conv-empty-quiet__title">没有匹配的记录</span>
+                <span className="conv-empty-quiet__hint">试试换个关键词，或清空搜索。</span>
+              </div>
             ) : (
-              <EmptyState
-                title="暂无对话记录"
-                hint="试试上方“新对话”开始第一轮交流，也可以从输入框直接发消息或发起深度研究。"
-                icon="💬"
-                compact
-                testId="conv-empty-default"
-              />
+              <div className="conv-empty-quiet" data-testid="conv-empty-default">
+                <span className="conv-empty-quiet__title">还没有对话</span>
+                <span className="conv-empty-quiet__hint">从上方“新建对话”，或在下方输入框直接开聊。</span>
+              </div>
             )}
           </li>
         ) : (
           renderGroupedHistory(historyItems, activeSurface, activeId, activeResearchId, searchQuery, cb)
         )}
       </ul>
+      <div className="sidebar-footer" aria-label="本机状态">
+        <div className="sidebar-footer__user">
+          <span className="sidebar-footer__avatar">陈</span>
+          <span className="sidebar-footer__name">本机 · 多模型工作台</span>
+        </div>
+        <div className="sidebar-footer__actions">
+          <ThemeToggle />
+          <button type="button" onClick={onOpenSettings} title="设置" aria-label="设置">
+            <Icon name="settings" size={14} />
+          </button>
+        </div>
+      </div>
     </aside>
   );
 }
@@ -2286,6 +2312,7 @@ function ChatPanel({
   const [quickComparePickerOpen, setQuickComparePickerOpen] = useState(false);
   const [toolsMenuOpen, setToolsMenuOpen] = useState(false);
   const toolsMenuRef = useRef<HTMLDivElement>(null);
+  const fileAttachRef = useRef<HTMLInputElement | null>(null);
   useEffect(() => {
     if (!toolsMenuOpen) return;
     const handleClick = (e: MouseEvent) => {
@@ -2310,9 +2337,9 @@ function ChatPanel({
       const raw = window.localStorage.getItem('taori.chat.ribbon.collapsed');
       if (raw === '0') return false;
       if (raw === '1') return true;
-      return false; // default expanded; user can collapse and we remember it
+      return true; // default collapsed to keep the chat surface close to the design draft.
     } catch {
-      return false;
+      return true;
     }
   });
   useEffect(() => {
@@ -5089,72 +5116,20 @@ function ChatPanel({
   return (
     <div className="chat" data-testid="chat-panel" data-active-conv={conversationId ?? ''}>
       <div className="chat-header">
-        <ModelSelector
-          models={chatModels}
-          providers={providers}
-          activeId={model.id}
-          memoryScope={modelMemoryScope}
-          onChange={changeModelAndClearFailure}
-        />
-        <button
-          type="button"
-          className="header-chip-btn"
-          data-testid="open-template-picker"
-          onClick={() => setTemplatePickerOpen(true)}
-        >
-          模板市场
-        </button>
-        <label className="persona-select-wrap">
-          <span className="persona-select-label">Persona</span>
-          <select
-            className="persona-select"
-            value={activePersona ? selectedPersonaId : ''}
-            onChange={(e) => void onPersonaChange(e.target.value)}
-            data-testid="persona-select"
-          >
-            <option value="">无 Persona</option>
-            {personas.map((persona) => (
-              <option key={persona.id} value={persona.id}>
-                {persona.name}
-              </option>
-            ))}
-          </select>
-          <span
-            className={`scope-chip scope-${activePersona ? (conversationId ? 'session' : 'pending') : 'none'}`}
-            data-testid="persona-memory-scope"
-            title={
-              activePersona
-                ? conversationId
-                  ? '该 Persona 已作为当前会话的覆盖配置保存。'
-                  : '新会话尚未创建；发送第一条消息后会绑定到该会话。'
-                : '当前会话不附加 Persona。'
-            }
-          >
-            {activePersona ? (conversationId ? '本会话' : '待绑定') : '未绑定'}
+        <div className="chat-title-stack" aria-label="当前工作区">
+          <strong>
+            {conversationType === 'roundtable'
+              ? '多模型圆桌'
+              : conversationId
+                ? '继续对话'
+                : '新对话'}
+          </strong>
+          <span>
+            {conversationId
+              ? `${messages.length} 条消息 · ${realtime ? formatUsd(realtime.current_conversation_usd) : '成本同步中'}`
+              : '选择一个起点，或直接开聊'}
           </span>
-        </label>
-        {tier && (
-          <span className={`price-badge tier-${tier}`} data-testid="price-tier">
-            {PRICE_TIER_LABEL[tier]}
-          </span>
-        )}
-        {model.supports_vision && (
-          <span className="vision-pill" data-testid="vision-pill" title="支持视觉输入">
-            👁
-          </span>
-        )}
-        {conversationType !== 'roundtable' && (
-          <button
-            type="button"
-            className="header-chip-btn"
-            data-testid="chat-export-markdown"
-            disabled={!conversationId || exportBusy}
-            onClick={() => void exportConversation()}
-            title={conversationId ? '导出当前会话为 Markdown' : '发送第一条消息后可导出'}
-          >
-            {exportBusy ? '导出中…' : '导出'}
-          </button>
-        )}
+        </div>
         <button
           type="button"
           className={`ribbon-toggle ${ribbonCollapsed ? 'collapsed' : 'expanded'}`}
@@ -5254,8 +5229,13 @@ function ChatPanel({
         )}
         {!historyLoading && messages.length === 0 && (
           <div className="starter" data-testid="starter">
-            <h2 className="starter-title">你今天在想些什么？</h2>
-            <p className="starter-sub">直接输入问题，或选择一个更轻量的起步方式。</p>
+            <div className="starter-mark" aria-hidden="true">
+              <TaoriIcon size={36} />
+            </div>
+            <h2 className="starter-title">{getGreetingPrefix()}让我们把今天的问题<em> 织 </em>起来。</h2>
+            <p className="starter-sub">
+              Taori 把多个模型像丝线一样织成一条不间断的工作流。模型挂了、慢了、太贵了，我会帮你换路继续做事。
+            </p>
             <div className="starter-actions">
               <button
                 type="button"
@@ -5263,7 +5243,9 @@ function ChatPanel({
                 data-testid="starter-open-research"
                 onClick={() => onOpenResearch('')}
               >
-                🔎 深度研究
+                <span className="starter-chip__label">WEAVE</span>
+                <span className="starter-chip__title">让三个模型一起讨论</span>
+                <span className="starter-chip__desc">从不同视角拆解问题，再织成一个结论</span>
               </button>
               {STARTER_PROMPTS.map((p, i) => (
                 <button
@@ -5274,8 +5256,9 @@ function ChatPanel({
                   onClick={() => setInput(p.text)}
                   title={p.desc}
                 >
-                  <span aria-hidden="true">{p.icon}</span>
-                  <span>{p.title}</span>
+                  <span className="starter-chip__label">{p.label}</span>
+                  <span className="starter-chip__title">{p.title}</span>
+                  <span className="starter-chip__desc">{p.desc}</span>
                 </button>
               ))}
             </div>
@@ -6088,17 +6071,54 @@ function ChatPanel({
             ta.style.height = Math.min(ta.scrollHeight, 200) + 'px';
           }}
         />
-        {isLoading ? (
-          <button
-            type="button"
-            onClick={onStopClick}
-            className="abort-btn"
-            data-testid="composer-stop"
-          >
-            ■ 停止
-          </button>
-        ) : (
-          <>
+        <div className="composer__bar">
+          {isLoading ? (
+            <button
+              type="button"
+              onClick={onStopClick}
+              className="abort-btn"
+              data-testid="composer-stop"
+            >
+              <Icon name="stop" size={12} />
+              <span>停止</span>
+            </button>
+          ) : (
+            <>
+            {/* Hidden file input for the 文件 toolbar button */}
+            <input
+              ref={fileAttachRef}
+              type="file"
+              accept="image/*,.pdf,.txt,.md,.markdown"
+              multiple
+              style={{ display: 'none' }}
+              onChange={async (e) => {
+                const all = Array.from(e.target.files ?? []);
+                if (all.length === 0) return;
+                const classified = all.map(classifyDropFile);
+                const accepted = classified.filter((c) => c.kind !== null);
+                const next: PendingAttachment[] = [];
+                for (const c of accepted) {
+                  try {
+                    const data_b64 = await fileToBase64(c.file);
+                    next.push({ kind: c.kind!, mime: c.file.type || 'application/octet-stream', name: c.file.name, data_b64 });
+                  } catch { /* skip */ }
+                }
+                if (next.length > 0) {
+                  setPending((p) => [...p, ...next]);
+                  maybePromoteVisionModel(next);
+                }
+                e.target.value = '';
+              }}
+            />
+            <button
+              type="button"
+              className="composer-tool-btn"
+              title="添加文件 / 图片（或直接拖放）"
+              onClick={() => fileAttachRef.current?.click()}
+            >
+              <Icon name="paperclip" size={13} />
+              <span>文件</span>
+            </button>
             <div className="composer-tools-wrapper" ref={toolsMenuRef}>
               <button
                 type="button"
@@ -6106,7 +6126,8 @@ function ChatPanel({
                 onClick={() => setToolsMenuOpen(v => !v)}
                 data-testid="composer-tools-toggle"
               >
-                ⚡ 工具
+                <Icon name="tools" size={13} />
+                <span>工具</span>
               </button>
               {toolsMenuOpen ? (
                 <div className="composer-tools-dropdown">
@@ -6128,7 +6149,8 @@ function ChatPanel({
                         });
                     }}
                   >
-                    {desktopImporting ? '📋 导入中…' : '📋 剪贴板'}
+                    <Icon name="copy" size={13} />
+                    <span>{desktopImporting ? '导入中…' : '剪贴板'}</span>
                   </button>
                   <button
                     type="button"
@@ -6138,7 +6160,8 @@ function ChatPanel({
                     disabled={quickCompareDisabled}
                     onClick={() => { setToolsMenuOpen(false); setQuickComparePickerOpen(true); }}
                   >
-                    ⚡ 对比
+                    <Icon name="spark" size={13} />
+                    <span>对比</span>
                   </button>
                   <button
                     type="button"
@@ -6152,7 +6175,8 @@ function ChatPanel({
                       if (objective) setInput('');
                     }}
                   >
-                    🔎 研究
+                    <Icon name="search" size={13} />
+                    <span>研究</span>
                   </button>
                   <button
                     type="button"
@@ -6164,21 +6188,95 @@ function ChatPanel({
                       setRoundtableDialog({ initialTopic: input });
                     }}
                   >
-                    🔍 圆桌
+                    <Icon name="thread" size={13} />
+                    <span>圆桌</span>
                   </button>
                 </div>
               ) : null}
             </div>
             <button
+              type="button"
+              className="header-chip-btn composer-template-btn"
+              data-testid="open-template-picker"
+              onClick={() => setTemplatePickerOpen(true)}
+            >
+              模板
+            </button>
+            <label className="persona-select-wrap">
+              <span className="persona-select-label">Persona</span>
+              <select
+                className="persona-select"
+                value={activePersona ? selectedPersonaId : ''}
+                onChange={(e) => void onPersonaChange(e.target.value)}
+                data-testid="persona-select"
+              >
+                <option value="">无 Persona</option>
+                {personas.map((persona) => (
+                  <option key={persona.id} value={persona.id}>
+                    {persona.name}
+                  </option>
+                ))}
+              </select>
+              <span
+                className={`scope-chip scope-${activePersona ? (conversationId ? 'session' : 'pending') : 'none'}`}
+                data-testid="persona-memory-scope"
+                title={
+                  activePersona
+                    ? conversationId
+                      ? '该 Persona 已作为当前会话的覆盖配置保存。'
+                      : '新会话尚未创建；发送第一条消息后会绑定到该会话。'
+                    : '当前会话不附加 Persona。'
+                }
+              >
+                {activePersona ? (conversationId ? '本会话' : '待绑定') : '未绑定'}
+              </span>
+            </label>
+            {tier && (
+              <span className={`price-badge tier-${tier}`} data-testid="price-tier">
+                {PRICE_TIER_LABEL[tier]}
+              </span>
+            )}
+            {model.supports_vision && (
+              <span className="vision-pill" data-testid="vision-pill" title="支持视觉输入">
+                <Icon name="image" size={12} />
+              </span>
+            )}
+            {conversationType !== 'roundtable' && (
+              <button
+                type="button"
+                className="header-chip-btn composer-export-btn"
+                data-testid="chat-export-markdown"
+                disabled={!conversationId || exportBusy}
+                onClick={() => void exportConversation()}
+                title={conversationId ? '导出当前会话为 Markdown' : '发送第一条消息后可导出'}
+              >
+                {exportBusy ? '导出中…' : '导出'}
+              </button>
+            )}
+            <ModelSelector
+              models={chatModels}
+              providers={providers}
+              activeId={model.id}
+              memoryScope={modelMemoryScope}
+              onChange={changeModelAndClearFailure}
+            />
+            <button
               type="submit"
               disabled={!input.trim() || (pending.some((p) => p.kind === 'image') && !model.supports_vision)}
               data-testid="composer-send"
+              aria-label="发送"
+              title="发送"
             >
-              发送
+              <Icon name="arrow-up" size={14} />
             </button>
-          </>
-        )}
+            </>
+          )}
+        </div>
       </form>
+      <div className="composer__hint">
+        <span>本地优先 · BYOK · 对话不会上传到 Taori 服务器</span>
+        <span><kbd>⌘</kbd> + <kbd>↵</kbd> 发送 · <kbd>⇧</kbd> + <kbd>↵</kbd> 换行</span>
+      </div>
       {budgetToast && (
         <div
           className={`budget-toast budget-toast-${budgetToast.threshold === 100 ? 'over' : budgetToast.threshold >= 80 ? 'warn' : 'half'}`}
