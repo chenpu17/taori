@@ -52,18 +52,22 @@ test('capability ribbon toggle collapses and restores, persisting choice', async
   await page.goto('/');
   await expect(page.getByTestId('chat-panel')).toBeVisible({ timeout: 15_000 });
 
-  // Default: ribbon expanded (preflight visible)
+  // Default: ribbon collapsed so the chat shell matches the quiet design surface.
   const toggle = page.getByTestId('ribbon-toggle');
   await expect(toggle).toBeVisible();
-  await expect(page.getByTestId('capability-preflight')).toBeVisible();
-  await expect(toggle).toHaveAttribute('aria-expanded', 'true');
-
-  // Collapse
-  await toggle.click();
   await expect(page.getByTestId('capability-preflight')).toBeHidden();
   await expect(toggle).toHaveAttribute('aria-expanded', 'false');
 
-  // Persists after reload
+  // Expand
+  await toggle.click();
+  await expect(page.getByTestId('capability-preflight')).toBeVisible();
+  await expect(toggle).toHaveAttribute('aria-expanded', 'true');
+
+  // Collapse again
+
+  await toggle.click();
+  await expect(page.getByTestId('capability-preflight')).toBeHidden();
+  await expect(toggle).toHaveAttribute('aria-expanded', 'false');
   await page.reload();
   await expect(page.getByTestId('chat-panel')).toBeVisible({ timeout: 15_000 });
   await expect(page.getByTestId('capability-preflight')).toBeHidden();

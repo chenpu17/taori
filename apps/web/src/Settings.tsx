@@ -2395,6 +2395,24 @@ function DangerZone({ onChanged }: { onChanged: () => void }): JSX.Element {
     onConfirm: () => void;
   } | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const sectionRef = useRef<HTMLElement | null>(null);
+
+  useEffect(() => {
+    if (!msg) return;
+    const section = sectionRef.current;
+    const modal = section?.closest('.settings-modal');
+    if (!(modal instanceof HTMLElement)) return;
+    const run = () => {
+      modal.scrollTop = modal.scrollHeight;
+    };
+    run();
+    const raf = window.requestAnimationFrame(run);
+    const timer = window.setTimeout(run, 80);
+    return () => {
+      window.cancelAnimationFrame(raf);
+      window.clearTimeout(timer);
+    };
+  }, [msg]);
 
   function onClear(): void {
     if (!armed || busyClear || busyExport || busyImport) return;
@@ -2485,7 +2503,7 @@ function DangerZone({ onChanged }: { onChanged: () => void }): JSX.Element {
   }
 
   return (
-    <section className="settings-section settings-danger" data-testid="settings-danger-zone">
+    <section ref={sectionRef} className="settings-section settings-danger" data-testid="settings-danger-zone">
       <div className="settings-section-head">
         <h3>危险区 / Danger zone</h3>
       </div>
@@ -2629,7 +2647,7 @@ function GeneralTab({ onReopenOnboarding, onChanged }: { onReopenOnboarding: () 
           重新打开 Onboarding
         </button>
       </section>
-      <details>
+      <details open>
         <summary>危险区</summary>
         <DangerZone
           onChanged={() => {

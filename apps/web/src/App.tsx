@@ -79,6 +79,33 @@ interface RunTimelineFocusTarget {
   costRecordId: string | null;
 }
 
+function clampScrollTop(el: HTMLElement, nextTop: number): number {
+  return Math.max(0, Math.min(nextTop, Math.max(0, el.scrollHeight - el.clientHeight)));
+}
+
+function scrollMessagesContainerToLatest(el: HTMLElement): void {
+  el.scrollTop = clampScrollTop(el, el.scrollHeight - el.clientHeight);
+
+  if (!window.matchMedia('(max-width: 760px)').matches) return;
+
+  const actions = Array.from(el.querySelectorAll('[data-testid="msg-actions"]'));
+  const lastActions = actions.at(-1);
+  if (!(lastActions instanceof HTMLElement)) return;
+
+  const padding = 8;
+  const elBox = el.getBoundingClientRect();
+  const actionBox = lastActions.getBoundingClientRect();
+
+  if (actionBox.top < elBox.top + padding) {
+    el.scrollTop = clampScrollTop(el, el.scrollTop - (elBox.top + padding - actionBox.top));
+    return;
+  }
+
+  if (actionBox.bottom > elBox.bottom - padding) {
+    el.scrollTop = clampScrollTop(el, el.scrollTop + (actionBox.bottom - (elBox.bottom - padding)));
+  }
+}
+
 type MessageCost = {
   input_tokens: number | null;
   cache_input_tokens: number | null;
@@ -1593,7 +1620,11 @@ function renderHistoryRow(
         className="conv-title"
         title={title}
       >
-        {!isConversation ? <span className="conv-title-prefix conv-title-prefix--research" aria-hidden="true">🔎</span> : null}
+        {!isConversation ? (
+          <span className="conv-title-prefix conv-title-prefix--research" aria-hidden="true">
+            <Icon name="search" size={13} />
+          </span>
+        ) : null}
         <span className={`conv-title-text${item.title?.trim() ? '' : ' is-placeholder'}`}>
           {renderHighlightedText(title, searchQuery)}
         </span>
@@ -1726,7 +1757,9 @@ function renderGroupedHistory(
   if (pinned.length > 0) {
     out.push(
       <li key="g:pinned" className="conv-group-head conv-group-head--pinned" aria-hidden="true">
-        <span className="conv-group-head__icon" aria-hidden="true">📌</span>
+        <span className="conv-group-head__icon" aria-hidden="true">
+          <Icon name="pin" size={11} />
+        </span>
         <span className="conv-group-head__label">置顶</span>
       </li>,
     );
@@ -2014,6 +2047,9 @@ function ChatPanel({
   onLoopbackToConversation: (id: string) => void;
 }): JSX.Element {
   const conversationIdRef = useRef<string | null>(null);
+  const latestHistoryLoadRef = useRef<{ conversationId: string; loadedAt: number } | null>(null);
+  const scrollRequestRef = useRef(0);
+  const [scrollRequestToken, setScrollRequestToken] = useState(0);
   // Tracks which conversation_id we've already lifted into React state via
   // onConversationCreated. Distinct from conversationIdRef because the tee
   // reader updates conversationIdRef mid-stream (for auto-fallback's persist
@@ -3376,18 +3412,16 @@ function ChatPanel({
   }, [openImagePicker]);
 
   const scrollMessagesToLatest = useCallback((): (() => void) => {
+    let cleaned = false;
+    const cleanupFns: Array<() => void> = [];
     const run = () => {
+      if (cleaned) return;
       const el = messagesRef.current;
       if (!el) return;
       // Direct assignment is more deterministic than scrollTo() here because
       // the container has CSS smooth scrolling and history restore can happen
       // while React is still committing/removing transient loading content.
-      el.scrollTop = el.scrollHeight;
-      const last = el.lastElementChild;
-      if (last instanceof HTMLElement) {
-        last.scrollIntoView({ block: 'end', inline: 'nearest', behavior: 'auto' });
-        el.scrollTop = el.scrollHeight;
-      }
+      scrollMessagesContainerToLatest(el);
     };
     run();
     let raf2 = 0;
@@ -3395,14 +3429,59 @@ function ChatPanel({
       run();
       raf2 = window.requestAnimationFrame(run);
     });
-    const t1 = window.setTimeout(run, 50);
-    const t2 = window.setTimeout(run, 150);
+    const timers = [0, 50, 150, 300, 600, 1000].map((delay) =>
+      window.setTimeout(run, delay),
+    );
+    const el = messagesRef.current;
+    if (el) {
+      if (typeof ResizeObserver !== 'undefined') {
+        const resizeObserver = new ResizeObserver(run);
+        resizeObserver.observe(el);
+        for (const child of Array.from(el.children)) {
+          resizeObserver.observe(child);
+        }
+        cleanupFns.push(() => resizeObserver.disconnect());
+      }
+      if (typeof MutationObserver !== 'undefined') {
+        const mutationObserver = new MutationObserver(run);
+        mutationObserver.observe(el, {
+          childList: true,
+          characterData: true,
+          subtree: true,
+        });
+        cleanupFns.push(() => mutationObserver.disconnect());
+      }
+    }
+    const observerTimer = window.setTimeout(() => {
+      for (const cleanup of cleanupFns.splice(0)) cleanup();
+    }, 1200);
     return () => {
+      cleaned = true;
       window.cancelAnimationFrame(raf1);
       if (raf2) window.cancelAnimationFrame(raf2);
-      window.clearTimeout(t1);
-      window.clearTimeout(t2);
+      for (const timer of timers) window.clearTimeout(timer);
+      window.clearTimeout(observerTimer);
+      for (const cleanup of cleanupFns.splice(0)) cleanup();
     };
+  }, []);
+
+  const requestScrollMessagesToLatest = useCallback(() => {
+    const next = scrollRequestRef.current + 1;
+    scrollRequestRef.current = next;
+    setScrollRequestToken(next);
+  }, []);
+
+  const bindMessagesEnd = useCallback((node: HTMLDivElement | null) => {
+    if (!node) return;
+    const el = node.parentElement;
+    if (!(el instanceof HTMLElement)) return;
+    const run = () => {
+      scrollMessagesContainerToLatest(el);
+    };
+    run();
+    window.requestAnimationFrame(run);
+    window.setTimeout(run, 50);
+    window.setTimeout(run, 150);
   }, []);
 
   // Fetch image data for messages that have image_attachments and populate imagesByMsg.
@@ -3705,9 +3784,10 @@ function ChatPanel({
       .filter((m) => m.role === 'user' || m.role === 'assistant' || m.role === 'system')
       .map(toChatMessage);
     setMessages(mapped);
-    scrollMessagesToLatest();
+    latestHistoryLoadRef.current = { conversationId: id, loadedAt: Date.now() };
+    requestScrollMessagesToLatest();
     await loadImagesForMessages(res.messages);
-  }, [setMessages, loadImagesForMessages, scrollMessagesToLatest]);
+  }, [setMessages, loadImagesForMessages, requestScrollMessagesToLatest]);
 
 
   // Skip the load when this conversationId was just minted by our own
@@ -4359,6 +4439,11 @@ function ChatPanel({
     () => messages.some((m) => m.role === 'assistant' && Boolean(failureByMsg[m.id])),
     [failureByMsg, messages],
   );
+  const latestMessageKey = useMemo(() => {
+    const last = messages[messages.length - 1];
+    if (!last) return 'empty';
+    return `${last.id}:${last.role}:${last.content?.length ?? 0}`;
+  }, [messages]);
 
   useLayoutEffect(() => {
     if (activeRoundtableId) return;
@@ -4370,7 +4455,26 @@ function ChatPanel({
     historyLoading,
     isLoading,
     lastFailureMsgId,
+    latestMessageKey,
     messages.length,
+    scrollMessagesToLatest,
+  ]);
+
+  useLayoutEffect(() => {
+    if (activeRoundtableId || scrollRequestToken === 0) return;
+    return scrollMessagesToLatest();
+  }, [activeRoundtableId, latestMessageKey, scrollMessagesToLatest, scrollRequestToken]);
+
+  useLayoutEffect(() => {
+    if (activeRoundtableId || historyLoading || isLoading) return;
+    if (!conversationId || latestHistoryLoadRef.current?.conversationId !== conversationId) return;
+    return scrollMessagesToLatest();
+  }, [
+    activeRoundtableId,
+    conversationId,
+    historyLoading,
+    isLoading,
+    messages,
     scrollMessagesToLatest,
   ]);
 
@@ -5585,6 +5689,12 @@ function ChatPanel({
               />
             </div>
           )}
+        <div
+          key={`messages-end-${latestMessageKey}-${historyLoading ? 'loading' : 'ready'}-${isLoading ? 'streaming' : 'idle'}`}
+          className="messages-end"
+          ref={bindMessagesEnd}
+          aria-hidden="true"
+        />
       </div>
       {error && <ChatErrorBanner error={error} />}
       {quickCompare && (
@@ -7154,9 +7264,9 @@ function RunEventFileChunks({
             <small>chunk {chunkIndex}</small>
             {snippet && <p>{snippet}</p>}
           </article>
-        );
-      })}
-    </div>
+          );
+        })}
+      </div>
   );
 }
 

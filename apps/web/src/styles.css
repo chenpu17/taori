@@ -121,6 +121,413 @@
   --dot-md: 8px;
 }
 
+/* Final micro-polish overrides. Keep this last: prior responsive repair
+ * blocks intentionally use !important and can otherwise reintroduce heavy
+ * toolbar controls on mobile.
+ */
+.chat > .composer .composer-tools-trigger,
+.chat > .composer .composer__bar .composer-tools-trigger,
+.chat > .composer .composer-tool-btn,
+.chat > .composer .header-chip-btn,
+.chat > .composer > .composer__bar > button:not([type="submit"]) {
+  border-color: transparent !important;
+  background: transparent !important;
+}
+
+.chat > .composer .persona-select-wrap,
+.chat > .composer .model-selector {
+  border-color: var(--line, rgba(26, 22, 18, 0.08)) !important;
+}
+
+@media (max-width: 760px) {
+  .chat > .composer .composer__bar {
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) 46px 30px !important;
+    gap: 6px !important;
+  }
+
+  .chat > .composer .composer-tool-btn {
+    grid-column: 1 !important;
+    grid-row: 1 !important;
+  }
+
+  .chat > .composer .composer-tools-wrapper {
+    grid-column: 2 !important;
+    grid-row: 1 !important;
+  }
+
+  .chat > .composer > .composer__bar > button[type="submit"] {
+    grid-column: 4 !important;
+    grid-row: 1 !important;
+  }
+
+  .chat > .composer .composer-export-btn {
+    display: inline-flex !important;
+  }
+
+  .chat > .composer .composer-export-btn,
+  .chat > .composer .composer-export-btn:disabled {
+    display: inline-flex !important;
+    grid-column: 3 !important;
+    grid-row: 1 !important;
+    justify-content: center !important;
+    min-width: 0 !important;
+    padding-left: 0 !important;
+    padding-right: 0 !important;
+    width: 100% !important;
+  }
+
+  .chat > .composer .composer-template-btn {
+    grid-column: 1 !important;
+    grid-row: 2 !important;
+    width: 100% !important;
+  }
+
+  .chat > .composer .persona-select-wrap {
+    grid-column: 2 / span 3 !important;
+    grid-row: 2 !important;
+    width: 100% !important;
+  }
+
+  .chat > .composer .model-selector-wrap {
+    grid-column: 1 / span 4 !important;
+    grid-row: 3 !important;
+    max-width: none !important;
+    width: 100% !important;
+  }
+
+  .chat > .composer .model-selector {
+    width: 100% !important;
+  }
+
+  .chat > .composer .composer-export-btn {
+    display: none !important;
+  }
+}
+
+/* ============================================================
+ * Detail repair pass — match Taori draft sidebar/composer micro-UI.
+ * This sits at the end because earlier migration layers still contain legacy
+ * heavy pill controls that leak into the redesigned surface.
+ * ============================================================ */
+.conv-list {
+  padding: 0 10px 14px !important;
+  gap: 2px !important;
+}
+
+.conv-group-head {
+  display: flex !important;
+  align-items: center !important;
+  gap: 7px !important;
+  padding: 17px 10px 7px !important;
+  color: var(--ink-4, #8B8174) !important;
+  font-size: 12px !important;
+  font-weight: 500 !important;
+  letter-spacing: 0 !important;
+  text-transform: none !important;
+}
+
+.conv-group-head::after {
+  content: '' !important;
+  flex: 1 1 auto !important;
+  height: 1px !important;
+  margin-left: 2px !important;
+  background: var(--line-faint, rgba(26, 22, 18, 0.04)) !important;
+}
+
+.conv-group-head__icon {
+  display: inline-flex !important;
+  width: 14px !important;
+  height: 14px !important;
+  align-items: center !important;
+  justify-content: center !important;
+  place-items: center !important;
+  color: var(--thread, #9B3D2F) !important;
+}
+
+.conv-group-head__icon svg {
+  display: block !important;
+  width: 12px !important;
+  height: 12px !important;
+  stroke-width: 1.6 !important;
+}
+
+.conv-item {
+  display: grid !important;
+  grid-template-columns: minmax(0, 1fr) auto !important;
+  row-gap: 3px !important;
+  padding: 8px 10px !important;
+  border-radius: 7px !important;
+}
+
+.conv-item.active,
+.conv-item.pinned.active {
+  background: color-mix(in srgb, var(--paper-pure, #FFFCF5) 76%, transparent) !important;
+  box-shadow: none !important;
+}
+
+.conv-item.active::before {
+  left: -6px !important;
+  top: 11px !important;
+  bottom: 11px !important;
+  width: 2px !important;
+  opacity: 0.7 !important;
+}
+
+.conv-item .conv-title {
+  display: inline-flex !important;
+  align-items: center !important;
+  gap: 7px !important;
+  grid-column: 1 / -1 !important;
+  font-size: 14px !important;
+  font-weight: 520 !important;
+  line-height: 1.45 !important;
+}
+
+.conv-title-prefix {
+  display: inline-grid !important;
+  flex: 0 0 auto !important;
+  width: 14px !important;
+  place-items: center !important;
+  color: var(--ink-3, #5C5247) !important;
+}
+
+.conv-meta {
+  grid-column: 1 / -1 !important;
+  display: flex !important;
+  align-items: center !important;
+  min-width: 0 !important;
+  padding: 0 !important;
+  gap: 7px !important;
+  color: var(--ink-4, #8B8174) !important;
+  font-size: 12px !important;
+  line-height: 1.35 !important;
+}
+
+.conv-meta-type {
+  gap: 0 !important;
+  color: var(--ink-4, #8B8174) !important;
+  font-size: 12px !important;
+}
+
+.conv-meta-type::before {
+  width: 7px !important;
+  height: 7px !important;
+  margin-right: 6px !important;
+  background: var(--ink-5, #BCB09D) !important;
+}
+
+.conv-meta-type.is-research::before {
+  background: var(--gold, #B9822B) !important;
+}
+
+.conv-meta-sep {
+  display: none !important;
+}
+
+.conv-meta-time {
+  flex: 0 0 auto !important;
+  margin-left: 2px !important;
+}
+
+.sidebar-footer {
+  min-height: 50px !important;
+  padding: 7px 12px !important;
+  border-top-color: var(--line-faint, rgba(26, 22, 18, 0.04)) !important;
+  background: color-mix(in srgb, var(--paper-deep, #EBE4D4) 78%, var(--paper, #F4EFE4)) !important;
+}
+
+.sidebar-footer__avatar {
+  width: 28px !important;
+  height: 28px !important;
+  background: var(--thread, #9B3D2F) !important;
+  font-size: 12px !important;
+}
+
+.sidebar-footer__name {
+  max-width: 112px !important;
+  color: var(--ink-3, #5C5247) !important;
+  font-size: 12px !important;
+}
+
+.sidebar-footer__actions {
+  gap: 5px !important;
+}
+
+.sidebar-footer__actions .theme-toggle {
+  height: 30px !important;
+  min-height: 30px !important;
+  padding: 2px !important;
+  border-color: var(--line, rgba(26, 22, 18, 0.08)) !important;
+  border-radius: 9px !important;
+  background: transparent !important;
+}
+
+.sidebar-footer__actions .theme-toggle__option {
+  width: 24px !important;
+  height: 24px !important;
+  border-radius: 7px !important;
+}
+
+.sidebar-footer__actions > button {
+  width: 30px !important;
+  height: 30px !important;
+  border-color: var(--line, rgba(26, 22, 18, 0.08)) !important;
+  border-radius: 9px !important;
+  color: var(--ink-3, #5C5247) !important;
+}
+
+.chat > .composer .composer__bar {
+  gap: 5px !important;
+  min-height: 38px !important;
+  padding: 6px 8px 7px 10px !important;
+}
+
+.chat > .composer .composer-tools-trigger,
+.composer-tool-btn,
+.chat > .composer .header-chip-btn,
+.chat > .composer > .composer__bar > button:not([type="submit"]),
+.chat > .composer .model-selector,
+.chat > .composer .persona-select-wrap {
+  height: 28px !important;
+  min-height: 28px !important;
+  border: 1px solid transparent !important;
+  border-radius: 7px !important;
+  background: transparent !important;
+  color: var(--ink-2, #3A332B) !important;
+  box-shadow: none !important;
+  font-size: 12px !important;
+}
+
+.chat > .composer .composer-tools-trigger,
+.composer-tool-btn {
+  display: inline-flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+  gap: 6px !important;
+  padding: 0 12px !important;
+}
+
+.chat > .composer .composer-tools-trigger:hover,
+.composer-tool-btn:hover,
+.chat > .composer .header-chip-btn:hover:not(:disabled),
+.chat > .composer .model-selector:hover,
+.chat > .composer .persona-select-wrap:hover {
+  border-color: transparent !important;
+  background: var(--paper-deep, #EBE4D4) !important;
+  color: var(--ink, #1A1612) !important;
+}
+
+.chat > .composer .composer-template-btn {
+  padding: 0 13px !important;
+  color: var(--ink, #1A1612) !important;
+  font-weight: 500 !important;
+}
+
+.chat > .composer .composer-export-btn {
+  color: var(--ink-4, #8B8174) !important;
+}
+
+.chat > .composer .composer-export-btn:disabled {
+  display: none !important;
+}
+
+.chat > .composer .persona-select-wrap {
+  width: min(212px, 22vw) !important;
+  padding: 0 11px !important;
+}
+
+.chat > .composer .persona-select {
+  font-size: 12px !important;
+}
+
+.chat > .composer .model-selector-wrap {
+  margin-left: auto !important;
+  min-width: 0 !important;
+  max-width: 264px !important;
+}
+
+.chat > .composer .model-selector {
+  width: clamp(190px, 21vw, 264px) !important;
+  padding: 0 24px 0 12px !important;
+  border-color: var(--line, rgba(26, 22, 18, 0.08)) !important;
+  border-radius: 8px !important;
+  overflow: hidden !important;
+  text-overflow: ellipsis !important;
+  white-space: nowrap !important;
+}
+
+.chat > .composer .persona-select-wrap {
+  border-color: var(--line, rgba(26, 22, 18, 0.08)) !important;
+}
+
+.chat > .composer > .composer__bar > button[type="submit"] {
+  width: 30px !important;
+  min-width: 30px !important;
+  height: 30px !important;
+  min-height: 30px !important;
+  border: 0 !important;
+  border-radius: 8px !important;
+}
+
+@media (max-width: 760px) {
+  .sidebar {
+    max-height: 232px !important;
+  }
+
+  .conv-list {
+    padding-bottom: 10px !important;
+  }
+
+  .conv-item {
+    padding: 7px 10px !important;
+  }
+
+  .chat > .composer .composer__bar {
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) 30px !important;
+    gap: 6px !important;
+  }
+
+  .chat > .composer .composer-tool-btn {
+    grid-column: 1 !important;
+    grid-row: 1 !important;
+  }
+
+  .chat > .composer .composer-tools-wrapper {
+    grid-column: 2 !important;
+    grid-row: 1 !important;
+  }
+
+  .chat > .composer > .composer__bar > button[type="submit"] {
+    grid-column: 3 !important;
+    grid-row: 1 !important;
+  }
+
+  .chat > .composer .persona-select-wrap {
+    grid-column: 2 / span 2 !important;
+    grid-row: 2 !important;
+    width: 100% !important;
+  }
+
+  .chat > .composer .composer-template-btn {
+    grid-column: 1 !important;
+    grid-row: 2 !important;
+  }
+
+  .chat > .composer .model-selector-wrap {
+    grid-column: 1 / span 3 !important;
+    grid-row: 3 !important;
+    max-width: none !important;
+  }
+
+  .chat > .composer .composer-export-btn {
+    display: none !important;
+  }
+
+  .chat > .composer .model-selector {
+    width: 100% !important;
+  }
+}
+
 @media (prefers-color-scheme: dark) {
   :root[data-theme="system"] {
     --bg: #0b0d16;
@@ -1189,6 +1596,7 @@ header h1::before {
   min-height: 0;
   padding: 20px 22px 14px;
   scroll-behavior: auto;
+  overflow-anchor: none;
 }
 .msg {
   max-width: 760px;
@@ -1199,6 +1607,13 @@ header h1::before {
   position: relative;
 }
 .msg + .msg { margin-top: 12px; }
+.messages-end {
+  width: 1px;
+  height: 1px;
+  margin: 0;
+  padding: 0;
+  overflow: hidden;
+}
 @keyframes msg-in {
   from { opacity: 0; transform: translateY(6px) scale(0.98); }
   to { opacity: 1; transform: translateY(0) scale(1); }
@@ -1887,6 +2302,244 @@ header h1::before {
     grid-template-columns: 1fr;
   }
 }
+
+/* Pass 6 — detail hardening after live screenshot review. The previous passes
+ * matched the broad colorway, but several controls still read as heavy form
+ * widgets. These overrides bring the density, borders, and hierarchy closer
+ * to the design draft's quiet editor surface. */
+.app > header {
+  top: 20px;
+  right: 24px;
+}
+
+.app > header .header-actions {
+  gap: 4px;
+}
+
+.app > header .settings-btn,
+.chat-header > .ribbon-toggle,
+.chat-header .ribbon-toggle {
+  width: 30px;
+  min-width: 30px;
+  height: 30px;
+  min-height: 30px;
+  border-color: var(--line, rgba(26, 22, 18, 0.08)) !important;
+  border-radius: 8px;
+  color: var(--ink-3, #6B6155);
+}
+
+.app > header .settings-btn svg,
+.chat-header .ribbon-toggle svg {
+  width: 15px;
+  height: 15px;
+}
+
+.header-actions .badge {
+  height: 30px;
+  padding: 0 11px;
+  border-color: var(--line, rgba(26, 22, 18, 0.08));
+  color: var(--ink-3, #6B6155);
+}
+
+.header-actions .badge--ok {
+  color: var(--ink-3, #6B6155);
+  background: color-mix(in srgb, var(--paper-rise, #FDFBF6) 60%, transparent);
+}
+
+.chat-header > .ribbon-toggle {
+  top: 22px;
+  right: 280px;
+}
+
+.sidebar {
+  min-width: var(--layout-sidebar-width);
+}
+
+.conv-list {
+  gap: 0;
+}
+
+.conv-item {
+  min-height: 42px;
+  padding: 8px 12px;
+}
+
+.conv-item .conv-title {
+  line-height: 1.38;
+}
+
+.conv-meta {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  min-width: 0;
+  line-height: 1.35;
+}
+
+.conv-meta-sep {
+  color: var(--line-strong, rgba(26, 22, 18, 0.16));
+}
+
+.conv-meta-time {
+  margin-left: auto;
+  color: var(--ink-4, #9C907F);
+  font-variant-numeric: tabular-nums;
+}
+
+.conv-actions {
+  top: 7px;
+  right: 7px;
+  border: 1px solid var(--line, rgba(26, 22, 18, 0.08));
+  border-radius: 7px;
+  box-shadow: var(--shadow-1, 0 1px 2px rgba(26, 22, 18, 0.04));
+}
+
+.conv-actions button {
+  width: 22px;
+  height: 22px;
+  font-size: 11px;
+}
+
+.conv-empty--quiet {
+  padding: 30px 22px;
+  text-align: center;
+}
+
+.conv-empty-quiet {
+  align-items: center;
+}
+
+.starter {
+  transform: translateY(-8px);
+}
+
+.starter-mark {
+  margin-bottom: 24px !important;
+}
+
+.starter-title {
+  line-height: 1.12;
+  text-wrap: balance;
+}
+
+.starter-sub {
+  max-width: 500px;
+  margin-bottom: 34px;
+}
+
+.starter-chip,
+.starter-chip--primary {
+  min-height: 84px;
+  padding: 13px 16px 14px;
+  border-color: var(--line, rgba(26, 22, 18, 0.08));
+  border-radius: 8px;
+  background: var(--paper-pure, #FFFCF5);
+}
+
+.starter-chip--primary {
+  border-color: var(--thread-line, rgba(155, 61, 47, 0.18));
+}
+
+.starter-chip:hover {
+  border-color: var(--line-strong, rgba(26, 22, 18, 0.16));
+}
+
+.chat > .composer {
+  margin-top: 6px;
+  margin-bottom: 6px;
+  border-radius: 12px;
+}
+
+.composer textarea {
+  min-height: 58px;
+  padding: 13px 16px 8px;
+  border-radius: 12px 12px 0 0;
+}
+
+.composer__bar {
+  min-height: 42px;
+  gap: 6px;
+  padding: 6px 8px 7px 10px;
+}
+
+.composer-tool-btn,
+.chat > .composer .composer-tools-trigger,
+.chat > .composer .header-chip-btn,
+.chat > .composer > .composer__bar > button,
+.chat > .composer .model-selector,
+.chat > .composer .persona-select-wrap {
+  height: 28px;
+  min-height: 28px;
+  border-color: var(--line, rgba(26, 22, 18, 0.08)) !important;
+  color: var(--ink-2, #3A332B);
+  box-shadow: none !important;
+}
+
+.composer-tool-btn:hover,
+.chat > .composer .composer-tools-trigger:hover,
+.chat > .composer .header-chip-btn:hover,
+.chat > .composer > .composer__bar > button:hover:not(:disabled),
+.chat > .composer .model-selector:hover,
+.chat > .composer .persona-select-wrap:hover {
+  border-color: var(--line-strong, rgba(26, 22, 18, 0.16)) !important;
+  background: var(--paper-rise, #FDFBF6) !important;
+  color: var(--ink, #1A1612);
+}
+
+.chat > .composer > .composer__bar > button[type="submit"],
+.chat > .composer > .composer__bar > button[type="submit"]:disabled {
+  width: 28px;
+  min-width: 28px;
+  height: 28px;
+  min-height: 28px;
+  border-radius: 8px;
+  border: 0 !important;
+}
+
+.chat > .composer > .composer__bar > button[type="submit"]:disabled {
+  background: var(--paper-deep, #EBE4D4);
+  color: var(--ink-5, #BCB09D);
+  opacity: 1;
+}
+
+.chat > .composer > .composer__bar > button[type="submit"]:not(:disabled) {
+  background: var(--ink, #1A1612);
+  color: var(--paper-pure, #FFFCF5);
+}
+
+.chat > .composer .model-selector {
+  width: min(186px, 25vw);
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.composer__hint {
+  padding-bottom: 7px;
+  line-height: 1.4;
+}
+
+.cost-bar {
+  line-height: 1.4;
+}
+
+@media (max-width: 760px) {
+  .app > header {
+    top: 10px;
+    right: 10px;
+  }
+
+  .chat-header > .ribbon-toggle {
+    position: static;
+  }
+
+  .starter {
+    transform: none;
+  }
+
+  .chat > .composer {
+    border-radius: 12px;
+  }
+}
 .quick-compare-picker-dialog {
   width: min(760px, 92vw);
 }
@@ -2463,6 +3116,7 @@ header h1::before {
   background: var(--surface);
   color: var(--fg);
   width: min(840px, 92vw);
+  box-sizing: border-box;
   max-height: 90vh; overflow-y: auto;
   border-radius: var(--r-xl);
   padding: 24px 28px;
@@ -12549,6 +13203,10 @@ header { border-bottom-color: color-mix(in srgb, var(--border) 70%, transparent)
   scroll-behavior: smooth;
 }
 
+.messages {
+  scroll-behavior: auto !important;
+}
+
 /* ---- Selection colour: brand-tinted, mode-aware ---- */
 ::selection {
   background: color-mix(in srgb, var(--brand) 30%, transparent);
@@ -16762,11 +17420,14 @@ body::before {
   box-shadow: 0 1px 4px rgba(26,22,18,.06);
 }
 
-/* 3. Hide the secondary composer chips that don't exist in the design.
- *    模板 / Persona / 导出 are accessible via the tools dropdown instead. */
+/* 3. Keep secondary composer actions available, but reduce their visual
+ *    weight so the composer still reads like the design draft's quiet toolbar. */
 .composer .composer-template-btn,
 .composer .persona-select-wrap,
-.composer .composer-export-btn { display: none !important; }
+.composer .composer-export-btn {
+  display: inline-flex !important;
+  flex: 0 0 auto;
+}
 
 /* 4. Make the vision pill inline alongside the send row, not a separate chip. */
 .composer .vision-pill {
@@ -16845,4 +17506,861 @@ body::before {
   background: var(--paper-rise, rgba(26,22,18,.03));
   border-color: var(--line-strong, rgba(26,22,18,.14));
   color: var(--ink, #1A1612);
+}
+
+/* Pass 5 — keep the collapsed capability toggle visible as a real topbar
+ * affordance. It lives in the chat header DOM, but visually belongs with the
+ * top-right tool buttons from the design draft. */
+.chat-header > .ribbon-toggle,
+.chat-header .ribbon-toggle {
+  width: 32px;
+  min-width: 32px;
+  height: 32px;
+  min-height: 32px;
+  display: inline-grid;
+  place-items: center;
+  padding: 0;
+  border: 1px solid var(--line, rgba(26, 22, 18, 0.08));
+  border-radius: 8px;
+  background: transparent;
+  color: var(--ink-3, #6B6155);
+  box-shadow: none;
+}
+
+.chat-header > .ribbon-toggle:hover,
+.chat-header .ribbon-toggle:hover {
+  border-color: var(--line-strong, rgba(26, 22, 18, 0.16));
+  background: var(--paper-rise, #FDFBF6);
+  color: var(--ink, #1A1612);
+}
+
+.chat-header > .ribbon-toggle.expanded,
+.chat-header .ribbon-toggle.expanded {
+  border-color: var(--thread-line, rgba(155, 61, 47, 0.18));
+  background: var(--thread-bg, rgba(155, 61, 47, 0.08));
+  color: var(--thread, #9B3D2F);
+}
+
+/* Active conversation messages must keep the design draft's transcript style:
+ * avatar rail + text, no chat-bubble gradient/card surface. Earlier polish
+ * passes still target .msg.user/.msg.assistant, so this final override is
+ * deliberately explicit. */
+.messages .msg,
+.messages .msg.user,
+.messages .msg.assistant {
+  background: transparent;
+  background-image: none;
+  border: 0;
+  border-radius: 0;
+  box-shadow: none;
+  color: var(--ink, #1A1612);
+}
+
+.messages .msg.user,
+.messages .msg.assistant {
+  margin-left: auto;
+  margin-right: auto;
+}
+
+.messages .msg.assistant:hover {
+  transform: none;
+  box-shadow: none;
+  border-color: transparent;
+}
+
+.messages .msg.user .msg-role,
+.messages .msg.assistant .msg-role,
+.messages .msg.user .msg-cost,
+.messages .msg.assistant .msg-cost {
+  color: var(--ink-3, #6B6155);
+}
+
+/* Model Center still had older indigo/violet primary buttons underneath the
+ * redesigned shell. Keep it in the same paper/ink/thread system as the draft. */
+.model-center .btn-primary,
+.control-center .btn-primary,
+.modal-card.model-editor .btn-primary {
+  border: 1px solid var(--ink, #1A1612) !important;
+  background: var(--ink, #1A1612) !important;
+  background-image: none !important;
+  color: var(--paper-pure, #FFFCF5) !important;
+  box-shadow: none !important;
+  transform: none !important;
+}
+
+.model-center .btn-primary:hover:not(:disabled),
+.control-center .btn-primary:hover:not(:disabled),
+.modal-card.model-editor .btn-primary:hover:not(:disabled) {
+  border-color: var(--thread, #9B3D2F) !important;
+  background: var(--thread, #9B3D2F) !important;
+  color: var(--paper-pure, #FFFCF5) !important;
+  box-shadow: none !important;
+  transform: none !important;
+}
+
+.model-center .btn-primary:disabled,
+.control-center .btn-primary:disabled,
+.modal-card.model-editor .btn-primary:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.model-center__providers,
+.provider-detail,
+.model-center__matrix,
+.import-drawer__sync {
+  border-color: var(--line, rgba(26, 22, 18, 0.08)) !important;
+  background: var(--paper-pure, #FFFCF5) !important;
+  box-shadow: none !important;
+}
+
+.provider-nav__item:hover {
+  background: var(--paper-rise, #FDFBF6) !important;
+}
+
+.provider-nav__item.is-active {
+  border-color: var(--thread-line, rgba(155, 61, 47, 0.18)) !important;
+  background: var(--thread-bg, rgba(155, 61, 47, 0.08)) !important;
+  box-shadow: inset 2px 0 0 var(--thread, #9B3D2F) !important;
+}
+
+.provider-nav__item.is-active::before {
+  background: var(--thread, #9B3D2F) !important;
+}
+
+.provider-detail__actions .model-center-action-btn--secondary,
+.model-center-action-btn--secondary,
+.model-center__bulk button,
+.import-drawer__filters > button,
+.model-cell-actions button {
+  border-color: var(--line, rgba(26, 22, 18, 0.08)) !important;
+  background: transparent !important;
+  color: var(--ink-2, #3A332B) !important;
+  box-shadow: none !important;
+  transform: none !important;
+}
+
+.provider-detail__actions .model-center-action-btn--secondary:hover:not(:disabled),
+.model-center-action-btn--secondary:hover:not(:disabled),
+.model-center__bulk button:hover:not(:disabled),
+.import-drawer__filters > button:hover:not(:disabled),
+.model-cell-actions button:hover:not(:disabled) {
+  border-color: var(--line-strong, rgba(26, 22, 18, 0.16)) !important;
+  background: var(--paper-rise, #FDFBF6) !important;
+  color: var(--ink, #1A1612) !important;
+  box-shadow: none !important;
+  transform: none !important;
+}
+
+.switch-modern--on .switch-modern__track,
+.model-center input[type="checkbox"]:checked {
+  accent-color: var(--thread, #9B3D2F);
+}
+
+.model-center .switch-modern--on .switch-modern__track {
+  border-color: var(--thread-line, rgba(155, 61, 47, 0.18)) !important;
+  background: var(--thread, #9B3D2F) !important;
+  box-shadow: 0 0 0 3px var(--thread-bg, rgba(155, 61, 47, 0.08)) !important;
+}
+
+.import-drawer__filters select,
+.import-drawer__filters input {
+  border-color: var(--line, rgba(26, 22, 18, 0.08)) !important;
+  background: var(--paper-pure, #FFFCF5) !important;
+  color: var(--ink, #1A1612) !important;
+}
+
+.import-drawer__filters select option {
+  color: var(--ink, #1A1612);
+  background: var(--paper-pure, #FFFCF5);
+}
+
+.msg-edit-actions button,
+.msg-edit-actions button:first-child {
+  border: 1px solid var(--line, rgba(26, 22, 18, 0.08)) !important;
+  background: var(--paper-pure, #FFFCF5) !important;
+  color: var(--ink, #1A1612) !important;
+}
+
+.sidebar-search input.conv-search,
+.conv-search {
+  background: var(--paper-pure, #FFFCF5) !important;
+  color: var(--ink, #1A1612) !important;
+}
+
+@media (max-width: 760px) {
+  .app {
+    height: 100dvh;
+    min-height: 100dvh;
+  }
+
+  .workspace {
+    height: 100%;
+    min-height: 0;
+    overflow: hidden;
+  }
+
+  .workspace-main,
+  .chat {
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow: hidden;
+  }
+
+  .chat {
+    display: flex;
+    flex-direction: column;
+  }
+
+  .messages {
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow: auto;
+    padding-bottom: 104px;
+    scroll-padding-bottom: 104px;
+  }
+
+  .messages .msg {
+    width: 100%;
+    max-width: 100%;
+    padding-left: 0;
+    padding-right: 0;
+  }
+
+  .msg-actions {
+    opacity: 1;
+    visibility: visible;
+    pointer-events: auto;
+  }
+
+  .chat-header {
+    flex: 0 0 auto;
+  }
+
+  .chat > .composer,
+  .composer__hint,
+  .cost-bar,
+  .attachments,
+  .composer-file-search-preview,
+  .vision-warning,
+  .context-warning,
+  .estimate-bar {
+    width: min(100% - 24px, var(--layout-chat-max));
+  }
+
+  .chat > .composer .composer__bar {
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 7px;
+  }
+
+  .chat > .composer .composer-template-btn,
+  .chat > .composer .persona-select-wrap,
+  .chat > .composer .composer-export-btn,
+  .chat > .composer .model-selector-wrap,
+  .chat > .composer .model-selector {
+    display: inline-flex !important;
+    min-width: 0;
+    max-width: 100%;
+  }
+
+  .chat > .composer .persona-select-wrap,
+  .chat > .composer .model-selector-wrap {
+    flex: 1 1 120px;
+  }
+
+  .chat > .composer .model-selector {
+    width: 100%;
+  }
+
+  .chat > .composer .composer-template-btn,
+  .chat > .composer .composer-export-btn {
+    flex: 0 0 auto;
+  }
+
+  .settings-overlay {
+    align-items: stretch;
+    justify-content: stretch;
+    padding: 12px;
+    overflow: hidden;
+  }
+
+  .settings-modal {
+    width: 100%;
+    height: calc(100dvh - 24px);
+    max-height: calc(100dvh - 24px);
+    box-sizing: border-box;
+    overflow-y: auto;
+    -webkit-overflow-scrolling: touch;
+    padding-bottom: 72px;
+    scroll-padding-bottom: 72px;
+  }
+
+  .settings-header {
+    position: sticky;
+    top: -18px;
+    z-index: 2;
+    margin: -18px -16px 16px;
+    padding: 18px 16px 12px;
+    background: var(--paper-pure, #FFFCF5);
+    border-bottom: 1px solid var(--line, rgba(26, 22, 18, 0.08));
+  }
+
+  .settings-danger {
+    scroll-margin-block: 24px;
+    padding-bottom: 72px;
+  }
+}
+
+/* Pass 6b — terminal overrides. Keep these at the end so later legacy polish
+ * blocks cannot reintroduce heavy form-widget styling. */
+.chat > .composer {
+  border-radius: 12px !important;
+}
+
+.composer textarea {
+  border-radius: 12px 12px 0 0 !important;
+}
+
+.starter-chip,
+.starter-chip--primary {
+  border-radius: 8px !important;
+}
+
+.composer-tool-btn,
+.chat > .composer .composer-tools-trigger,
+.chat > .composer .header-chip-btn,
+.chat > .composer > .composer__bar > button,
+.chat > .composer .model-selector,
+.chat > .composer .persona-select-wrap {
+  border-color: var(--line, rgba(26, 22, 18, 0.08)) !important;
+}
+
+.chat > .composer > .composer__bar > button[type="submit"]:disabled {
+  background: var(--paper-deep, #EBE4D4) !important;
+  color: var(--ink-5, #BCB09D) !important;
+  opacity: 1 !important;
+}
+
+.app > header .settings-btn,
+.chat-header > .ribbon-toggle,
+.chat-header .ribbon-toggle {
+  width: 30px !important;
+  min-width: 30px !important;
+  height: 30px !important;
+  min-height: 30px !important;
+  border-color: var(--line, rgba(26, 22, 18, 0.08)) !important;
+}
+
+/* Pass 7 — visible-detail repair after Playwright screenshot review.
+ * Keep this terminal: older style layers above still carry the pre-Taori
+ * dense app shell and can otherwise leak back into the redesigned surface. */
+.conv-list {
+  padding: 0 8px 16px !important;
+  gap: 3px !important;
+}
+
+.conv-group-head {
+  padding: 16px 12px 6px !important;
+  color: var(--ink-4, #8B8174) !important;
+  font-size: 10.5px !important;
+  font-weight: 500 !important;
+  letter-spacing: 0.14em !important;
+}
+
+.conv-group-head--pinned {
+  color: color-mix(in srgb, var(--gold, #B9822B) 72%, var(--ink-4, #8B8174)) !important;
+}
+
+.conv-item {
+  display: flex !important;
+  align-items: flex-start !important;
+  margin: 0 !important;
+  padding: 9px 12px !important;
+  border: 0 !important;
+  border-radius: 6px !important;
+  background: transparent !important;
+  box-shadow: none !important;
+  color: var(--ink, #1A1612) !important;
+  gap: 0 !important;
+}
+
+.conv-item:hover {
+  background: var(--paper-rise, #FDFBF6) !important;
+  box-shadow: none !important;
+}
+
+.conv-item.active,
+.conv-item.pinned.active {
+  background: var(--paper-pure, #FFFCF5) !important;
+  box-shadow: var(--shadow-1, 0 1px 3px rgba(26, 22, 18, 0.06)) !important;
+}
+
+.conv-item.active::before {
+  display: block !important;
+  left: -8px !important;
+  top: 14px !important;
+  bottom: 14px !important;
+  width: 2px !important;
+  border-radius: 2px !important;
+  background: var(--thread, #9B3D2F) !important;
+}
+
+.conv-item .conv-title {
+  flex: 1 1 auto !important;
+  min-width: 0 !important;
+  width: 100% !important;
+  padding: 0 !important;
+  color: var(--ink, #1A1612) !important;
+  font-size: 13px !important;
+  font-weight: 450 !important;
+  line-height: 1.4 !important;
+}
+
+.conv-title-text {
+  display: block !important;
+  min-width: 0 !important;
+  max-width: 100% !important;
+  overflow: hidden !important;
+  text-overflow: ellipsis !important;
+  white-space: nowrap !important;
+}
+
+.conv-item.active .conv-title {
+  font-weight: 500 !important;
+}
+
+.conv-meta {
+  flex-basis: 100% !important;
+  padding: 3px 0 0 !important;
+  gap: 6px !important;
+  color: var(--ink-4, #8B8174) !important;
+  font-size: 11px !important;
+  line-height: 1.3 !important;
+}
+
+.conv-meta-type {
+  display: inline-flex !important;
+  align-items: center !important;
+  height: auto !important;
+  padding: 0 !important;
+  border: 0 !important;
+  border-radius: 0 !important;
+  background: transparent !important;
+  color: var(--ink-4, #8B8174) !important;
+  font-size: 11px !important;
+  font-weight: 400 !important;
+  letter-spacing: 0 !important;
+}
+
+.conv-meta-type::before {
+  content: '' !important;
+  display: inline-block !important;
+  width: 5px !important;
+  height: 5px !important;
+  margin-right: 6px !important;
+  border-radius: 50% !important;
+  background: var(--ink-5, #BCB09D) !important;
+}
+
+.conv-meta-type.is-roundtable::before {
+  background: var(--mountain, #456F5B) !important;
+}
+
+.conv-meta-type.is-research::before {
+  background: var(--gold, #B9822B) !important;
+}
+
+.conv-meta-sep {
+  opacity: 0.6 !important;
+}
+
+.conv-meta-status {
+  min-width: 0 !important;
+  overflow: hidden !important;
+  color: var(--ink-4, #8B8174) !important;
+  text-overflow: ellipsis !important;
+  white-space: nowrap !important;
+}
+
+.conv-meta-time {
+  margin-left: 0 !important;
+  color: var(--ink-4, #8B8174) !important;
+}
+
+.conv-actions {
+  top: 6px !important;
+  right: 6px !important;
+  transform: none !important;
+  padding: 2px !important;
+  gap: 0 !important;
+  border: 1px solid var(--line, rgba(26, 22, 18, 0.08)) !important;
+  border-radius: 7px !important;
+  background: var(--paper-pure, #FFFCF5) !important;
+  box-shadow: 0 2px 6px rgba(26, 22, 18, 0.06) !important;
+  opacity: 0 !important;
+  visibility: hidden !important;
+}
+
+.conv-item:hover .conv-actions,
+.conv-item:focus-within .conv-actions {
+  opacity: 1 !important;
+  visibility: visible !important;
+}
+
+.conv-actions button {
+  width: 16px !important;
+  height: 20px !important;
+  padding: 0 !important;
+  border-radius: 5px !important;
+  color: var(--ink-4, #8B8174) !important;
+  font-size: 9.5px !important;
+}
+
+.conv-actions button:hover {
+  background: var(--paper-deep, #EBE4D4) !important;
+  color: var(--ink, #1A1612) !important;
+}
+
+.chat > .composer .composer__bar {
+  gap: 6px !important;
+}
+
+.chat > .composer .composer-tools-trigger,
+.composer-tool-btn,
+.chat > .composer .header-chip-btn,
+.chat > .composer > .composer__bar > button,
+.chat > .composer .model-selector,
+.chat > .composer .persona-select-wrap {
+  border-color: var(--line, rgba(26, 22, 18, 0.08)) !important;
+  box-shadow: none !important;
+}
+
+.chat > .composer .model-selector,
+.chat > .composer .persona-select-wrap,
+.chat > .composer .header-chip-btn,
+.composer-tool-btn,
+.chat > .composer .composer-tools-trigger {
+  background: transparent !important;
+}
+
+@media (max-width: 760px) {
+  .workspace {
+    gap: 0 !important;
+    background: var(--paper, #F4EFE4) !important;
+  }
+
+  .sidebar {
+    flex: 0 0 auto !important;
+    width: 100% !important;
+    max-height: 186px !important;
+    border-right: 0 !important;
+    border-bottom: 0 !important;
+    box-shadow: none !important;
+  }
+
+  .workspace-main,
+  .chat {
+    border-top: 0 !important;
+    background: var(--paper, #F4EFE4) !important;
+    box-shadow: none !important;
+  }
+
+  .chat-header {
+    min-height: 44px !important;
+    height: 44px !important;
+    padding: 0 28px 0 14px !important;
+    border-top: 0 !important;
+    border-bottom: 1px solid var(--line-faint, rgba(26, 22, 18, 0.04)) !important;
+    background: var(--paper, #F4EFE4) !important;
+    box-shadow: none !important;
+  }
+
+  .chat-title-stack {
+    display: none !important;
+  }
+
+  .chat-header > .ribbon-toggle,
+  .chat-header .ribbon-toggle {
+    position: static !important;
+    margin-left: auto !important;
+    width: 28px !important;
+    min-width: 28px !important;
+    height: 28px !important;
+    min-height: 28px !important;
+    border-color: var(--line, rgba(26, 22, 18, 0.08)) !important;
+  }
+
+  .messages {
+    padding-top: 12px !important;
+    padding-bottom: 24px !important;
+    scroll-padding-bottom: 24px !important;
+  }
+
+  .chat > .composer {
+    margin-top: 6px !important;
+    margin-bottom: 4px !important;
+    border-radius: 12px !important;
+    box-shadow: 0 4px 18px rgba(26, 22, 18, 0.07), 0 1px 2px rgba(26, 22, 18, 0.04) !important;
+  }
+
+  .composer textarea {
+    min-height: 68px !important;
+    padding: 13px 14px 8px !important;
+  }
+
+  .chat > .composer .composer__bar {
+    display: grid !important;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) minmax(118px, 1.35fr) 30px !important;
+    gap: 5px 6px !important;
+    padding: 7px 8px 8px !important;
+  }
+
+  .chat > .composer .model-selector-wrap {
+    grid-column: 3 !important;
+    grid-row: 2 !important;
+    min-width: 0 !important;
+  }
+
+  .chat > .composer .model-selector {
+    width: 100% !important;
+  }
+
+  .chat > .composer .composer-tools-wrapper {
+    grid-column: 2 !important;
+    grid-row: 1 !important;
+    min-width: 0 !important;
+  }
+
+  .chat > .composer .composer-tool-btn {
+    grid-column: 1 !important;
+    grid-row: 1 !important;
+  }
+
+  .chat > .composer .persona-select-wrap,
+  .chat > .composer .composer-template-btn,
+  .chat > .composer .composer-export-btn,
+  .chat > .composer .composer-tools-wrapper,
+  .chat > .composer .header-chip-btn,
+  .composer-tool-btn {
+    width: 100% !important;
+  }
+
+  .chat > .composer .persona-select-wrap {
+    grid-column: 1 !important;
+    grid-row: 2 !important;
+  }
+
+  .chat > .composer .composer-template-btn {
+    grid-column: 2 !important;
+    grid-row: 2 !important;
+  }
+
+  .chat > .composer .composer-export-btn {
+    grid-column: 3 !important;
+    grid-row: 1 !important;
+  }
+
+  .chat > .composer > .composer__bar > button[type="submit"] {
+    grid-column: 4 !important;
+    grid-row: 1 / span 2 !important;
+    align-self: center !important;
+    justify-self: end !important;
+  }
+
+  .chat > .composer .composer-tools-trigger,
+  .composer-tool-btn,
+  .chat > .composer .header-chip-btn,
+  .chat > .composer .model-selector,
+  .chat > .composer .persona-select-wrap {
+    min-height: 28px !important;
+    height: 28px !important;
+    padding-top: 0 !important;
+    padding-bottom: 0 !important;
+    border-radius: 7px !important;
+    color: var(--ink-2, #3A332B) !important;
+    font-size: 12px !important;
+  }
+
+  .composer__hint {
+    display: grid !important;
+    grid-template-columns: 1fr !important;
+    gap: 4px !important;
+    padding-bottom: 8px !important;
+  }
+
+  .messages .msg,
+  .messages .msg.user,
+  .messages .msg.assistant {
+    display: grid !important;
+    grid-template-columns: 24px minmax(0, 1fr) !important;
+    column-gap: 11px !important;
+    width: 100% !important;
+    max-width: 100% !important;
+    margin-left: 0 !important;
+    margin-right: 0 !important;
+  }
+
+  .messages .msg::before {
+    width: 24px !important;
+    height: 24px !important;
+    margin-top: 1px !important;
+    font-size: 10px !important;
+  }
+
+  .messages .msg.assistant::before {
+    font-size: 15px !important;
+  }
+
+  .messages .msg-role {
+    margin-bottom: 3px !important;
+    font-size: 11.5px !important;
+    line-height: 1.35 !important;
+  }
+
+  .messages .msg-content,
+  .messages .msg-md {
+    display: block !important;
+    min-width: 0 !important;
+    max-width: 100% !important;
+    color: var(--ink, #1A1612) !important;
+    font-size: 13px !important;
+    line-height: 1.58 !important;
+    overflow-wrap: anywhere !important;
+    word-break: break-word !important;
+  }
+
+  .messages .msg-actions {
+    margin-top: 7px !important;
+  }
+
+  .messages .context-snapshot-card,
+  .messages .cost-stream-detail,
+  .messages .tool-trace {
+    display: none !important;
+  }
+
+  .conv-actions {
+    position: static !important;
+    transform: none !important;
+    margin-left: auto !important;
+    align-self: start !important;
+    flex: 0 0 auto !important;
+    opacity: 1 !important;
+    visibility: visible !important;
+  }
+
+  .conv-actions button {
+    width: 24px !important;
+    min-width: 24px !important;
+    height: 24px !important;
+    min-height: 24px !important;
+  }
+
+  .discoverable-tip {
+    top: 10px !important;
+    right: 10px !important;
+    bottom: auto !important;
+    left: 10px !important;
+    justify-content: center !important;
+    z-index: 620 !important;
+  }
+
+  .discoverable-tip .tip-card {
+    width: min(100%, 340px) !important;
+    max-width: calc(100vw - 20px) !important;
+    padding: 12px !important;
+    border-radius: 10px !important;
+    box-shadow: 0 14px 32px rgba(26, 22, 18, 0.18) !important;
+  }
+
+  .discoverable-tip .tip-header,
+  .discoverable-tip .tip-body {
+    margin-bottom: 8px !important;
+  }
+
+  .discoverable-tip .tip-footer {
+    gap: 6px !important;
+  }
+
+  .discoverable-tip .tip-btn {
+    min-height: 30px !important;
+    padding: 6px 10px !important;
+    font-size: 12px !important;
+  }
+}
+
+/* Final micro-polish overrides. Keep this last: prior responsive repair
+ * blocks intentionally use !important and can otherwise reintroduce heavy
+ * toolbar controls on mobile.
+ */
+.chat > .composer .composer-tools-trigger,
+.chat > .composer .composer__bar .composer-tools-trigger,
+.chat > .composer .composer-tool-btn,
+.chat > .composer .header-chip-btn,
+.chat > .composer > .composer__bar > button:not([type="submit"]) {
+  border-color: transparent !important;
+  background: transparent !important;
+}
+
+.chat > .composer .persona-select-wrap,
+.chat > .composer .model-selector {
+  border-color: var(--line, rgba(26, 22, 18, 0.08)) !important;
+}
+
+@media (max-width: 760px) {
+  .chat > .composer .composer__bar {
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) 46px 30px !important;
+    gap: 6px !important;
+  }
+
+  .chat > .composer .composer-tool-btn {
+    grid-column: 1 !important;
+    grid-row: 1 !important;
+  }
+
+  .chat > .composer .composer-tools-wrapper {
+    grid-column: 2 !important;
+    grid-row: 1 !important;
+  }
+
+  .chat > .composer > .composer__bar > button[type="submit"] {
+    grid-column: 4 !important;
+    grid-row: 1 !important;
+  }
+
+  .chat > .composer .composer-export-btn,
+  .chat > .composer .composer-export-btn:disabled {
+    display: inline-flex !important;
+    grid-column: 3 !important;
+    grid-row: 1 !important;
+    justify-content: center !important;
+    min-width: 0 !important;
+    padding-left: 0 !important;
+    padding-right: 0 !important;
+    width: 100% !important;
+  }
+
+  .chat > .composer .composer-template-btn {
+    grid-column: 1 !important;
+    grid-row: 2 !important;
+    width: 100% !important;
+  }
+
+  .chat > .composer .persona-select-wrap {
+    grid-column: 2 / span 3 !important;
+    grid-row: 2 !important;
+    width: 100% !important;
+  }
+
+  .chat > .composer .model-selector-wrap {
+    grid-column: 1 / span 4 !important;
+    grid-row: 3 !important;
+    max-width: none !important;
+    width: 100% !important;
+  }
+
+  .chat > .composer .model-selector {
+    width: 100% !important;
+  }
 }
