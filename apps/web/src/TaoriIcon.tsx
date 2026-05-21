@@ -1,5 +1,5 @@
 /**
- * Taori brand icon — a restrained woven thread mark.
+ * Taori brand icon — two restrained threads woven through one knot.
  */
 import type { JSX } from 'react';
 
@@ -24,13 +24,23 @@ export function TaoriIcon({
     >
       <title>{title}</title>
       <path
-        d="M 8 22 C 12 18, 16 14, 20 10 C 22 8.5, 24 8.5, 25 10 C 25.5 11, 24.5 12, 22.5 12 C 18 12, 14 14, 10 18"
+        d="M 6 10 C 10 10, 12 16, 16 16 C 20 16, 22 22, 26 22"
         stroke="var(--thread, #9B3D2F)"
-        strokeWidth="2.2"
+        strokeWidth="1.6"
         strokeLinecap="round"
         strokeLinejoin="round"
         fill="none"
       />
+      <path
+        d="M 6 22 C 10 22, 12 16, 16 16 C 20 16, 22 10, 26 10"
+        stroke="var(--mountain, #2C5F5D)"
+        strokeWidth="1.6"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        fill="none"
+        opacity="0.86"
+      />
+      <circle cx="16" cy="16" r="1.2" fill="var(--ink, #1A1612)" />
     </svg>
   );
 }

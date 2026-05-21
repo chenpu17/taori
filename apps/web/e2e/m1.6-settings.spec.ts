@@ -169,9 +169,9 @@ test('model-center: opens, lists provider chip + chat model row, can disable + d
   await toggle.click();
   await expect(toggle).toBeChecked();
 
-  // Delete via row action; native confirm auto-accept.
-  page.once('dialog', (d) => void d.accept());
+  // Delete via the shared confirmation dialog.
   await page.locator('[data-testid^="model-row-delete-"]').first().click();
+  await page.getByRole('dialog', { name: '删除模型' }).getByRole('button', { name: '删除' }).click();
   await expect(rows).toHaveCount(0);
 });
 

@@ -98,11 +98,11 @@ test('redesigned empty chat shell matches Taori design structure', async ({ page
   await expect(page.getByTestId('composer-send')).toHaveCSS('opacity', '1');
 
   const topButton = page.getByTestId('open-cost-dashboard');
-  await expect(topButton).toHaveCSS('width', '30px');
-  await expect(topButton).toHaveCSS('border-color', 'rgba(26, 22, 18, 0.08)');
+  await expect(topButton).toHaveCSS('width', '32px');
+  await expect(topButton).toHaveCSS('border-color', 'rgba(0, 0, 0, 0)');
 
-  await expect(page.locator('.starter-chip').first()).toHaveCSS('border-radius', '8px');
-  await expect(page.locator('.starter-chip').first()).toHaveCSS('border-color', 'rgba(155, 61, 47, 0.18)');
+  await expect(page.locator('.starter-chip').first()).toHaveCSS('border-radius', '10px');
+  await expect(page.locator('.starter-chip').first()).toHaveCSS('border-color', 'rgba(0, 0, 0, 0)');
 
   const topbarActions = [
     page.getByTestId('ribbon-toggle'),
@@ -172,7 +172,7 @@ test('redesigned active chat, control center, and mobile shell stay coherent', a
   await page.getByTestId('open-model-center').click();
   await expect(page.getByTestId('control-center')).toBeVisible({ timeout: 10_000 });
   await expect(page.getByTestId('model-center')).toBeVisible({ timeout: 10_000 });
-  await expect(page.getByTestId('control-center')).toHaveCSS('background-color', 'rgb(255, 252, 245)');
+  await expect(page.getByTestId('control-center')).toHaveCSS('background-color', 'rgb(244, 239, 228)');
   await expect(page.getByTestId('model-center-sync')).toHaveCSS('background-image', 'none');
   await expect(page.getByTestId('model-center-sync')).toHaveCSS('background-color', 'rgb(26, 22, 18)');
   await expect(page.getByTestId('model-center-add-provider')).toHaveCSS('background-image', 'none');

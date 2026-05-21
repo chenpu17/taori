@@ -21,6 +21,7 @@
 11. [Browser-first 发布候选摘要](./product/15-browser-first-release-candidate.md) — WebUI + Sidecar 发布证据与已知风险
 12. [P1 Quick Compare 与断流续接](./product/16-p1-quick-compare-stream-resume.md) — 轻量多模型对比与 incomplete run 恢复体验
 13. [P2 轻量 RAG 预备层](./product/17-p2-lightweight-rag-prep.md) — 本地文件 chunk、SQLite FTS/BM25 与引用片段
+14. [P7 工作流编排](./product/27-p7-workflow-orchestration.md) — n8n-like 画布、节点运行、审批、恢复与成本守卫
 
 ### 我是技术 / 工程视角的读者
 1. [架构总览](./architecture/01-overview.md) — Tauri + Renderer + Sidecar 三进程模型
@@ -36,6 +37,7 @@
 11. [P1 Quick Compare / Stream Resume 变更提案](./architecture/20-p1-quick-compare-stream-resume-proposal.md) — 三模型轻量 fan-out 与断流续接状态归属
 12. [P2 轻量 RAG 预备层变更提案](./architecture/21-p2-lightweight-rag-prep-proposal.md) — 文件 chunk、FTS/BM25、file_search 与 embedding 预留
 13. [Standalone Sidecar Daemon 模式提案](./architecture/31-standalone-daemon-mode-proposal.md) — npm standalone 常驻后台、status/stop 与远程 host 绑定
+14. [P7 工作流编排架构提案](./architecture/34-p7-workflow-orchestration-proposal.md) — workflow definition/run/node runtime、API、数据模型与验证门禁
 
 ### 我是模块作者
 - [模块清单](./modules/inventory.md) — 系统所有模块的灰盒一览

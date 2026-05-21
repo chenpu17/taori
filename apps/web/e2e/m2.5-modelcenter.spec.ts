@@ -565,8 +565,8 @@ test('model-center: deleting a provider removes its models from the chat selecto
   await page.getByTestId('open-model-center').click();
   await expect(page.getByTestId('model-center')).toBeVisible();
   await page.getByTestId(`provider-nav-item-${first.id}`).click();
-  page.once('dialog', (d) => void d.accept());
   await page.getByTestId(`provider-detail-delete-${first.id}`).click();
+  await page.getByRole('dialog', { name: '删除 Provider' }).getByRole('button', { name: '删除' }).click();
   await expect(page.getByTestId(`provider-nav-item-${first.id}`)).toHaveCount(0);
 
   const modelsRes = await authedFetch(env, '/v1/models');

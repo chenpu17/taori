@@ -2600,11 +2600,11 @@ function GeneralTab({ onReopenOnboarding, onChanged }: { onReopenOnboarding: () 
   return (
     <>
       <AutoFallbackSection />
-      <details>
+      <details open>
         <summary>回复中断恢复</summary>
         <StreamRecoverySection />
       </details>
-      <details>
+      <details open>
         <summary>模型思考</summary>
         <ThinkingSection />
       </details>

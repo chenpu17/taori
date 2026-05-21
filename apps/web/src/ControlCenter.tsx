@@ -332,15 +332,16 @@ export function ControlCenter({
                 </p>
               ) : null}
             </div>
-            <div className="control-center__close-actions">
+            <div className="control-center__close-actions" data-section={activeSection}>
               {activeSection === 'models' && (
                 <button
                   type="button"
                   className="control-center__compat-close"
                   onClick={onClose}
                   data-testid="model-center-close"
+                  aria-label="关闭模型中心"
                 >
-                  关闭模型中心
+                  ✕
                 </button>
               )}
               {activeSection === 'costs' && (
@@ -349,8 +350,9 @@ export function ControlCenter({
                   className="control-center__compat-close"
                   onClick={onClose}
                   data-testid="cost-dashboard-close"
+                  aria-label="关闭成本看板"
                 >
-                  关闭成本看板
+                  ✕
                 </button>
               )}
               <button

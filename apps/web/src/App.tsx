@@ -720,7 +720,7 @@ export function App(): JSX.Element {
   const showBrowseOnly = boot.kind === 'onboarding' && browseOnly && !forceOnboarding;
 
   return (
-    <div className="app">
+    <div className="app taori-root paper-grain" data-colorway="warm" data-density="default">
       <header>
         <h1 className="brand">
           <TaoriIcon size={28} className="brand__icon" />
@@ -895,7 +895,7 @@ function StatusBadge({
   const tip = `sidecar v${health.version ?? '?'} · control: ${health.control}`;
   return (
     <span className={`badge ${health.ok ? 'ok' : 'bad'}`} title={tip}>
-      ●<span className="badge-label"> {health.ok ? '在线' : '离线'} v{health.version ?? '?'}</span>
+      ●<span className="badge-label"> {health.ok ? '在线' : '离线'}</span>
     </span>
   );
 }
@@ -1379,6 +1379,9 @@ function Workspace({
             conversationId={activeConvId}
             conversationType={
               conversations.find((c) => c.id === activeConvId)?.type ?? null
+            }
+            conversationTitle={
+              conversations.find((c) => c.id === activeConvId)?.title ?? null
             }
             onConversationCreated={(id) => {
               setActiveConvId(id);
@@ -2008,6 +2011,7 @@ function ChatPanel({
   onModelChange,
   conversationId,
   conversationType,
+  conversationTitle,
   onConversationCreated,
   onConversationUpdated,
   onOpenSettings,
@@ -2031,6 +2035,7 @@ function ChatPanel({
   onModelChange: (id: string) => void;
   conversationId: string | null;
   conversationType: string | null;
+  conversationTitle: string | null;
   onConversationCreated: (id: string) => void;
   onConversationUpdated: () => void;
   onOpenSettings: () => void;
@@ -5225,7 +5230,7 @@ function ChatPanel({
             {conversationType === 'roundtable'
               ? '多模型圆桌'
               : conversationId
-                ? '继续对话'
+                ? conversationTitle || '继续对话'
                 : '新对话'}
           </strong>
           <span>
@@ -5334,7 +5339,7 @@ function ChatPanel({
         {!historyLoading && messages.length === 0 && (
           <div className="starter" data-testid="starter">
             <div className="starter-mark" aria-hidden="true">
-              <TaoriIcon size={36} />
+              <TaoriIcon size={52} />
             </div>
             <h2 className="starter-title">{getGreetingPrefix()}让我们把今天的问题<em> 织 </em>起来。</h2>
             <p className="starter-sub">
@@ -5365,6 +5370,11 @@ function ChatPanel({
                   <span className="starter-chip__desc">{p.desc}</span>
                 </button>
               ))}
+            </div>
+            <div className="starter-shortcuts" aria-label="快捷键提示">
+              <span><kbd>⌘</kbd><kbd>K</kbd> 命令面板</span>
+              <span><kbd>⌘</kbd><kbd>↵</kbd> 发送</span>
+              <span><kbd>⌘</kbd><kbd>/</kbd> 切换模型</span>
             </div>
           </div>
         )}
@@ -6228,6 +6238,24 @@ function ChatPanel({
             >
               <Icon name="paperclip" size={13} />
               <span>文件</span>
+            </button>
+            <button
+              type="button"
+              className="composer-tool-btn composer-tool-btn--web"
+              title="网页搜索与联网工具"
+              onClick={() => setToolsMenuOpen(true)}
+            >
+              <Icon name="web" size={13} />
+              <span>联网</span>
+            </button>
+            <button
+              type="button"
+              className="composer-tool-btn composer-tool-btn--image"
+              title="图像理解与生成工具"
+              onClick={() => setToolsMenuOpen(true)}
+            >
+              <Icon name="image" size={13} />
+              <span>图像</span>
             </button>
             <div className="composer-tools-wrapper" ref={toolsMenuRef}>
               <button
