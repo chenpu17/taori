@@ -670,10 +670,12 @@ function Footer({
 interface ComposerProps {
   mode: ModeId | null;
   onClearMode: () => void;
+  onSetMode: (m: ModeId) => void;
   model: ModelId;
   modelDisplay?: { color: string; label: string };
   attach: string[];
   onRemoveAttach: (i: number) => void;
+  onAttach?: (name: string) => void;
   value: string;
   onChange: (v: string) => void;
   onPlus: (e: MouseEvent) => void;
@@ -683,16 +685,19 @@ interface ComposerProps {
   disabled?: boolean;
   placeholder?: string;
   onSend?: () => void;
+  onStop?: () => void;
   streaming?: boolean;
 }
 
 function Composer({
   mode,
   onClearMode,
+  onSetMode,
   model,
   modelDisplay,
   attach,
   onRemoveAttach,
+  onAttach,
   value,
   onChange,
   onPlus,
@@ -702,12 +707,28 @@ function Composer({
   disabled = false,
   placeholder,
   onSend,
+  onStop,
   streaming = false,
 }: ComposerProps) {
+  const [slashMenu, setSlashMenu] = useState(false);
+  const fileRef = useRef<HTMLInputElement>(null);
   const ph = placeholder ?? (mode ? `让 Taori ${MODES[mode].name}……` : '说点什么……  按 / 调用模式');
 
   return (
-    <div className="composer-shell">
+    <div
+      className="composer-shell"
+      onDragOver={(e) => { e.preventDefault(); e.stopPropagation(); }}
+      onDrop={(e) => {
+        e.preventDefault(); e.stopPropagation();
+        const files = Array.from(e.dataTransfer.files);
+        files.forEach(f => onAttach?.(f.name));
+      }}
+    >
+      <input ref={fileRef} type="file" style={{ display: 'none' }} multiple onChange={(e) => {
+        const files = Array.from(e.target.files ?? []);
+        files.forEach(f => onAttach?.(f.name));
+        e.target.value = '';
+      }} />
       {attach.length > 0 && (
         <div className="composer-attach-row">
           {attach.map((a, i) => (
@@ -733,7 +754,7 @@ function Composer({
         </div>
       )}
 
-      <div className="composer">
+      <div className="composer" style={{ position: 'relative' }}>
         <button type="button" className={'composer-plus' + (plusOpen ? ' active' : '')} onClick={onPlus}>
           <Icon name="plus" size={16} />
         </button>
@@ -743,13 +764,17 @@ function Composer({
           placeholder={ph}
           value={value}
           onChange={(e) => {
-            onChange(e.target.value);
+            const val = e.target.value;
+            onChange(val);
             e.target.style.height = 'auto';
             e.target.style.height = Math.min(e.target.scrollHeight, 200) + 'px';
+            setSlashMenu(val === '/');
           }}
           onKeyDown={(e) => {
+            if (e.key === 'Escape' && slashMenu) { setSlashMenu(false); e.preventDefault(); return; }
             if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) {
               e.preventDefault();
+              if (slashMenu) setSlashMenu(false);
               onSend?.();
             }
           }}
@@ -760,9 +785,37 @@ function Composer({
           {modelDisplay?.label ?? MODELS[model].short}
           <Icon name="chevron-down" size={11} />
         </button>
-        <button type="button" className={'composer-send' + (streaming || (!value && !mode) ? ' disabled' : '')} onClick={() => { if (!streaming && (value || mode)) onSend?.(); }}>
-          <Icon name="arrow-up" size={15} />
+        <button
+          type="button"
+          className={'composer-send' + (streaming ? ' streaming' : (!value.trim() && !mode ? ' disabled' : ''))}
+          onClick={streaming ? (onStop ?? undefined) : onSend}
+          disabled={!streaming && (!value.trim() && !mode)}
+          title={streaming ? '停止生成' : '发送'}
+        >
+          <Icon name={streaming ? 'x' : 'arrow-up'} size={16} />
         </button>
+
+        {slashMenu && (
+          <div className="mode-menu popup" style={{ position: 'absolute', bottom: '100%', left: 0, marginBottom: 4 }}>
+            {Object.entries(MODES).map(([key, m]) => (
+              <div key={key} className="mode-menu-item" onClick={() => {
+                if (key === 'file') {
+                  fileRef.current?.click();
+                } else {
+                  onSetMode(key as ModeId);
+                }
+                onChange('');
+                setSlashMenu(false);
+              }}>
+                <span className="ico"><Icon name={m.icon} size={13} /></span>
+                <span className="col">
+                  <span className="name">{m.name}</span>
+                  <span className="desc">{m.desc}</span>
+                </span>
+              </div>
+            ))}
+          </div>
+        )}
       </div>
 
       <div className="composer-meta">
@@ -1257,10 +1310,12 @@ export function App() {
         <Composer
           mode={mode}
           onClearMode={() => setMode(null)}
+          onSetMode={setMode}
           model={model}
           modelDisplay={composerModelDisplay}
           attach={attach}
           onRemoveAttach={(i) => setAttach(attach.filter((_, k) => k !== i))}
+          onAttach={(name) => setAttach(prev => [...prev, name])}
           value={value}
           onChange={setValue}
           onPlus={(e) => {
@@ -1278,6 +1333,7 @@ export function App() {
           disabled={isNoKey || isStreaming}
           placeholder={isNoKey ? '先配一个 API Key 才能聊 — 看下面的卡片 ↓' : undefined}
           onSend={isLive ? handleSend : undefined}
+          onStop={() => { abortRef.current?.(); setIsStreaming(false); }}
           streaming={isStreaming}
         />
 

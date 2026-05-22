@@ -562,6 +562,16 @@ button {
   pointer-events: none;
   box-shadow: none;
 }
+.composer-send.streaming {
+  background: var(--err);
+  border-color: var(--err);
+  color: #fff;
+  animation: send-pulse 1.5s ease infinite;
+}
+@keyframes send-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.7; }
+}
 .composer-modechip {
   display: inline-flex;
   align-items: center;
@@ -2267,6 +2277,31 @@ button {
   color: var(--text-muted);
   font-family: var(--font-mono);
 }
+
+/* ========== Light theme ========== */
+[data-theme="light"] {
+  --bg-base: #ffffff;
+  --bg-primary: #f8f9fa;
+  --bg-secondary: #f0f1f3;
+  --bg-elevated: #ffffff;
+  --bg-hover: rgba(0,0,0,.05);
+  --bg-active: rgba(0,0,0,.08);
+  --text-primary: #1a1a2e;
+  --text-secondary: #4a4a6a;
+  --text-muted: #8888a0;
+  --text-faint: #b0b0c0;
+  --border: #e2e3e8;
+  --accent: #6366f1;
+  --accent-bg: rgba(99,102,241,.08);
+  --ok: #10b981;
+  --err: #ef4444;
+  --warn: #f59e0b;
+}
+[data-theme="light"] .side { background: #f8f9fa; border-right: 1px solid #e2e3e8; }
+[data-theme="light"] .hdr { background: #fff; border-bottom: 1px solid #e2e3e8; }
+[data-theme="light"] .foot { background: #fff; border-top: 1px solid #e2e3e8; }
+[data-theme="light"] .drawer { background: #fff; }
+[data-theme="light"] .composer-shell { background: #fff; border-top: 1px solid #e2e3e8; }
 
 /* ========== Responsive ========== */
 

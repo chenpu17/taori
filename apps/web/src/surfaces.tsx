@@ -1,4 +1,4 @@
-import { useRef, useState, type ReactNode } from 'react';
+import { useEffect, useRef, useState, type ReactNode } from 'react';
 import { BrandMark, Icon, ModelDot, MODELS, type IconName, type ModelId } from './primitives';
 import type { Model, Provider } from '@taori/shared';
 import type { Conversation, CostBreakdownResponse, ProviderKeyStatus, RealtimeCost } from './api';
@@ -1005,6 +1005,7 @@ function DrawerTemplates() {
 
 // ── Drawer B — Settings ──────────────────────────────────────
 const SETTINGS_TABS = [
+  { id: 'appearance', name: '外观', icon: 'sun' as const },
   { id: 'budget', name: '预算', icon: 'wallet' as const },
   { id: 'fallback', name: '兜底策略', icon: 'shield' as const },
   { id: 'data', name: '数据', icon: 'database' as const },
@@ -1013,7 +1014,7 @@ const SETTINGS_TABS = [
 ];
 
 export function SettingsDrawer({ onClose }: { onClose: () => void }) {
-  const [tab, setTab] = useState<'budget' | 'fallback' | 'data' | 'diag' | 'about'>('budget');
+  const [tab, setTab] = useState<'appearance' | 'budget' | 'fallback' | 'data' | 'diag' | 'about'>('appearance');
   return (
     <>
       <div className="drawer-backdrop" onClick={onClose} />
@@ -1035,6 +1036,7 @@ export function SettingsDrawer({ onClose }: { onClose: () => void }) {
           ))}
         </div>
         <div className="drawer-body">
+          {tab === 'appearance' && <SettingsAppearance />}
           {tab === 'budget' && <SettingsBudget />}
           {tab === 'fallback' && <SettingsFallback />}
           {tab === 'data' && <SettingsData />}
@@ -1042,6 +1044,49 @@ export function SettingsDrawer({ onClose }: { onClose: () => void }) {
           {tab === 'about' && <SettingsAbout />}
         </div>
       </div>
+    </>
+  );
+}
+
+function SettingsAppearance() {
+  const [theme, setTheme] = useState<'dark' | 'light' | 'system'>('dark');
+
+  const applyTheme = (t: 'dark' | 'light' | 'system') => {
+    setTheme(t);
+    if (t === 'system') {
+      document.documentElement.removeAttribute('data-theme');
+    } else {
+      document.documentElement.setAttribute('data-theme', t);
+    }
+    localStorage.setItem('taori-theme', t);
+  };
+
+  // Load saved theme on mount
+  useEffect(() => {
+    const saved = localStorage.getItem('taori-theme') as 'dark' | 'light' | 'system' | null;
+    if (saved) applyTheme(saved);
+  }, []);
+
+  const options = [
+    { id: 'dark' as const, name: '深色', sub: '默认深色主题' },
+    { id: 'light' as const, name: '浅色', sub: '明亮的浅色主题' },
+    { id: 'system' as const, name: '跟随系统', sub: '自动匹配系统设置' },
+  ];
+
+  return (
+    <>
+      <div className="section-h">主题</div>
+      {options.map(o => (
+        <div key={o.id} className="list-row" style={{ cursor: 'pointer' }} onClick={() => applyTheme(o.id)}>
+          <span className="ic"><Icon name={o.id === 'dark' ? 'moon' : o.id === 'light' ? 'sun' : 'globe'} size={15} /></span>
+          <div>
+            <div className="name">{o.name}</div>
+            <div className="sub">{o.sub}</div>
+          </div>
+          <span />
+          <div className={'switch' + (theme === o.id ? ' on' : '')} role="switch" aria-checked={theme === o.id} tabIndex={0} onClick={(e) => { e.stopPropagation(); applyTheme(o.id); }} onKeyDown={(e) => e.key === 'Enter' && applyTheme(o.id)} />
+        </div>
+      ))}
     </>
   );
 }
