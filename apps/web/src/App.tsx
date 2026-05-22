@@ -742,7 +742,11 @@ function Composer({
           rows={1}
           placeholder={ph}
           value={value}
-          onChange={(e) => onChange(e.target.value)}
+          onChange={(e) => {
+            onChange(e.target.value);
+            e.target.style.height = 'auto';
+            e.target.style.height = Math.min(e.target.scrollHeight, 200) + 'px';
+          }}
           onKeyDown={(e) => {
             if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) {
               e.preventDefault();
@@ -934,20 +938,18 @@ export function App() {
   // Global keyboard shortcuts: ⌘N (new chat), ⌘K (command palette)
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
-      // Skip when typing in input/textarea
-      const tag = (e.target as HTMLElement).tagName;
-      if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
-
-      // ⌘N / Ctrl+N — new chat
+      // ⌘N / Ctrl+N — new chat (works everywhere, prevents browser new window)
       if ((e.metaKey || e.ctrlKey) && e.key === 'n') {
         e.preventDefault();
         if (isLive) { setConvId(null); setValue(''); setMode(null); setAttach([]); }
         else { setScenarioId('empty'); }
+        return;
       }
-      // ⌘K / Ctrl+K — command palette
+      // ⌘K / Ctrl+K — command palette (works everywhere)
       if ((e.metaKey || e.ctrlKey) && e.key === 'k') {
         e.preventDefault();
         setCmdPaletteOpen((v) => !v);
+        return;
       }
     };
     window.addEventListener('keydown', handler);
