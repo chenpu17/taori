@@ -1,10 +1,13 @@
 /**
- * Resolves the Sidecar HTTP endpoint and bearer token.
+ * Sidecar endpoint resolver + authedFetch.
  *
  * Two modes:
- *   - Tauri runtime: window.__TAURI__ is present → call invoke('sidecar_endpoint').
- *   - Browser dev: vars come from VITE_SIDECAR_URL / VITE_SIDECAR_BEARER (set
- *     by the dev script that also boots the standalone sidecar).
+ *   - Tauri runtime (window.__TAURI_INTERNALS__): invoke('sidecar_endpoint').
+ *   - Browser dev: VITE_SIDECAR_URL / VITE_SIDECAR_BEARER from .env.local
+ *     (set by scripts/dev-browser.mjs).
+ *   - Standalone browser (sidecar serves the SPA): cookie-mode bootstrap.
+ *
+ * Kept thin on purpose — typed clients live in api.ts.
  */
 
 export interface SidecarEndpoint {
@@ -28,41 +31,33 @@ let cached: SidecarEndpoint | null = null;
 
 export async function getSidecarEndpoint(): Promise<SidecarEndpoint> {
   if (cached) return cached;
+
   if (typeof window !== 'undefined' && window.__TAURI_INTERNALS__) {
-    const { invoke } = await import('@tauri-apps/api/core').catch(() => ({
-      invoke: null as unknown as never,
-    }));
-    if (invoke) {
-      const ep = (await invoke('sidecar_endpoint')) as SidecarEndpoint;
+    const mod = await import('@tauri-apps/api/core').catch(() => null);
+    if (mod?.invoke) {
+      const ep = (await mod.invoke('sidecar_endpoint')) as SidecarEndpoint;
       cached = ep;
       return ep;
     }
   }
+
   if (typeof window !== 'undefined' && window.__TAORI_BROWSER_BOOTSTRAP__) {
-    cached = {
-      url: window.__TAORI_BROWSER_BOOTSTRAP__.url,
-      bearer: window.__TAORI_BROWSER_BOOTSTRAP__.bearer ?? '',
-      authMode: window.__TAORI_BROWSER_BOOTSTRAP__.authMode,
-    };
+    const b = window.__TAORI_BROWSER_BOOTSTRAP__;
+    cached = { url: b.url, bearer: b.bearer ?? '', authMode: b.authMode };
     return cached;
   }
-  const url = (import.meta as ImportMeta & { env: Record<string, string> }).env
-    .VITE_SIDECAR_URL;
-  const bearer = (import.meta as ImportMeta & { env: Record<string, string> })
-    .env.VITE_SIDECAR_BEARER;
-  if (!url || !bearer) {
-    throw new Error(
-      'Sidecar endpoint not available. In dev set VITE_SIDECAR_URL & VITE_SIDECAR_BEARER.',
-    );
+
+  const env = (import.meta as ImportMeta & { env: Record<string, string> }).env;
+  const url = env.VITE_SIDECAR_URL;
+  const bearer = env.VITE_SIDECAR_BEARER;
+  if (!url) {
+    throw new Error('Sidecar endpoint not configured. Run `pnpm dev:browser` from repo root.');
   }
-  cached = { url, bearer, authMode: 'bearer' };
+  cached = { url, bearer: bearer ?? '', authMode: 'bearer' };
   return cached;
 }
 
-export async function authedFetch(
-  path: string,
-  init: RequestInit = {},
-): Promise<Response> {
+export async function authedFetch(path: string, init: RequestInit = {}): Promise<Response> {
   const ep = await getSidecarEndpoint();
   return fetch(`${ep.url}${path}`, {
     ...init,
@@ -72,4 +67,12 @@ export async function authedFetch(
       ...(ep.bearer ? { Authorization: `Bearer ${ep.bearer}` } : {}),
     },
   });
+}
+
+export function isSidecarConfigured(): boolean {
+  if (typeof window === 'undefined') return false;
+  if (window.__TAURI_INTERNALS__) return true;
+  if (window.__TAORI_BROWSER_BOOTSTRAP__) return true;
+  const env = (import.meta as ImportMeta & { env: Record<string, string> }).env;
+  return !!env.VITE_SIDECAR_URL;
 }

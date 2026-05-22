@@ -1,0 +1,83 @@
+/* =========================================================
+   Taori WebUI · 冷工具感深色设计系统
+   ========================================================= */
+
+:root {
+  /* Surface — deep cool charcoal, slightly blue-shifted */
+  --bg-deep: #07090e;
+  --bg-base: #0c0f15;
+  --bg-surface: #11151d;
+  --bg-elevated: #161b25;
+  --bg-input: #0d1119;
+  --bg-hover: #1c2230;
+  --bg-tint: rgba(255, 255, 255, 0.03);
+  --bg-glass: rgba(22, 27, 37, 0.72);
+
+  /* Borders — top-edge highlights for "lit from above" feel */
+  --border-subtle: #1a1f2a;
+  --border: #232936;
+  --border-strong: #313846;
+  --border-glow: rgba(255, 255, 255, 0.05);
+
+  /* Text */
+  --text-primary: #eceef3;
+  --text-secondary: #9ca3b0;
+  --text-muted: #636b7b;
+  --text-faint: #3f4654;
+
+  /* Accent — low-sat indigo (the "thread" color) */
+  --accent: #818cf8;
+  --accent-dim: #4f5db7;
+  --accent-hi: #a5b0ff;
+  --accent-bg: rgba(129, 140, 248, 0.1);
+  --accent-border: rgba(129, 140, 248, 0.32);
+  --accent-glow: rgba(129, 140, 248, 0.18);
+
+  /* Model identity colors — used on the thread + assistant labels */
+  --m-sonnet: #b79af7; /* violet */
+  --m-gpt: #5fe0b0; /* mint */
+  --m-deepseek: #6ba7f8; /* blue */
+  --m-gemini: #f4c36b; /* amber */
+  --m-dalle: #f4869a; /* pink */
+  --m-taori: #7b89f7; /* accent */
+
+  /* Status */
+  --ok: #4fb47a;
+  --warn: #d6a04a;
+  --err: #da6855;
+  --warn-bg: rgba(214, 160, 74, 0.1);
+  --err-bg: rgba(218, 104, 85, 0.1);
+  --ok-bg: rgba(79, 180, 122, 0.1);
+
+  /* Radii */
+  --r-xs: 4px;
+  --r-sm: 6px;
+  --r-md: 10px;
+  --r-lg: 14px;
+  --r-xl: 20px;
+  --r-pill: 999px;
+
+  /* Shadows */
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.3), inset 0 1px 0 rgba(255, 255, 255, 0.03);
+  --shadow-md: 0 1px 2px rgba(0, 0, 0, 0.4), 0 6px 16px rgba(0, 0, 0, 0.35),
+    inset 0 1px 0 rgba(255, 255, 255, 0.04);
+  --shadow-lg: 0 2px 4px rgba(0, 0, 0, 0.45), 0 16px 40px rgba(0, 0, 0, 0.5),
+    inset 0 1px 0 rgba(255, 255, 255, 0.05);
+  --shadow-pop: 0 2px 8px rgba(0, 0, 0, 0.5), 0 24px 48px -8px rgba(0, 0, 0, 0.6),
+    0 0 0 1px var(--border-glow), inset 0 1px 0 rgba(255, 255, 255, 0.05);
+  --shadow-accent: 0 8px 32px -8px var(--accent-glow);
+
+  /* Typography */
+  --font-sans: 'Geist', 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+  --font-mono: 'JetBrains Mono', 'Geist Mono', ui-monospace, 'SF Mono', Menlo, monospace;
+  --font-serif: 'Newsreader', 'Cormorant Garamond', Georgia, serif;
+
+  /* Sizing */
+  --header-h: 48px;
+  --footer-h: 32px;
+  --sidebar-w: 264px;
+  --chat-max: 720px;
+
+  /* Easing */
+  --ease: cubic-bezier(0.22, 1, 0.36, 1);
+}
