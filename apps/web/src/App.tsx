@@ -623,6 +623,16 @@ export function App() {
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [cmdPaletteOpen, setCmdPaletteOpen] = useState(false);
 
+  const chatRef = useRef<HTMLDivElement>(null);
+  const [showScrollBtn, setShowScrollBtn] = useState(false);
+
+  const handleChatScroll = () => {
+    const el = chatRef.current;
+    if (!el) return;
+    const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 60;
+    setShowScrollBtn(!atBottom);
+  };
+
   const closeAllOverlays = () => {
     setPlusOpen(false);
     setModelPickerOpen(false);
@@ -958,7 +968,7 @@ export function App() {
       />
 
       <div className="main" onClick={closeAllOverlays}>
-        <div className="chat" style={{ position: 'relative' }}>
+        <div className="chat" ref={chatRef} onScroll={handleChatScroll} style={{ position: 'relative' }}>
           {threadNodes}
           {isWelcome && <Welcome onChip={(t) => setValue(t)} />}
           {isLive
@@ -973,6 +983,15 @@ export function App() {
             ))
             : messages.map((m, i) => <MessageItem key={i} m={m} />)}
         </div>
+        {showScrollBtn && (
+          <button
+            className="scroll-bottom-btn"
+            type="button"
+            onClick={() => chatRef.current?.scrollTo({ top: chatRef.current.scrollHeight, behavior: 'smooth' })}
+          >
+            <Icon name="chevron-right" size={16} style={{ transform: 'rotate(90deg)' }} />
+          </button>
+        )}
 
         {isNoKey && <NoKeyCard />}
 

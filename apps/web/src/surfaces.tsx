@@ -841,15 +841,132 @@ function DrawerTools() {
 }
 
 function DrawerTemplates() {
+  const [view, setView] = useState<'list' | 'edit-prompt' | 'edit-persona' | 'new'>('list');
+  const [editIdx, setEditIdx] = useState<number>(0);
+  const [toast, setToast] = useState<string | null>(null);
+
   const prompts = [
-    { name: '邮件改稿', sub: '商务/正式 · 12 次使用' },
-    { name: '代码 Review', sub: 'Sonnet · 默认 system prompt · 8 次使用' },
-    { name: '会议纪要', sub: '中文摘要 + 行动项 · 3 次使用' },
+    { name: '邮件改稿', sub: '商务/正式 · 12 次使用', system: '你是一位专业的商务邮件编辑助手。请将用户的草稿改写为正式、得体的商务邮件。', model: 'Sonnet 4' },
+    { name: '代码 Review', sub: 'Sonnet · 默认 system prompt · 8 次使用', system: '你是一位资深代码审查员。请仔细检查代码的正确性、可读性、性能和安全性，给出具体的改进建议。', model: 'Sonnet 4' },
+    { name: '会议纪要', sub: '中文摘要 + 行动项 · 3 次使用', system: '请将会议内容整理为结构化的会议纪要，包含：讨论要点、决策事项、行动项（含负责人和截止日期）。', model: 'GPT-4o' },
   ];
   const personas = [
-    { name: '架构师 Aki', sub: '冷静 · 偏务实 · Sonnet 4' },
-    { name: '产品经理 Mio', sub: '提问驱动 · GPT-4o' },
+    { name: '架构师 Aki', sub: '冷静 · 偏务实 · Sonnet 4', system: '你是一位经验丰富的软件架构师，性格冷静理性，偏好务实的技术方案。回答时会考虑可维护性、扩展性和工程成本。' },
+    { name: '产品经理 Mio', sub: '提问驱动 · GPT-4o', system: '你是一位优秀的产品经理，善于通过提问来理清需求。你会关注用户价值、商业可行性和技术可行性的平衡。' },
   ];
+
+  const showToast = (msg: string) => {
+    setToast(msg);
+    setTimeout(() => setToast(null), 3000);
+  };
+
+  // ── Edit prompt template ──
+  if (view === 'edit-prompt') {
+    const p = prompts[editIdx];
+    return (
+      <>
+        <button className="rt-btn" type="button" onClick={() => setView('list')} style={{ marginBottom: 12 }}>
+          <Icon name="chevron-right" size={13} style={{ transform: 'rotate(180deg)' }} /> 返回列表
+        </button>
+        <div className="section-h">编辑 Prompt 模板</div>
+        <form onSubmit={(e) => { e.preventDefault(); showToast('模板已保存'); setView('list'); }} style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+          <label className="field" style={{ margin: 0 }}>
+            <div className="field-label">模板名称</div>
+            <input className="field-input" name="name" defaultValue={p.name} required />
+          </label>
+          <label className="field" style={{ margin: 0 }}>
+            <div className="field-label">System Prompt</div>
+            <textarea className="field-input" name="system" defaultValue={p.system} rows={5} required style={{ resize: 'vertical' }} />
+          </label>
+          <label className="field" style={{ margin: 0 }}>
+            <div className="field-label">默认模型</div>
+            <input className="field-input" name="model" defaultValue={p.model} />
+          </label>
+          <div style={{ display: 'flex', gap: 8, marginTop: 4 }}>
+            <button className="rt-btn primary" type="submit" style={{ justifyContent: 'center', background: 'var(--accent)', borderColor: 'var(--accent)', color: '#0b0d14' }}>
+              保存
+            </button>
+            <button className="rt-btn" type="button" onClick={() => setView('list')} style={{ justifyContent: 'center' }}>
+              取消
+            </button>
+          </div>
+        </form>
+        {toast && <div style={{ marginTop: 10, fontSize: 12.5, color: 'var(--ok)' }}>{toast}</div>}
+      </>
+    );
+  }
+
+  // ── Edit persona ──
+  if (view === 'edit-persona') {
+    const p = personas[editIdx];
+    return (
+      <>
+        <button className="rt-btn" type="button" onClick={() => setView('list')} style={{ marginBottom: 12 }}>
+          <Icon name="chevron-right" size={13} style={{ transform: 'rotate(180deg)' }} /> 返回列表
+        </button>
+        <div className="section-h">编辑 Persona</div>
+        <form onSubmit={(e) => { e.preventDefault(); showToast('Persona 已保存'); setView('list'); }} style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+          <label className="field" style={{ margin: 0 }}>
+            <div className="field-label">名称</div>
+            <input className="field-input" name="name" defaultValue={p.name} required />
+          </label>
+          <label className="field" style={{ margin: 0 }}>
+            <div className="field-label">System Prompt</div>
+            <textarea className="field-input" name="system" defaultValue={p.system} rows={5} required style={{ resize: 'vertical' }} />
+          </label>
+          <div style={{ display: 'flex', gap: 8, marginTop: 4 }}>
+            <button className="rt-btn primary" type="submit" style={{ justifyContent: 'center', background: 'var(--accent)', borderColor: 'var(--accent)', color: '#0b0d14' }}>
+              保存
+            </button>
+            <button className="rt-btn" type="button" onClick={() => setView('list')} style={{ justifyContent: 'center' }}>
+              取消
+            </button>
+          </div>
+        </form>
+        {toast && <div style={{ marginTop: 10, fontSize: 12.5, color: 'var(--ok)' }}>{toast}</div>}
+      </>
+    );
+  }
+
+  // ── New template / persona ──
+  if (view === 'new') {
+    return (
+      <>
+        <button className="rt-btn" type="button" onClick={() => setView('list')} style={{ marginBottom: 12 }}>
+          <Icon name="chevron-right" size={13} style={{ transform: 'rotate(180deg)' }} /> 返回列表
+        </button>
+        <div className="section-h">新建模板 / Persona</div>
+        <form onSubmit={(e) => { e.preventDefault(); showToast('已创建'); setView('list'); }} style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+          <label className="field" style={{ margin: 0 }}>
+            <div className="field-label">类型</div>
+            <select className="field-input" name="type" defaultValue="prompt">
+              <option value="prompt">Prompt 模板</option>
+              <option value="persona">Persona</option>
+            </select>
+          </label>
+          <label className="field" style={{ margin: 0 }}>
+            <div className="field-label">名称</div>
+            <input className="field-input" name="name" placeholder="输入名称" required />
+          </label>
+          <label className="field" style={{ margin: 0 }}>
+            <div className="field-label">System Prompt</div>
+            <textarea className="field-input" name="system" placeholder="输入 System Prompt" rows={5} required style={{ resize: 'vertical' }} />
+          </label>
+          <div style={{ display: 'flex', gap: 8, marginTop: 4 }}>
+            <button className="rt-btn primary" type="submit" style={{ justifyContent: 'center', background: 'var(--accent)', borderColor: 'var(--accent)', color: '#0b0d14' }}>
+              创建
+            </button>
+            <button className="rt-btn" type="button" onClick={() => setView('list')} style={{ justifyContent: 'center' }}>
+              取消
+            </button>
+          </div>
+        </form>
+        {toast && <div style={{ marginTop: 10, fontSize: 12.5, color: 'var(--ok)' }}>{toast}</div>}
+      </>
+    );
+  }
+
+  // ── List view (default) ──
   return (
     <>
       <div className="section-h">Prompt 模板</div>
@@ -860,7 +977,7 @@ function DrawerTemplates() {
             <div className="name">{t.name}</div>
             <div className="sub">{t.sub}</div>
           </div>
-          <span className="pill">编辑</span>
+          <span className="pill" style={{ cursor: 'pointer' }} onClick={() => { setEditIdx(i); setView('edit-prompt'); }}>编辑</span>
           <Icon name="chevron-right" size={14} style={{ color: 'var(--text-muted)' }} />
         </div>
       ))}
@@ -872,14 +989,15 @@ function DrawerTemplates() {
             <div className="name">{t.name}</div>
             <div className="sub">{t.sub}</div>
           </div>
-          <span />
+          <span className="pill" style={{ cursor: 'pointer' }} onClick={() => { setEditIdx(i); setView('edit-persona'); }}>编辑</span>
           <Icon name="chevron-right" size={14} style={{ color: 'var(--text-muted)' }} />
         </div>
       ))}
-      <button className="rt-btn" type="button" style={{ marginTop: 12, width: '100%', justifyContent: 'center' }}>
+      <button className="rt-btn" type="button" style={{ marginTop: 12, width: '100%', justifyContent: 'center' }} onClick={() => setView('new')}>
         <Icon name="plus" size={12} />
         新建模板 / Persona
       </button>
+      {toast && <div style={{ marginTop: 10, fontSize: 12.5, color: 'var(--ok)' }}>{toast}</div>}
     </>
   );
 }
@@ -1096,9 +1214,9 @@ function SettingsDiag() {
 
 function SettingsAbout() {
   const links = [
-    { n: '文档', s: 'taori.dev/docs' },
-    { n: '更新日志', s: '0.6.2 · 14 项改动' },
-    { n: '反馈与 Issues', s: 'github.com/taori-ai/taori' },
+    { n: '文档', s: 'taori.dev/docs', href: 'https://taori.dev/docs' },
+    { n: '更新日志', s: '0.6.2 · 14 项改动', href: 'https://github.com/taori-ai/taori/releases' },
+    { n: '反馈与 Issues', s: 'github.com/taori-ai/taori', href: 'https://github.com/taori-ai/taori/issues' },
     { n: '许可证', s: 'MIT · 第三方依赖 142 个' },
   ];
   return (
@@ -1116,15 +1234,26 @@ function SettingsAbout() {
         <div className="quote-cn">把多个模型，织成一条不断的工作流。</div>
       </div>
       <div className="section-h">链接</div>
-      {links.map((r, i) => (
-        <div key={i} className="list-row" style={{ gridTemplateColumns: '1fr auto' }}>
-          <div>
-            <div className="name">{r.n}</div>
-            <div className="sub">{r.s}</div>
+      {links.map((r, i) => {
+        const inner = (
+          <>
+            <div>
+              <div className="name">{r.n}</div>
+              <div className="sub">{r.s}</div>
+            </div>
+            <Icon name="chevron-right" size={14} style={{ color: 'var(--text-muted)' }} />
+          </>
+        );
+        return r.href ? (
+          <a key={i} className="list-row" style={{ gridTemplateColumns: '1fr auto', cursor: 'pointer', textDecoration: 'none' }} href={r.href} target="_blank" rel="noopener noreferrer">
+            {inner}
+          </a>
+        ) : (
+          <div key={i} className="list-row" style={{ gridTemplateColumns: '1fr auto' }}>
+            {inner}
           </div>
-          <Icon name="chevron-right" size={14} style={{ color: 'var(--text-muted)' }} />
-        </div>
-      ))}
+        );
+      })}
     </>
   );
 }
