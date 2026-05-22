@@ -1224,8 +1224,8 @@ export function App() {
         }}
       />
 
-      <div className="main" onClick={closeAllOverlays}>
-        <div className="chat" ref={chatRef} onScroll={handleChatScroll} style={{ position: 'relative' }}>
+      <div className="main" onClick={closeAllOverlays} ref={chatRef} onScroll={handleChatScroll}>
+        <div className="chat" style={{ position: 'relative' }}>
           {threadNodes}
           {isWelcome && <Welcome onChip={(t) => setValue(t)} />}
           {isLive
