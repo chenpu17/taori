@@ -378,6 +378,57 @@ button {
 .side-ctx-item.danger:hover {
   background: rgba(218, 104, 85, 0.1);
 }
+.side-ctx-sep {
+  height: 1px;
+  background: var(--border-subtle);
+  margin: 4px 0;
+}
+.side-tags-bar {
+  display: flex;
+  gap: 4px;
+  flex-wrap: wrap;
+  padding: 4px 10px;
+}
+.side-tag-filter {
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  border: 1px solid var(--border-subtle);
+  color: var(--text-muted);
+  background: transparent;
+  cursor: pointer;
+  transition: all 120ms var(--ease);
+  white-space: nowrap;
+}
+.side-tag-filter:hover {
+  border-color: var(--border);
+  color: var(--text-secondary);
+}
+.side-tag-filter.active {
+  background: var(--accent-bg);
+  border-color: var(--accent-border);
+  color: var(--accent);
+}
+.side-item-pin {
+  font-size: 12px;
+  flex-shrink: 0;
+}
+.side-item-tags {
+  display: flex;
+  gap: 3px;
+  flex-shrink: 0;
+}
+.side-tag {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  padding: 1px 5px;
+  border-radius: 3px;
+  background: var(--accent-bg);
+  border: 1px solid var(--accent-border);
+  color: var(--accent);
+  white-space: nowrap;
+}
 
 /* ========== Main + chat ========== */
 .main {
