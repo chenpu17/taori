@@ -21,11 +21,202 @@ import { MODES, SCENARIOS, SIDEBAR_GROUPS, type Message, type ModeId, type Scena
 import { postChat, patchConversation, deleteConversation, type Conversation, type ConversationMessage } from './api';
 import { useConversations, useFooterHealth, useMessages, useModels, useRealtimeCost, useTodayBreakdown } from './useLiveData';
 
+// ── Markdown renderer ─────────────────────────────────────────
+function CodeBlockWithCopy({ code, lang }: { code: string; lang?: string }) {
+  const [copied, setCopied] = useState(false);
+  const handleCopy = () => {
+    navigator.clipboard.writeText(code);
+    setCopied(true);
+    setTimeout(() => setCopied(false), 1500);
+  };
+  return (
+    <div className="md-codeblock">
+      <div className="md-codeblock-head">
+        <span>{lang || ''}</span>
+        <button type="button" className="md-codeblock-copy" onClick={handleCopy}>
+          {copied ? '已复制' : '复制'}
+        </button>
+      </div>
+      <pre><code>{code}</code></pre>
+    </div>
+  );
+}
+
+function renderMarkdown(raw: string): ReactNode[] {
+  try {
+    return _renderMarkdownInner(raw);
+  } catch {
+    return [raw];
+  }
+}
+
+function _renderMarkdownInner(raw: string): ReactNode[] {
+  const nodes: ReactNode[] = [];
+  const lines = raw.split('\n');
+  let i = 0;
+  let key = 0;
+  const nk = () => `md${key++}`;
+
+  while (i < lines.length) {
+    const line = lines[i];
+
+    // Fenced code block
+    const fenceMatch = line.match(/^(`{3,})(\w*)/);
+    if (fenceMatch) {
+      const fence = fenceMatch[1];
+      const lang = fenceMatch[2];
+      const codeLines: string[] = [];
+      i++;
+      while (i < lines.length && !lines[i].startsWith(fence)) {
+        codeLines.push(lines[i]);
+        i++;
+      }
+      i++; // skip closing fence
+      nodes.push(<CodeBlockWithCopy key={nk()} code={codeLines.join('\n')} lang={lang} />);
+      continue;
+    }
+
+    // Headers
+    const hdrMatch = line.match(/^(#{1,4})\s+(.+)/);
+    if (hdrMatch) {
+      const level = Math.min(hdrMatch[1].length + 1, 4);
+      const Tag = `h${level}` as keyof JSX.IntrinsicElements;
+      nodes.push(<Tag key={nk()}>{parseInline(hdrMatch[2], nk)}</Tag>);
+      i++;
+      continue;
+    }
+
+    // Blockquote
+    if (line.startsWith('> ')) {
+      const quoteLines: string[] = [];
+      while (i < lines.length && (lines[i].startsWith('> ') || lines[i] === '>')) {
+        quoteLines.push(lines[i].replace(/^> ?/, ''));
+        i++;
+      }
+      nodes.push(<blockquote key={nk()}>{renderMarkdown(quoteLines.join('\n'))}</blockquote>);
+      continue;
+    }
+
+    // Unordered list
+    if (line.match(/^\s*[-*]\s+/)) {
+      const items: string[] = [];
+      while (i < lines.length && lines[i].match(/^\s*[-*]\s+/)) {
+        items.push(lines[i].replace(/^\s*[-*]\s+/, ''));
+        i++;
+      }
+      nodes.push(<ul key={nk()}>{items.map((item, idx) => <li key={idx}>{parseInline(item, nk)}</li>)}</ul>);
+      continue;
+    }
+
+    // Ordered list
+    if (line.match(/^\s*\d+\.\s+/)) {
+      const items: string[] = [];
+      while (i < lines.length && lines[i].match(/^\s*\d+\.\s+/)) {
+        items.push(lines[i].replace(/^\s*\d+\.\s+/, ''));
+        i++;
+      }
+      nodes.push(<ol key={nk()}>{items.map((item, idx) => <li key={idx}>{parseInline(item, nk)}</li>)}</ol>);
+      continue;
+    }
+
+    // Empty line
+    if (line.trim() === '') {
+      i++;
+      continue;
+    }
+
+    // Paragraph — collect consecutive non-special lines
+    const paraLines: string[] = [];
+    while (
+      i < lines.length &&
+      lines[i].trim() !== '' &&
+      !lines[i].match(/^(`{3,})/) &&
+      !lines[i].match(/^#{1,4}\s/) &&
+      !lines[i].startsWith('> ') &&
+      !lines[i].match(/^\s*[-*]\s+/) &&
+      !lines[i].match(/^\s*\d+\.\s+/)
+    ) {
+      paraLines.push(lines[i]);
+      i++;
+    }
+    nodes.push(<p key={nk()}>{parseInline(paraLines.join('\n'), nk)}</p>);
+  }
+
+  return nodes;
+}
+
+function parseInline(text: string, nk: () => string): ReactNode[] {
+  const nodes: ReactNode[] = [];
+  // Process inline elements using regex splitting
+  // Order: inline code → bold → italic → links → remaining text
+  const regex = /(`[^`\n]+`)|(\*\*[^*]+\*\*)|(\*[^*]+\*)|(\[[^\]]+\]\([^)]+\))/g;
+  let lastIndex = 0;
+  let match: RegExpExecArray | null;
+
+  while ((match = regex.exec(text)) !== null) {
+    // Add plain text before this match
+    if (match.index > lastIndex) {
+      const plain = text.slice(lastIndex, match.index);
+      nodes.push(...handleLineBreaks(plain));
+    }
+
+    const full = match[0];
+
+    if (full.startsWith('`') && full.endsWith('`')) {
+      // Inline code
+      const code = full.slice(1, -1);
+      nodes.push(<code key={nk()}>{code}</code>);
+    } else if (full.startsWith('**') && full.endsWith('**')) {
+      // Bold
+      const content = full.slice(2, -2);
+      nodes.push(<strong key={nk()}>{parseInline(content, nk)}</strong>);
+    } else if (full.startsWith('*') && full.endsWith('*')) {
+      // Italic
+      const content = full.slice(1, -1);
+      nodes.push(<em key={nk()}>{parseInline(content, nk)}</em>);
+    } else if (full.startsWith('[') && full.includes('](')) {
+      // Link
+      const linkMatch = full.match(/^\[([^\]]+)\]\(([^)]+)\)$/);
+      if (linkMatch) {
+        nodes.push(
+          <a key={nk()} href={linkMatch[2]} target="_blank" rel="noopener noreferrer">
+            {linkMatch[1]}
+          </a>
+        );
+      } else {
+        nodes.push(full);
+      }
+    }
+
+    lastIndex = regex.lastIndex;
+  }
+
+  // Remaining text
+  if (lastIndex < text.length) {
+    const plain = text.slice(lastIndex);
+    nodes.push(...handleLineBreaks(plain));
+  }
+
+  return nodes;
+}
+
+function handleLineBreaks(text: string): ReactNode[] {
+  const parts = text.split('\n');
+  const result: ReactNode[] = [];
+  let k = 0;
+  for (let j = 0; j < parts.length; j++) {
+    if (parts[j]) result.push(parts[j]);
+    if (j < parts.length - 1) result.push(<br key={`br${k++}`} />);
+  }
+  return result;
+}
+
 // ── Sidebar ──────────────────────────────────────────────────
 function Sidebar({
   scenario,
   onSelect,
   conversations,
+  loading,
   selectedConvId,
   onSelectConversation,
   onNewChat,
@@ -37,6 +228,7 @@ function Sidebar({
   scenario: ScenarioId;
   onSelect: (id: ScenarioId) => void;
   conversations?: Conversation[];
+  loading?: boolean;
   selectedConvId?: string | null;
   onSelectConversation?: (id: string) => void;
   onNewChat?: () => void;
@@ -145,6 +337,14 @@ function Sidebar({
         <Icon name="search" size={13} className="ico" />
         <input placeholder="搜索对话" />
       </div>
+
+      {/* Skeleton rows while live conversations are loading */}
+      {loading && !conversations && Array.from({ length: 5 }, (_, i) => (
+        <div key={`skel-${i}`} className="side-item" style={{ opacity: 0.6, flexDirection: 'column', alignItems: 'flex-start', gap: 4 }}>
+          <div className="skeleton" style={{ width: `${55 - i * 5}%`, height: 14 }} />
+          <div className="skeleton" style={{ width: `${35 - i * 3}%`, height: 10 }} />
+        </div>
+      ))}
 
       {isLive ? (
         grouped.map((g) => (
@@ -301,7 +501,10 @@ function LiveMessageItem({
   return (
     <div className="msg" onMouseEnter={() => setHovered(true)} onMouseLeave={() => setHovered(false)}>
       <div className="msg-from taori">Taori</div>
-      <div className="msg-body">{msg.content}</div>
+      <div className="msg-body">
+        {renderMarkdown(msg.content)}
+        {msg.status === 'streaming' && <span className="streaming-cursor">▍</span>}
+      </div>
       <div className="msg-meta">
         <span style={{ color: 'var(--accent)', fontSize: 12 }}>{modelLabel}</span>
         {time && <><span className="sep">·</span><span>{time}</span></>}
@@ -367,6 +570,7 @@ interface FooterProps {
   budgetUsd: number;
   modelCount: number | null;
   providerCount: number | null;
+  loading?: boolean;
   openPopup: FootPopupId;
   onHealth: (e: MouseEvent) => void;
   onCostToday: (e: MouseEvent) => void;
@@ -381,6 +585,7 @@ function Footer({
   budgetUsd,
   modelCount,
   providerCount,
+  loading,
   openPopup,
   onHealth,
   onCostToday,
@@ -389,26 +594,49 @@ function Footer({
   const fmt = (v: number | null, fallback: string) => (v === null ? fallback : `$${v.toFixed(2)}`);
   return (
     <footer className="foot">
-      <div className="foot-item" data-open={openPopup === 'health'} onClick={onHealth}>
-        <span className={`dot ${status}`} />
-        <span className="v">{statusText}</span>
-      </div>
-      <span style={{ color: 'var(--text-faint)' }}>·</span>
-      <div className="foot-item" data-open={openPopup === 'today'} onClick={onCostToday}>
-        <span className="k">今日</span>
-        <span className="v">{fmt(todayUsd, '¥0.42')}</span>
-        <span style={{ color: 'var(--text-faint)' }}>/ ${budgetUsd.toFixed(2)}</span>
-      </div>
-      <span style={{ color: 'var(--text-faint)' }}>·</span>
-      <div className="foot-item" data-open={openPopup === 'session'} onClick={onCostSession}>
-        <span className="k">本会话</span>
-        <span className="v">{fmt(sessionUsd, '¥0.04')}</span>
-      </div>
+      {loading ? (
+        <>
+          <div className="foot-item">
+            <span className="skeleton" style={{ width: 16, height: 16, borderRadius: '50%' }} />
+            <span className="skeleton" style={{ width: 32, height: 12 }} />
+          </div>
+          <span style={{ color: 'var(--text-faint)' }}>·</span>
+          <div className="foot-item">
+            <span className="skeleton" style={{ width: 48, height: 12 }} />
+            <span className="skeleton" style={{ width: 36, height: 12 }} />
+          </div>
+          <span style={{ color: 'var(--text-faint)' }}>·</span>
+          <div className="foot-item">
+            <span className="skeleton" style={{ width: 40, height: 12 }} />
+            <span className="skeleton" style={{ width: 32, height: 12 }} />
+          </div>
+        </>
+      ) : (
+        <>
+          <div className="foot-item" data-open={openPopup === 'health'} onClick={onHealth}>
+            <span className={`dot ${status}`} />
+            <span className="v">{statusText}</span>
+          </div>
+          <span style={{ color: 'var(--text-faint)' }}>·</span>
+          <div className="foot-item" data-open={openPopup === 'today'} onClick={onCostToday}>
+            <span className="k">今日</span>
+            <span className="v">{fmt(todayUsd, '¥0.42')}</span>
+            <span style={{ color: 'var(--text-faint)' }}>/ ${budgetUsd.toFixed(2)}</span>
+          </div>
+          <span style={{ color: 'var(--text-faint)' }}>·</span>
+          <div className="foot-item" data-open={openPopup === 'session'} onClick={onCostSession}>
+            <span className="k">本会话</span>
+            <span className="v">{fmt(sessionUsd, '¥0.04')}</span>
+          </div>
+        </>
+      )}
       <span className="foot-spacer" />
       <span className="foot-version">
-        {modelCount !== null && providerCount !== null
+        {!loading && modelCount !== null && providerCount !== null
           ? `${modelCount} 模型 · ${providerCount} provider · sidecar :7878`
-          : '12 模型 · 4 provider · sidecar :7878'}
+          : loading
+            ? ''
+            : '12 模型 · 4 provider · sidecar :7878'}
       </span>
     </footer>
   );
@@ -519,6 +747,8 @@ function Composer({
 
 // ── Welcome ──────────────────────────────────────────────────
 function Welcome({ onChip }: { onChip: (text: string) => void }) {
+  const hour = new Date().getHours();
+  const greeting = hour < 6 ? '夜深了' : hour < 12 ? '早上好' : hour < 18 ? '下午好' : '晚上好';
   const chips = [
     { text: '写一封项目延期的邮件给客户，语气克制但保留诚意', icon: 'doc' as const, label: '写一封邮件' },
     { text: '帮我研究 2026 年 AI 编辑器市场', icon: 'research' as const, label: '帮我研究' },
@@ -531,7 +761,7 @@ function Welcome({ onChip }: { onChip: (text: string) => void }) {
         <BrandMark size={28} />
       </div>
       <div className="welcome-title">
-        今天<em>想聊</em>点什么？
+        {greeting}，<em>想聊</em>点什么？
       </div>
       <div className="welcome-hint">
         直接打字 · 或按 <kbd>/</kbd> 调用模式
@@ -942,6 +1172,7 @@ export function App() {
         scenario={scenarioId}
         onSelect={setScenarioId}
         conversations={isLive ? convList.data ?? undefined : undefined}
+        loading={convList.loading}
         selectedConvId={convId}
         onSelectConversation={setConvId}
         onNewChat={() => {
@@ -1125,6 +1356,7 @@ export function App() {
         budgetUsd={5}
         modelCount={liveModels.data?.length ?? null}
         providerCount={footerHealth.data?.providers.length ?? null}
+        loading={isLive && (footerHealth.loading || realtimeCost.loading)}
         openPopup={footPopup}
         onHealth={(e) => {
           e.stopPropagation();
