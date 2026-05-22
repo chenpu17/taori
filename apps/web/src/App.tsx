@@ -1040,7 +1040,29 @@ export function App() {
   const [overflowOpen, setOverflowOpen] = useState(false);
   const [footPopup, setFootPopup] = useState<FootPopupId>(null);
   const [drawer, setDrawer] = useState<DrawerId | null>(null);
-  const [theme, setTheme] = useState<Theme>('dark');
+  const applyTheme = (t: Theme) => {
+    setTheme(t);
+    if (t === 'auto') {
+      const prefersDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
+      document.documentElement.setAttribute('data-theme', prefersDark ? 'dark' : 'light');
+    } else {
+      document.documentElement.setAttribute('data-theme', t);
+    }
+    localStorage.setItem('taori-theme', t);
+  };
+  const [theme, setTheme] = useState<Theme>(() => {
+    const saved = localStorage.getItem('taori-theme') as Theme | null;
+    if (saved) {
+      if (saved === 'auto') {
+        const prefersDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
+        document.documentElement.setAttribute('data-theme', prefersDark ? 'dark' : 'light');
+      } else {
+        document.documentElement.setAttribute('data-theme', saved);
+      }
+      return saved;
+    }
+    return 'dark';
+  });
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [cmdPaletteOpen, setCmdPaletteOpen] = useState(false);
 
@@ -1560,7 +1582,7 @@ export function App() {
           <div onClick={(e) => e.stopPropagation()}>
             <OverMenu
               theme={theme}
-              onTheme={setTheme}
+              onTheme={applyTheme}
               onOpenDrawer={(id) => {
                 setDrawer(id);
                 setOverflowOpen(false);
