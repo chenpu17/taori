@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type CSSProperties, type MouseEvent, type ReactNode } from 'react';
+import React, { useEffect, useMemo, useRef, useState, type CSSProperties, type MouseEvent, type ReactNode } from 'react';
 import { BrandMark, Icon, MODELS, ThreadNode, type IconName, type ModelId } from './primitives';
 import { AssistantMsg, CompareCard, ImageCard, ResearchDone, ResearchInProgress, RoundtableCard, UserMsg } from './cards';
 import {
@@ -211,6 +211,25 @@ function handleLineBreaks(text: string): ReactNode[] {
   return result;
 }
 
+// ── Error Boundary ────────────────────────────────────────────
+export class ErrorBoundary extends React.Component<{ children: React.ReactNode }, { hasError: boolean; error: string }> {
+  state = { hasError: false, error: '' };
+  static getDerivedStateFromError(e: Error) { return { hasError: true, error: e.message }; }
+  render() {
+    if (this.state.hasError) {
+      return (
+        <div style={{ padding: 40, textAlign: 'center', color: 'var(--text-secondary)' }}>
+          <div style={{ fontSize: 48, marginBottom: 16 }}>⚠️</div>
+          <div style={{ fontSize: 16, fontWeight: 600, marginBottom: 8 }}>页面出了点问题</div>
+          <div style={{ fontSize: 13, color: 'var(--text-muted)', marginBottom: 16, maxWidth: 400, margin: '0 auto 16px' }}>{this.state.error}</div>
+          <button style={{ padding: '8px 20px', borderRadius: 8, border: '1px solid var(--border)', background: 'var(--bg-secondary)', color: 'var(--text-primary)', cursor: 'pointer' }} onClick={() => { this.setState({ hasError: false, error: '' }); window.location.reload(); }}>刷新页面</button>
+        </div>
+      );
+    }
+    return this.props.children;
+  }
+}
+
 // ── Sidebar ──────────────────────────────────────────────────
 function Sidebar({
   scenario,
@@ -246,6 +265,7 @@ function Sidebar({
   const [renaming, setRenaming] = useState<string | null>(null);
   const [renameVal, setRenameVal] = useState('');
   const [confirmDel, setConfirmDel] = useState<string | null>(null);
+  const [search, setSearch] = useState('');
   const renameRef = useRef<HTMLInputElement>(null);
 
   // Close context menu on outside click or Escape
@@ -306,6 +326,9 @@ function Sidebar({
 
   const grouped = useMemo(() => {
     if (!conversations || conversations.length === 0) return [];
+    const filtered = search
+      ? conversations.filter((c) => c.title.toLowerCase().includes(search.toLowerCase()))
+      : conversations;
     const nowMs = Date.now();
     const sod = (ms: number) => new Date(ms).setHours(0, 0, 0, 0);
     const todayMs = sod(nowMs);
@@ -315,7 +338,7 @@ function Sidebar({
       { label: '本周', list: [] },
       { label: '更早', list: [] },
     ];
-    for (const c of conversations) {
+    for (const c of filtered) {
       const ts = c.updated_at > 1e12 ? c.updated_at : c.updated_at * 1000;
       if (ts >= todayMs) groups[0].list.push(c);
       else if (ts >= todayMs - 86400000) groups[1].list.push(c);
@@ -323,7 +346,7 @@ function Sidebar({
       else groups[3].list.push(c);
     }
     return groups.filter((g) => g.list.length > 0);
-  }, [conversations]);
+  }, [conversations, search]);
 
   return (
     <aside className={'side' + (open ? ' open' : '')}>
@@ -335,7 +358,8 @@ function Sidebar({
       </button>
       <div className="side-search">
         <Icon name="search" size={13} className="ico" />
-        <input placeholder="搜索对话" />
+        <input placeholder="搜索对话" value={search} onChange={(e) => setSearch(e.target.value)} />
+        {search && <button type="button" style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--text-muted)', padding: 2 }} onClick={() => setSearch('')}><Icon name="x" size={11} /></button>}
       </div>
 
       {/* Skeleton rows while live conversations are loading */}
@@ -477,7 +501,7 @@ function LiveMessageItem({
   if (msg.role === 'user') {
     return (
       <div className="msg" onMouseEnter={() => setHovered(true)} onMouseLeave={() => setHovered(false)}>
-        <UserMsg>{msg.content}</UserMsg>
+        <UserMsg>{renderMarkdown(msg.content)}</UserMsg>
         {hovered && (
           <div className="msg-actions">
             <button type="button" className="msg-action" onClick={handleCopy} title="复制">
@@ -1132,6 +1156,8 @@ export function App() {
             return updated;
           });
           setIsStreaming(false);
+          // Refetch conversation list so title / ordering updates
+          convList.refetch?.();
         },
         (err) => {
           setLiveMsgs((prev) => {

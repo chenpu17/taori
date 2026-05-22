@@ -114,7 +114,7 @@ export function ModelPicker({ current = 'sonnet', onPick, liveEntries, liveCurre
   const filteredLive = useLive && liveEntries ? liveEntries.filter((m) => !q || m.name.toLowerCase().includes(q) || m.provider.toLowerCase().includes(q)) : [];
   const filteredMock = !useLive ? (['sonnet', 'gpt4o', 'deepseek', 'gemini', 'dalle'] as ModelId[]).filter((id) => { const m = MODELS[id]; return !q || m.name.toLowerCase().includes(q) || m.provider.toLowerCase().includes(q); }) : [];
   return (
-    <div className="popup model-picker">
+    <div className="popup model-picker" role="listbox">
       <div className="model-picker-search">
         <Icon name="search" size={13} style={{ color: 'var(--text-muted)' }} />
         <input placeholder="搜模型 / Provider" value={search} onChange={(e) => setSearch(e.target.value)} />
@@ -126,6 +126,7 @@ export function ModelPicker({ current = 'sonnet', onPick, liveEntries, liveCurre
             <div
               key={m.id}
               className={'model-picker-item' + (liveCurrentId === m.id ? ' active' : '')}
+              role="option"
               onClick={() => onPickLive?.(m.id)}
             >
               <span className="dot" style={{ background: m.color }} />
@@ -138,7 +139,7 @@ export function ModelPicker({ current = 'sonnet', onPick, liveEntries, liveCurre
         : filteredMock.map((id) => {
             const m = MODELS[id];
             return (
-              <div key={id} className={'model-picker-item' + (current === id ? ' active' : '')} onClick={() => onPick?.(id)}>
+              <div key={id} className={'model-picker-item' + (current === id ? ' active' : '')} role="option" onClick={() => onPick?.(id)}>
                 <ModelDot model={id} />
                 <span className="name">{m.name}</span>
                 <span className="price">{m.price}</span>
@@ -388,7 +389,7 @@ export function ModelToolsDrawer({ onClose }: { onClose: () => void }) {
           <span className="title">模型 & 工具</span>
           <span className="spacer" />
           <span className="esc-hint">esc 关闭</span>
-          <button className="close" type="button" onClick={onClose}>
+          <button className="close" type="button" aria-label="关闭" onClick={onClose}>
             <Icon name="x" size={14} />
           </button>
         </div>
@@ -716,7 +717,7 @@ function DrawerModels() {
                   </div>
                 </div>
                 <span className="pill" style={{ color: 'var(--text-muted)' }}>{tier}</span>
-                <div className={'switch' + (m.enabled ? ' on' : '') + (pendingToggles.has(m.id) ? ' pending' : '')} onClick={() => handleToggle(m.id, m.enabled)} />
+                <div className={'switch' + (m.enabled ? ' on' : '') + (pendingToggles.has(m.id) ? ' pending' : '')} role="switch" aria-checked={m.enabled} tabIndex={0} onClick={() => handleToggle(m.id, m.enabled)} onKeyDown={e => e.key === 'Enter' && handleToggle(m.id, m.enabled)} />
               </div>
             );
           })}
@@ -773,7 +774,7 @@ function DrawerModelsMock() {
                   </div>
                 </div>
                 <span className="pill" style={{ color: 'var(--text-muted)' }}>{m.price}</span>
-                <div className={'switch' + (m.on ? ' on' : '')} onClick={() => toggleModel(gi, mi)} />
+                <div className={'switch' + (m.on ? ' on' : '')} role="switch" aria-checked={m.on} tabIndex={0} onClick={() => toggleModel(gi, mi)} onKeyDown={e => e.key === 'Enter' && toggleModel(gi, mi)} />
               </div>
             );
           })}
@@ -821,7 +822,7 @@ function DrawerTools() {
             <div className="sub">{t.sub}</div>
           </div>
           <span />
-          <div className={'switch' + (t.on ? ' on' : '')} onClick={() => toggleBuiltIn(i)} />
+          <div className={'switch' + (t.on ? ' on' : '')} role="switch" aria-checked={t.on} tabIndex={0} onClick={() => toggleBuiltIn(i)} onKeyDown={e => e.key === 'Enter' && toggleBuiltIn(i)} />
         </div>
       ))}
       <div className="section-h">MCP 接入</div>
@@ -833,7 +834,7 @@ function DrawerTools() {
             <div className="sub">{t.sub}</div>
           </div>
           <span className={'pill ' + (t.on ? 'ok' : 'off')}>{t.on ? '已连' : '未配'}</span>
-          <div className={'switch' + (t.on ? ' on' : '')} onClick={() => toggleMcp(i)} />
+          <div className={'switch' + (t.on ? ' on' : '')} role="switch" aria-checked={t.on} tabIndex={0} onClick={() => toggleMcp(i)} onKeyDown={e => e.key === 'Enter' && toggleMcp(i)} />
         </div>
       ))}
     </>
@@ -1021,7 +1022,7 @@ export function SettingsDrawer({ onClose }: { onClose: () => void }) {
           <Icon name="settings" size={16} style={{ color: 'var(--text-secondary)' }} />
           <span className="title">设置</span>
           <span className="spacer" />
-          <button className="close" type="button" onClick={onClose}>
+          <button className="close" type="button" aria-label="关闭" onClick={onClose}>
             <Icon name="x" size={14} />
           </button>
         </div>
@@ -1074,7 +1075,7 @@ function SettingsBudget() {
       {alerts.map((r, i) => (
         <div key={i} className="list-row" style={{ gridTemplateColumns: '1fr auto' }}>
           <div className="name" style={{ fontSize: 13 }}>{r.name}</div>
-          <div className={'switch' + (r.on ? ' on' : '')} onClick={() => setAlerts((p) => { const n = [...p]; n[i] = { ...n[i], on: !n[i].on }; return n; })} />
+          <div className={'switch' + (r.on ? ' on' : '')} role="switch" aria-checked={r.on} tabIndex={0} onClick={() => setAlerts((p) => { const n = [...p]; n[i] = { ...n[i], on: !n[i].on }; return n; })} onKeyDown={e => e.key === 'Enter' && setAlerts((p) => { const n = [...p]; n[i] = { ...n[i], on: !n[i].on }; return n; })} />
         </div>
       ))}
     </>
@@ -1096,7 +1097,7 @@ function SettingsFallback() {
             <div className="name" style={{ fontSize: 13 }}>{r.name}</div>
             <div className="sub">{r.sub}</div>
           </div>
-          <div className={'switch' + (r.on ? ' on' : '')} onClick={() => setAuto((p) => { const n = [...p]; n[i] = { ...n[i], on: !n[i].on }; return n; })} />
+          <div className={'switch' + (r.on ? ' on' : '')} role="switch" aria-checked={r.on} tabIndex={0} onClick={() => setAuto((p) => { const n = [...p]; n[i] = { ...n[i], on: !n[i].on }; return n; })} onKeyDown={e => e.key === 'Enter' && setAuto((p) => { const n = [...p]; n[i] = { ...n[i], on: !n[i].on }; return n; })} />
         </div>
       ))}
       <div className="section-h">兜底优先级 · 聊天</div>
@@ -1380,7 +1381,7 @@ export function CommandPalette({
   let flatIndex = 0;
 
   return (
-    <div className="cmd-palette" onClick={onClose}>
+    <div className="cmd-palette" role="dialog" aria-label="命令面板" onClick={onClose}>
       <div className="cmd-palette-inner" onClick={(e) => e.stopPropagation()} onKeyDown={handleKeyDown}>
         <div className="cmd-palette-search">
           <Icon name="search" size={15} style={{ color: 'var(--text-muted)', flexShrink: 0 }} />

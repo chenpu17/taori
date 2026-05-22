@@ -1,5 +1,5 @@
 import ReactDOM from 'react-dom/client';
-import { App } from './App';
+import { App, ErrorBoundary } from './App';
 import './styles/tokens.css';
 import './styles/app.css';
 
@@ -14,4 +14,8 @@ if (typeof window !== 'undefined' && !window.__TAURI_INTERNALS__ && !env.VITE_SI
   };
 }
 
-ReactDOM.createRoot(document.getElementById('root')!).render(<App />);
+ReactDOM.createRoot(document.getElementById('root')!).render(
+  <ErrorBoundary>
+    <App />
+  </ErrorBoundary>,
+);
