@@ -27,7 +27,21 @@ function newApp() {
   const db = openDb(dbPath);
   const keystore = new MemoryStore();
   const app = buildServer({
-    config: { port: 0, bearer, dbPath, controlUrl: null, controlBearer: null, isDev: true, version: '0.0.0-test' },
+    config: {
+      port: 0,
+      bearer,
+      dbPath,
+      controlUrl: null,
+      controlBearer: null,
+      isDev: true,
+      version: '0.0.0-test',
+      testHooks: {
+        hermeticWeb: false,
+        hermeticAiPlanner: false,
+        forceClassification: true,
+        forceImageResult: false,
+      },
+    },
     db,
     control: new ControlClient({ url: null, bearer: null }),
     keystore,

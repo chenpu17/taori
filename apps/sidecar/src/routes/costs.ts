@@ -12,7 +12,6 @@ import {
   CostReportFormatSchema,
 } from '@taori/shared';
 import type { BuildServerArgs } from '../server.js';
-import { CostsRepo } from '../db/repos/index.js';
 import {
   renderCostReportCsv,
   safeCostExportFilename,
@@ -45,7 +44,7 @@ const CallLogsQuery = z.object({
 });
 
 export function registerCostsRoute(app: FastifyInstance, deps: BuildServerArgs): void {
-  const repo = new CostsRepo(deps.db);
+  const repo = deps.repos.costs;
 
   app.get('/v1/costs/realtime', async (req) => {
     const parsed = RealtimeQuery.safeParse(req.query);

@@ -14,7 +14,6 @@
  */
 import type { FastifyInstance } from 'fastify';
 import type { BuildServerArgs } from '../server.js';
-import { MemoriesRepo, ModelsRepo } from '../db/repos/index.js';
 
 export interface SelfCheckItem {
   id: 'sidecar' | 'keystore' | 'database' | 'default_model';
@@ -85,7 +84,7 @@ export function registerSelfCheckRoute(
 
     // 3. Database round-trip via memories table (a low-impact place to write).
     try {
-      const mem = new MemoriesRepo(args.db);
+      const mem = args.repos.memories;
       const k = `__selfcheck_${Date.now()}`;
       mem.set('global', null, k, 'ok');
       const got = mem.get('global', null, k);
@@ -116,7 +115,7 @@ export function registerSelfCheckRoute(
 
     // 4. Default model present (we don't actually probe upstream here).
     try {
-      const models = new ModelsRepo(args.db);
+      const models = args.repos.models;
       const all = models.list().filter((m) => m.capability === 'chat' && m.enabled);
       if (all.length === 0) {
         checks.push({

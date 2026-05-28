@@ -39,6 +39,28 @@ export interface SidecarConfig {
   standalone: boolean;
   standaloneAccessPassword: string | null;
   version: string;
+  testHooks: SidecarTestHooksConfig;
+}
+
+export type SidecarConfigInput =
+  Omit<SidecarConfig, 'host' | 'standalone' | 'standaloneAccessPassword' | 'testHooks'>
+  & Partial<Pick<SidecarConfig, 'host' | 'standalone' | 'standaloneAccessPassword'>>
+  & { testHooks?: Partial<SidecarTestHooksConfig> };
+
+export interface SidecarTestHooksConfig {
+  hermeticWeb: boolean;
+  hermeticAiPlanner: boolean;
+  forceClassification: boolean;
+  forceImageResult: boolean;
+}
+
+export function defaultTestHooksConfig(): SidecarTestHooksConfig {
+  return {
+    hermeticWeb: false,
+    hermeticAiPlanner: false,
+    forceClassification: false,
+    forceImageResult: false,
+  };
 }
 
 function runtimeDir(): string {
@@ -46,6 +68,35 @@ function runtimeDir(): string {
     return process.cwd();
   }
   return path.dirname(fileURLToPath(import.meta.url));
+}
+
+function testHooksEnabled(): boolean {
+  return process.env.NODE_ENV !== 'production' && process.env.TAORI_DISABLE_TEST_HOOKS !== '1';
+}
+
+export function loadTestHooksConfig(): SidecarTestHooksConfig {
+  const enabled = testHooksEnabled();
+  const hermeticWeb = enabled && process.env.TAORI_E2E_HERMETIC_WEB === '1';
+  return {
+    ...defaultTestHooksConfig(),
+    hermeticWeb,
+    hermeticAiPlanner: enabled && (process.env.TAORI_HERMETIC_AI_PLANNER === '1' || hermeticWeb),
+    forceClassification: enabled && process.env.TAORI_FORCE_CLASSIFICATION === '1',
+    forceImageResult: enabled && process.env.TAORI_FORCE_IMAGE_RESULT === '1',
+  };
+}
+
+export function normalizeSidecarConfig(config: SidecarConfigInput): SidecarConfig {
+  return {
+    host: '127.0.0.1',
+    standalone: false,
+    standaloneAccessPassword: null,
+    ...config,
+    testHooks: {
+      ...defaultTestHooksConfig(),
+      ...(config.testHooks ?? {}),
+    },
+  };
 }
 
 export function loadConfig(): SidecarConfig {
@@ -73,7 +124,7 @@ export function loadConfig(): SidecarConfig {
   const controlBearer = process.env.CONTROL_BEARER ?? null;
   const standaloneAccessPassword = process.env.TAORI_STANDALONE_ACCESS_PASSWORD?.trim() || null;
 
-  return {
+  return normalizeSidecarConfig({
     host,
     port,
     bearer,
@@ -84,5 +135,6 @@ export function loadConfig(): SidecarConfig {
     standalone,
     standaloneAccessPassword,
     version: cleanVersion(process.env.TAORI_CLI_VERSION ?? process.env.npm_package_version ?? '0.0.2'),
-  };
+    testHooks: loadTestHooksConfig(),
+  });
 }

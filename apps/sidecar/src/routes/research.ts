@@ -8,7 +8,7 @@ import {
 } from '@taori/shared';
 import type { PlanMessage, ResearchConstraints, ResearchSession } from '@taori/shared';
 import type { BuildServerArgs } from '../server.js';
-import { ConversationsRepo, MemoriesRepo, ModelsRepo, ProvidersRepo, ResearchRepo } from '../db/repos/index.js';
+import type { ResearchRepo } from '../db/repos/index.js';
 import {
   buildResearchDraftSkeleton,
   buildResearchPlan,
@@ -116,14 +116,16 @@ function buildPlanningFailureMessage(error: string, attempts: number): string {
 }
 
 export function registerResearchRoute(app: FastifyInstance, deps: ResearchRouteDeps): void {
-  const repo = new ResearchRepo(deps.db);
-  const conversations = new ConversationsRepo(deps.db);
+  const { repos } = deps;
+  const repo = repos.research;
+  const conversations = repos.conversations;
   const runner = deps.researchRunner;
   const plannerDeps = {
-    memories: new MemoriesRepo(deps.db),
-    modelsRepo: new ModelsRepo(deps.db),
-    providersRepo: new ProvidersRepo(deps.db),
+    memories: repos.memories,
+    modelsRepo: repos.models,
+    providersRepo: repos.providers,
     keystore: deps.keystore,
+    testHooks: deps.config.testHooks,
     log: app.log,
   };
 

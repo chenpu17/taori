@@ -22,6 +22,7 @@ export const RoundtableStatusSchema = z.enum([
   'completed',
   'failed',
   'cancelled',
+  'interrupted',
 ]);
 export type RoundtableStatus = z.infer<typeof RoundtableStatusSchema>;
 

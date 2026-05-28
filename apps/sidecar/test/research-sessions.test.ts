@@ -15,10 +15,8 @@ describe('research sessions', () => {
   let app: FastifyInstance;
   let dbPath: string;
   let db: ReturnType<typeof openDb>;
-  const originalHermeticPlanner = process.env.TAORI_HERMETIC_AI_PLANNER;
 
   beforeEach(async () => {
-    process.env.TAORI_HERMETIC_AI_PLANNER = '1';
     dbPath = path.join(os.tmpdir(), `taori-research-${Date.now()}-${Math.random()}.db`);
     db = openDb(dbPath);
     app = buildServer({
@@ -30,6 +28,12 @@ describe('research sessions', () => {
         controlBearer: null,
         isDev: false,
         version: '0.0.0-test',
+        testHooks: {
+          hermeticWeb: false,
+          hermeticAiPlanner: true,
+          forceClassification: false,
+          forceImageResult: false,
+        },
       },
       db,
       control: new ControlClient({ url: null, bearer: null }),
@@ -40,8 +44,6 @@ describe('research sessions', () => {
   });
 
   afterEach(async () => {
-    if (originalHermeticPlanner == null) delete process.env.TAORI_HERMETIC_AI_PLANNER;
-    else process.env.TAORI_HERMETIC_AI_PLANNER = originalHermeticPlanner;
     await app.close();
     fs.rmSync(dbPath, { force: true });
   });
@@ -247,7 +249,6 @@ describe('research sessions', () => {
   });
 
   it('marks the session failed when plan generation exhausts retries', async () => {
-    process.env.TAORI_HERMETIC_AI_PLANNER = '0';
     await app.close();
     app = buildServer({
       config: {
@@ -258,6 +259,12 @@ describe('research sessions', () => {
         controlBearer: null,
         isDev: false,
         version: '0.0.0-test',
+        testHooks: {
+          hermeticWeb: false,
+          hermeticAiPlanner: false,
+          forceClassification: false,
+          forceImageResult: false,
+        },
       },
       db,
       control: new ControlClient({ url: null, bearer: null }),

@@ -11,6 +11,7 @@ import type {
   StructuredMemoriesRepo,
 } from '../db/repos/index.js';
 import { finalizeOnEnd, type ProduceCtx } from './run-stream.js';
+import type { StreamObserver } from './protocol.js';
 import {
   produceKeyMissingStream,
   produceMockStream,
@@ -91,7 +92,7 @@ export async function dispatchChatProducer(args: {
   keyReadFailedLogName: string;
   unhandledLogName: string;
 }): Promise<void> {
-  const forceFinalize = finalizeOnEnd(
+  const { finalize, observer } = finalizeOnEnd(
     args.stream,
     args.isAborted,
     args.ctx,
@@ -103,7 +104,7 @@ export async function dispatchChatProducer(args: {
     args.structuredMemoriesRepo,
     args.keystore,
   );
-  args.setForceFinalize(forceFinalize);
+  args.setForceFinalize(finalize);
   if (args.onFinish) args.stream.on('finish', args.onFinish);
 
   if (args.provider?.type === 'ollama') {
@@ -118,6 +119,7 @@ export async function dispatchChatProducer(args: {
         args.model!,
         args.modelsRepo,
         args.memoriesRepo,
+        observer,
       ).catch((e) => args.ctx.log.error({ err: e }, args.unhandledLogName));
     return;
   }
@@ -145,10 +147,11 @@ export async function dispatchChatProducer(args: {
         args.model!,
         args.modelsRepo,
         args.memoriesRepo,
+        observer,
       ).catch((e) => args.ctx.log.error({ err: e }, args.unhandledLogName));
       return;
     }
-    void produceKeyMissingStream(args.stream, args.ctx, args.modelsRepo, args.memoriesRepo);
+    void produceKeyMissingStream(args.stream, args.ctx, args.modelsRepo, args.memoriesRepo, observer);
     return;
   }
 
@@ -158,5 +161,6 @@ export async function dispatchChatProducer(args: {
     args.ctx,
     args.modelsRepo,
     args.memoriesRepo,
+    observer,
   );
 }

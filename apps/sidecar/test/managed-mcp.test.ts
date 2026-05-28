@@ -37,9 +37,10 @@ describe('managed MCP bridge', () => {
       expect.arrayContaining([
         MANAGED_BOCHA_ENDPOINT,
         '--transport',
-        'sse-only',
+        'http-first',
         '--header',
         `Authorization:\${${MANAGED_BOCHA_AUTH_HEADER_ENV}}`,
+        '--silent',
       ]),
     );
     expect(resolved.env[MANAGED_BOCHA_AUTH_HEADER_ENV]).toBe('Bearer sk-bocha-demo');

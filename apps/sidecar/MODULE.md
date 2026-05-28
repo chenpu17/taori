@@ -32,6 +32,11 @@ Taori 业务编排进程，负责 LLM 调用、工具调度、圆桌执行、SQL
 - `/v1/chat`、`/v1/runs/:id/continue`、`/v1/runs/:id/recover` 会按模型 `context_length` 自动执行滑动窗口裁剪，保留系统提示和最近消息，并在 `context.snapshot.context_window` 中记录估算 token、预算和省略消息数量。
 - `chat.ts` 的上下文窗口管理拆入 `src/chat/context-window.ts`；恢复/续写共用的 run 解析与 compact 纯逻辑在 `src/chat/recovery.ts`，continue/recover 的上下文组装与校验在 `src/chat/run-actions.ts`，AI SDK 工具构建与 image/web/MCP 工具说明在 `src/chat/upstream-tools.ts`；路由仍保持原 API 和流式协议。
 - `chat.ts` 的运行支撑逻辑继续拆入 `src/chat/run-stream.ts`，包含 `ProduceCtx`、run event 降级写入、上下文快照、上游消息构造和 stream 结束持久化；路由仍保持原 API 和流式协议。
+- DB repo 的 Provider/Model row mapper 与通用数组解析拆入 `src/db/repos/mappers.ts`；深度研究任务叙事写入与 session finalize helper 拆入 `src/research/lifecycle.ts`；均为内部结构收敛，数据库和 HTTP 合同不变。
+- `RunEventsRepo` 新增 `appendSafe`，统一 chat / roundtable 写入 run event 时的 FK 降级策略；`server.ts` 的请求体大小提示、Standalone cookie 解码容错与 Bearer/Cookie 授权分支做了低风险收敛，HTTP 鉴权语义不变。
+- Data Stream Protocol 写帧集中到 `src/chat/protocol.ts`，`chat`、`quick-compare` 与 chat stream producers 通过 helper 写 `0:` / `8:` / `e:` / `d:` part，减少裸 `stream.write()` 分散；协议格式与前端消费合同不变。
+- Standalone 浏览器登录 / 未启用提示 HTML 拆入 `src/standalone/login-page.ts`；`server.ts` 只负责路由、cookie 与鉴权编排。Standalone 模式即使本地缺少 packaged `dist-web`，也会返回可解释 HTML，而不是把 `/` 当作普通 API 返回 401。
+- 测试控制位集中到 `SidecarConfig.testHooks` / `loadTestHooksConfig()` / `normalizeSidecarConfig()`；chat failure classification、image tool forced result、research hermetic planner 与 hermetic web fetch 不再在业务路径分散读取 `TAORI_*` 环境变量。
 - 新增 `GET /v1/tools/health`：按 Capability Bus 当前工具清单返回最近 24h 调用数、失败数、平均耗时和最近失败分类；Capability Bus 的 `cost_records(source_type='tool_call')` 失败记录会保留工具错误分类。
 - `GET /v1/costs/calls` 返回最近模型/工具调用时会附带可反查的 `run_id`、`run_event_id`、`run_event_kind` 和 `run_event_label`；支持可选 `cost_record_id` 精确定位单条调用，普通聊天与圆桌 `cost.recorded` 事件 payload 会携带 `cost_record_id`，用于 Cost Dashboard 与 Run Timeline 对照。
 - 新增 `GET /v1/diagnostics/real-provider/latest`：只读扫描最近一次 `pnpm verify:real` 本地产物，返回真实 Provider 旅程的步骤、结构化风险、运行事件和成本摘要；该接口不读取 Keychain、不发起真实模型调用。
@@ -41,6 +46,7 @@ Taori 业务编排进程，负责 LLM 调用、工具调度、圆桌执行、SQL
 - `/health` 对 Tauri Rust control channel 的诊断探测使用短超时，只影响 `control_channel` 诊断字段，不承担 Keychain 可用性深度验证；Keychain 深度检查仍由用户主动触发的 `/v1/selfcheck`、Provider 测试、同步或真实调用路径完成。
 - `/v1/selfcheck` 默认不读写 Keychain，只把 keystore 项标为已跳过；只有 `?include_keychain=1` 才执行临时 Keychain probe。
 - `/v1/providers/key-status` 在 Keychain 模式下默认拒绝隐式读取，必须带 `confirm_keychain=1` 才串行读取 Provider Keychain 状态；control channel 的 Keychain 读/写/删有显式超时，避免 macOS 授权阻塞导致请求长期挂起。
+- `POST /v1/providers/test` 现同时支持两类请求：临时测试 `{ type, base_url, api_key? }` 与对已保存 Provider 直接测试 `{ provider_id }`。后者会在 Sidecar 内读取已保存配置和 Keychain/keystore 中的 key，避免 Renderer 因拿不到明文 key 而只能返回“未知错误”。
 - Provider registry 新增 `deepseek`、`packyapi` 与 `siliconflow`：DeepSeek 官方走 OpenAI-compatible `/models` 发现 `deepseek-v4-flash` / `deepseek-v4-pro`；普通文本流仍复用通用 OpenAI-compatible chat path，但当 DeepSeek 官方聊天模型启用 tools 时，Sidecar 会切换到 provider-specific 的 Chat Completions tool loop，显式回传 `assistant.reasoning_content` 以兼容官方 thinking + tool calling 协议。PackyAPI 默认导入 `gpt-image-2` 并走 OpenAI-compatible `/images/generations`；SiliconFlow 使用 OpenAI-compatible `/models` 发现模型，图像生成走专用 `image_size` 请求并支持 URL 返回落地为本地文件。
 - Sidecar 现支持模型 thinking 配置：全局默认值复用 `memories(scope='global', key='thinking_enabled')`，单模型 `models.thinking_enabled` 可覆盖全局；聊天、Quick Compare、Roundtable、自动记忆抽取与 `/v1/models/:id/test` 共用统一解析。当前已知适配：OpenRouter → `reasoning`，DeepSeek 官方 → `thinking`，OpenAI/custom 的 GPT-5 / o 系列 → `reasoning_effort`；未确认的 provider 保持不注入 thinking 参数。
 - standalone npm CLI 新增 daemon 生命周期：`taori daemon start|status|stop`；默认仍前台监听 `127.0.0.1`，但 standalone 可通过 `--host 0.0.0.0` 进入远程 / Web 部署模式。desktop 托管语义不变，仍由 Rust 负责本地 sidecar 的 spawn / 守护。

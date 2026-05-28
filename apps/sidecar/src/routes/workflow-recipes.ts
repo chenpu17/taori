@@ -10,7 +10,7 @@ import {
   type WorkflowRecipeApplyPreview,
 } from '@taori/shared';
 import type { BuildServerArgs } from '../server.js';
-import { MemoriesRepo, WorkflowRecipesRepo } from '../db/repos/index.js';
+import type { MemoriesRepo } from '../db/repos/index.js';
 import { readSessionToolEnabled } from './tools.js';
 
 function parseOrValidation<T>(
@@ -84,8 +84,9 @@ function exportFilename(recipe: WorkflowRecipe): string {
 }
 
 export function registerWorkflowRecipesRoute(app: FastifyInstance, deps: BuildServerArgs): void {
-  const recipes = new WorkflowRecipesRepo(deps.db);
-  const memories = new MemoriesRepo(deps.db);
+  const { repos } = deps;
+  const recipes = repos.workflowRecipes;
+  const memories = repos.memories;
 
   app.get('/v1/workflow-recipes', async () => ({
     workflow_recipes: recipes.list(),

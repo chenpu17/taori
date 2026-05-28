@@ -61,14 +61,14 @@ export function applyContextWindow(messages: any[], contextLength: number | null
       role: 'system',
       content: `上下文窗口管理：为避免超过模型上下文限制，已省略较早的 ${omitted} 条历史消息；请优先依据当前可见上下文回答。`,
     };
-    const withNotice = [...systemMessages, notice, ...kept];
+    const noticeTokens = countMessageTokens(notice);
     return {
-      messages: withNotice,
+      messages: [...systemMessages, notice, ...kept],
       stats: {
         original_message_count: messages.length,
-        sent_message_count: withNotice.length,
+        sent_message_count: systemMessages.length + 1 + kept.length,
         omitted_message_count: omitted,
-        estimated_input_tokens: countMessagesTokens(withNotice),
+        estimated_input_tokens: tokens + noticeTokens,
         budget_tokens: budget,
         model_context_length: contextLength,
         strategy: 'sliding_window',

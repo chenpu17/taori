@@ -104,16 +104,9 @@ packages/shared/
    └─ constants/
 ```
 
-## packages/prompts
+## Prompt 模板位置
 
-元 Prompt 模板（独立包，方便迭代和回滚）：
-```
-packages/prompts/
-└─ src/
-   ├─ roundtable-roles.ts         # 圆桌角色生成元 Prompt
-   ├─ roundtable-summary.ts       # 圆桌总结模板
-   └─ intent-router.ts            # 聊天中意图识别
-```
+当前代码中，圆桌、研究、记忆抽取等 Prompt 仍随 `apps/sidecar` 对应子模块维护。若后续需要独立版本化、回滚或跨运行时复用，再拆出 `packages/prompts` 并补建 `MODULE.md`。
 
 ## 模块合同位置
 
@@ -124,7 +117,6 @@ apps/sidecar/MODULE.md
 apps/desktop/MODULE.md
 apps/web/MODULE.md
 packages/shared/MODULE.md
-packages/prompts/MODULE.md
 ```
 
 模块清单总览：[../modules/inventory.md](../modules/inventory.md)
@@ -133,7 +125,7 @@ packages/prompts/MODULE.md
 
 | 项 | 规则 |
 |---|---|
-| 包名 | 全部使用统一 scope `@taori/*`：`@taori/desktop` / `@taori/web` / `@taori/sidecar` / `@taori/shared` / `@taori/prompts` / `@taori/llm-providers` / `@taori/cost-engine` / `@taori/storage` / `@taori/ui-kit`（如启用） |
+| 包名 | 全部使用统一 scope `@taori/*`：`@taori/desktop` / `@taori/web` / `@taori/sidecar` / `@taori/shared`；未来拆出的 `prompts` / `llm-providers` / `cost-engine` / `storage` / `ui-kit` 也沿用该 scope |
 | 文件 | kebab-case（如 `chat-with-tools.ts`）|
 | TypeScript 类型 | PascalCase |
 | 函数/变量 | camelCase |

@@ -23,11 +23,11 @@ import {
   type ProviderTestResponse,
   type ModelDiscoveryResponse,
 } from '@taori/shared';
-import { ModelsRepo, ProvidersRepo } from '../db/repos/index.js';
 import {
   testProvider,
   listProviderModels,
   pickRecommendations,
+  providerRequiresApiKey,
 } from '../providers/registry.js';
 import type { KeyStore } from '../keystore.js';
 import type { BuildServerArgs } from '../server.js';
@@ -40,8 +40,9 @@ export function registerProvidersRoute(
   app: FastifyInstance,
   deps: ProvidersRouteDeps,
 ): void {
-  const repo = new ProvidersRepo(deps.db);
-  const modelsRepo = new ModelsRepo(deps.db);
+  const { repos } = deps;
+  const repo = repos.providers;
+  const modelsRepo = repos.models;
 
   app.get('/v1/providers', async () => {
     return { providers: repo.list() };
@@ -93,7 +94,45 @@ export function registerProvidersRoute(
         message: parsed.error.errors.map((e) => e.message).join('; '),
       });
     }
-    const result = await testProvider(parsed.data);
+    const payload = parsed.data;
+    let request: Parameters<typeof testProvider>[0];
+    const providerId = 'provider_id' in payload && typeof payload.provider_id === 'string'
+      ? payload.provider_id
+      : null;
+    if (providerId) {
+      const provider = repo.get(providerId);
+      if (!provider) {
+        throw new TaoriError({
+          code: 'not_found',
+          message: `Provider ${providerId} not found`,
+        });
+      }
+      let apiKey: string | undefined;
+      if (provider.api_key_ref) {
+        try {
+          apiKey = (await deps.keystore.read(provider.api_key_ref)) ?? undefined;
+        } catch {
+          apiKey = undefined;
+        }
+      }
+      request = {
+        type: provider.type,
+        base_url: provider.base_url,
+        api_key: apiKey,
+      };
+    } else if ('type' in payload && 'base_url' in payload) {
+      request = {
+        type: payload.type,
+        base_url: payload.base_url,
+        api_key: payload.api_key,
+      };
+    } else {
+      throw new TaoriError({
+        code: 'validation_error',
+        message: 'Provider test request is invalid',
+      });
+    }
+    const result = await testProvider(request);
     if (result.ok) {
       return { ok: true, sample_count: result.sample_count };
     }
@@ -229,7 +268,7 @@ export function registerProvidersRoute(
         });
       }
       let apiKey: string | undefined;
-      if (!provider.api_key_ref && provider.type !== 'ollama') {
+      if (!provider.api_key_ref && providerRequiresApiKey(provider.type)) {
         throw new TaoriError({
           code: 'validation_error',
           message: 'Provider has no API key configured',
@@ -238,7 +277,7 @@ export function registerProvidersRoute(
       if (provider.api_key_ref) {
         apiKey = (await deps.keystore.read(provider.api_key_ref)) ?? undefined;
       }
-      if (!apiKey && provider.type !== 'ollama') {
+      if (!apiKey && providerRequiresApiKey(provider.type)) {
         throw new TaoriError({
           code: 'keychain_error',
           message: 'API key not found in keystore — re-enter via PATCH /providers/:id',
@@ -253,7 +292,7 @@ export function registerProvidersRoute(
         return {
           provider_id: provider.id,
           models,
-          recommended: pickRecommendations(models),
+          recommended: pickRecommendations(models, provider.type),
         };
       } catch (e) {
         throw new TaoriError({

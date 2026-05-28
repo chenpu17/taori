@@ -18,23 +18,15 @@ import {
   SummarySchema,
   makeId,
   type AnalyzerOutput,
+  type RoundtableStatus,
 } from '@taori/shared';
-import {
-  ConversationsRepo,
-  CostsRepo,
-  MemoriesRepo,
-  MessagesRepo,
-  ModelsRepo,
-  PromptTemplatesRepo,
-  ProvidersRepo,
-  RunEventsRepo,
-  type RoundtableRow,
-  type RunEventInsert,
-  RoundtableMessagesRepo,
-  RoundtablesRepo,
-} from '../db/repos/index.js';
 import type { Model } from '@taori/shared';
 import type { BuildServerArgs } from '../server.js';
+import type {
+  RunEventsRepo,
+  RoundtableRow,
+  RunEventInsert,
+} from '../db/repos/index.js';
 import {
   pickAnalyzerModel,
   pickFallbackParticipantModels,
@@ -61,42 +53,6 @@ type RoundtableRunEventInput = Omit<RunEventInsert, 'run_id' | 'conversation_id'
   message_id?: string | null;
 };
 
-function appendRoundtableRunEvent(
-  log: { warn: (...a: unknown[]) => void },
-  repo: RunEventsRepo,
-  input: RunEventInsert,
-): void {
-  try {
-    repo.append(input);
-  } catch (e) {
-    const message = e instanceof Error ? e.message : String(e);
-    if (/FOREIGN KEY constraint failed/i.test(message)) {
-      try {
-        repo.append({ ...input, message_id: null });
-        return;
-      } catch (messageRetryError) {
-        const retryMessage =
-          messageRetryError instanceof Error
-            ? messageRetryError.message
-            : String(messageRetryError);
-        if (/FOREIGN KEY constraint failed/i.test(retryMessage)) {
-          try {
-            repo.append({ ...input, conversation_id: null, message_id: null });
-            return;
-          } catch (orphanRetryError) {
-            log.warn(
-              { err: orphanRetryError, runId: input.run_id, kind: input.kind },
-              'roundtable_run_event.write_failed',
-            );
-            return;
-          }
-        }
-      }
-    }
-    log.warn({ err: e, runId: input.run_id, kind: input.kind }, 'roundtable_run_event.write_failed');
-  }
-}
-
 function makeRoundtableRunEvents(args: {
   log: { warn: (...a: unknown[]) => void };
   repo: RunEventsRepo;
@@ -110,7 +66,7 @@ function makeRoundtableRunEvents(args: {
   return {
     runId: args.runId,
     conversationId: args.conversationId,
-    append: (input) => appendRoundtableRunEvent(args.log, args.repo, {
+    append: (input) => args.repo.appendSafe({
       run_id: args.runId,
       conversation_id: args.conversationId,
       message_id: input.message_id ?? null,
@@ -119,7 +75,7 @@ function makeRoundtableRunEvents(args: {
       label: input.label,
       summary: input.summary,
       payload: input.payload,
-    }),
+    }, args.log),
   };
 }
 
@@ -127,16 +83,35 @@ export function registerRoundtableRoute(
   app: FastifyInstance,
   deps: BuildServerArgs,
 ): void {
-  const convRepo = new ConversationsRepo(deps.db);
-  const modelsRepo = new ModelsRepo(deps.db);
-  const providersRepo = new ProvidersRepo(deps.db);
-  const memoriesRepo = new MemoriesRepo(deps.db);
-  const costsRepo = new CostsRepo(deps.db);
-  const rtRepo = new RoundtablesRepo(deps.db);
-  const rtMsgRepo = new RoundtableMessagesRepo(deps.db);
-  const messagesRepo = new MessagesRepo(deps.db);
-  const promptTemplatesRepo = new PromptTemplatesRepo(deps.db);
-  const runEventsRepo = new RunEventsRepo(deps.db);
+  const { repos } = deps;
+  const convRepo = repos.conversations;
+  const modelsRepo = repos.models;
+  const providersRepo = repos.providers;
+  const memoriesRepo = repos.memories;
+  const costsRepo = repos.costs;
+  const rtRepo = repos.roundtables;
+  const rtMsgRepo = repos.roundtableMessages;
+  const messagesRepo = repos.messages;
+  const promptTemplatesRepo = repos.promptTemplates;
+  const runEventsRepo = repos.runEvents;
+
+  // Startup sweep: mark roundtables stuck in active statuses as 'interrupted'.
+  // If the sidecar crashes or restarts while a roundtable stream is in-flight,
+  // the DB status will be left as 'analyzing'/'round1'/'round2'/'summarizing'
+  // but the in-memory inFlightStreams Set will be empty — making them stuck
+  // forever. This sweep runs once at startup to recover those orphaned rows.
+  const activeStatuses: RoundtableStatus[] = ['analyzing', 'round1', 'round2', 'summarizing'];
+  const stale = rtRepo.listByStatuses(activeStatuses);
+  if (stale.length > 0) {
+    app.log.info(
+      { count: stale.length, ids: stale.map((r) => r.id) },
+      'roundtable.recover_stale — marking as interrupted',
+    );
+    for (const row of stale) {
+      rtRepo.setStatus(row.id, 'interrupted');
+    }
+  }
+
   // M3.A.6 — In-memory in-flight tracker. The DB `status` column is a coarse
   // FSM that lingers in 'round1' / 'round2' / 'summarizing' even after the
   // stream finishes (spec has no idle-between-rounds state). To safely allow
@@ -673,7 +648,8 @@ export function registerRoundtableRoute(
       if (
         rt.status === 'completed' ||
         rt.status === 'failed' ||
-        rt.status === 'cancelled'
+        rt.status === 'cancelled' ||
+        rt.status === 'interrupted'
       ) {
         return reply.code(200).send({ ok: true, status: rt.status });
       }
@@ -740,7 +716,8 @@ export function registerRoundtableRoute(
     if (
       rt.status === 'completed' ||
       rt.status === 'failed' ||
-      rt.status === 'cancelled'
+      rt.status === 'cancelled' ||
+      rt.status === 'interrupted'
     ) {
       throw new TaoriError({
         code: 'conflict',
@@ -952,7 +929,7 @@ export function registerRoundtableRoute(
           details: { hint: '快速模式只有一轮' },
         });
       }
-      if (rt.status === 'completed' || rt.status === 'failed') {
+      if (rt.status === 'completed' || rt.status === 'failed' || rt.status === 'interrupted') {
         throw new TaoriError({
           code: 'conflict',
           message: `roundtable_${rt.status}`,
@@ -1559,7 +1536,7 @@ export function registerRoundtableRoute(
           details: { hint: '总结正在进行中' },
         });
       }
-      if (rt.status === 'completed' || rt.status === 'failed' || rt.status === 'cancelled') {
+      if (rt.status === 'completed' || rt.status === 'failed' || rt.status === 'cancelled' || rt.status === 'interrupted') {
         throw new TaoriError({
           code: 'conflict',
           message: `roundtable_${rt.status}`,

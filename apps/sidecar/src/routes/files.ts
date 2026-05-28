@@ -1,12 +1,12 @@
 import type { FastifyInstance } from 'fastify';
 import { FileSearchRequestSchema, TaoriError } from '@taori/shared';
 import type { BuildServerArgs } from '../server.js';
-import { FileChunksRepo, FilesRepo, type FileRow } from '../db/repos/index.js';
+import { type FileRow } from '../db/repos/index.js';
 import { ensureFileIndexed } from '../files/indexer.js';
 
 export function registerFilesRoute(app: FastifyInstance, deps: BuildServerArgs): void {
-  const filesRepo = new FilesRepo(deps.db);
-  const chunksRepo = new FileChunksRepo(deps.db);
+  const filesRepo = deps.repos.files;
+  const chunksRepo = deps.repos.fileChunks;
 
   app.post('/v1/files/search', async (req) => {
     const parsed = FileSearchRequestSchema.safeParse(req.body ?? {});

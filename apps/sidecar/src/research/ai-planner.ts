@@ -10,12 +10,14 @@ import type { MemoriesRepo, ModelsRepo, ProvidersRepo } from '../db/repos/index.
 import type { KeyStore } from '../keystore.js';
 import { createChatModel } from '../providers/chat-model.js';
 import { buildResearchPlan } from './planner.js';
+import type { SidecarTestHooksConfig } from '../config.js';
 
 export interface AIPlannerDeps {
   modelsRepo: ModelsRepo;
   providersRepo: ProvidersRepo;
   keystore: KeyStore;
   memories?: MemoriesRepo;
+  testHooks?: Pick<SidecarTestHooksConfig, 'hermeticAiPlanner'>;
   log?: { error: (msg: string, ...args: unknown[]) => void };
 }
 
@@ -81,7 +83,7 @@ export async function generateAIPlan(
   options?: { abortSignal?: AbortSignal },
 ): Promise<AIPlannerResult<ResearchPlan>> {
   const externalSignal = options?.abortSignal ?? null;
-  if (process.env.TAORI_HERMETIC_AI_PLANNER === '1' || process.env.TAORI_E2E_HERMETIC_WEB === '1') {
+  if (deps.testHooks?.hermeticAiPlanner) {
     return {
       ok: true,
       value: buildResearchPlan({
@@ -128,7 +130,7 @@ export async function revisePlan(
   feedback: string,
   deps: AIPlannerDeps,
 ): Promise<AIPlannerResult<{ plan: ResearchPlan; assistantMessage: string }>> {
-  if (process.env.TAORI_HERMETIC_AI_PLANNER === '1' || process.env.TAORI_E2E_HERMETIC_WEB === '1') {
+  if (deps.testHooks?.hermeticAiPlanner) {
     const plan = buildResearchPlan({
       title: session.title,
       objective: session.objective,

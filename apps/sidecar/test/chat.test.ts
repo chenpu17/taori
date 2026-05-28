@@ -71,6 +71,34 @@ describe('chat M1.2', () => {
     expect(msgs[1]!.content).toContain('hello taori');
   });
 
+  it('rejects chat requests with too many messages', async () => {
+    const res = await app.inject({
+      method: 'POST',
+      url: '/v1/chat',
+      headers: { authorization: `Bearer ${bearer}`, 'content-type': 'application/json' },
+      payload: {
+        model_id: 'mdl_unknown',
+        messages: Array.from({ length: 201 }, () => ({ role: 'user', content: 'hi' })),
+      },
+    });
+    expect(res.statusCode).toBe(400);
+    expect(JSON.parse(res.payload)).toMatchObject({ code: 'validation_error' });
+  });
+
+  it('rejects chat requests with an oversized single message', async () => {
+    const res = await app.inject({
+      method: 'POST',
+      url: '/v1/chat',
+      headers: { authorization: `Bearer ${bearer}`, 'content-type': 'application/json' },
+      payload: {
+        model_id: 'mdl_unknown',
+        messages: [{ role: 'user', content: 'x'.repeat(200_001) }],
+      },
+    });
+    expect(res.statusCode).toBe(400);
+    expect(JSON.parse(res.payload)).toMatchObject({ code: 'validation_error' });
+  });
+
   it('mock-path: records a run timeline for the chat turn', async () => {
     const res = await app.inject({
       method: 'POST',

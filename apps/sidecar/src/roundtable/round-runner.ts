@@ -38,7 +38,7 @@ import type {
 import type { KeyStore } from '../keystore.js';
 import { classifyProviderError } from '../providers/registry.js';
 import type { CapabilityBus } from '../bus/index.js';
-import { applyPreferredSearchToolSelection } from '../chat/upstream-tools.js';
+import { applyPreferredSearchToolSelection, MAX_STEPS_DEFAULT, MAX_STEPS_WITH_WEB_TOOLS } from '../chat/upstream-tools.js';
 import { createChatModel } from '../providers/chat-model.js';
 
 export interface RoundRunnerDeps {
@@ -154,9 +154,9 @@ function buildToolsForParticipant(args: {
   msgRow: RoundtableMessageRow;
   model: Model;
   stream: PassThrough;
-}): { tools?: Record<string, any>; instruction: string | null } {
+}): { tools?: Record<string, any>; instruction: string | null; flags: { web: boolean } } {
   const bus = args.deps.bus;
-  if (!bus || !args.model.supports_tools) return { instruction: null };
+  if (!bus || !args.model.supports_tools) return { instruction: null, flags: { web: false } };
   const used = new Set<string>();
   const exposed: Record<string, any> = {};
   const allowed = applyPreferredSearchToolSelection(
@@ -271,9 +271,11 @@ function buildToolsForParticipant(args: {
       },
     });
   }
-  if (Object.keys(exposed).length === 0) return { instruction: null };
+  if (Object.keys(exposed).length === 0) return { instruction: null, flags: { web: false } };
+  const hasWeb = allowedTools.some((item) => item.name === 'builtin.web_search' || item.name === 'builtin.web_fetch');
   return {
     tools: exposed,
+    flags: { web: hasWeb },
     instruction:
       '你可以使用可用工具辅助发言。需要最新网页信息时，优先使用当前可用的默认搜索工具，并在需要读取具体链接时使用 web_fetch；需要本地扩展能力时使用 MCP 工具。工具结果必须整合进你的观点，避免只复述工具输出。',
   };
@@ -349,7 +351,7 @@ async function runOneParticipant(
       maxTokens: 800,
       temperature: 0.6,
       maxRetries: 0,
-      ...(roundtableTools.tools ? { tools: roundtableTools.tools, maxSteps: 3 } : {}),
+      ...(roundtableTools.tools ? { tools: roundtableTools.tools, maxSteps: roundtableTools.flags.web ? MAX_STEPS_WITH_WEB_TOOLS : MAX_STEPS_DEFAULT } : {}),
       abortSignal: signal,
     });
 

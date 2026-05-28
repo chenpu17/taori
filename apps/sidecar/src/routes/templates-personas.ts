@@ -8,7 +8,7 @@ import {
 } from '@taori/shared';
 import type { Persona, PersonaCreate } from '@taori/shared';
 import type { BuildServerArgs } from '../server.js';
-import { MemoriesRepo, PromptTemplatesRepo, PersonasRepo } from '../db/repos/index.js';
+import type { MemoriesRepo, PersonasRepo } from '../db/repos/index.js';
 
 const DEFAULT_PERSONA_SEEDED_KEY = 'personas.default_seeded.v1';
 const OPENCLAW_PERSONA_LEGACY_SEEDED_KEY = 'personas.openclaw_seeded.v1';
@@ -168,9 +168,10 @@ export function registerTemplatesPersonasRoute(
   app: FastifyInstance,
   deps: BuildServerArgs,
 ): void {
-  const templates = new PromptTemplatesRepo(deps.db);
-  const personas = new PersonasRepo(deps.db);
-  const memories = new MemoriesRepo(deps.db);
+  const { repos } = deps;
+  const templates = repos.promptTemplates;
+  const personas = repos.personas;
+  const memories = repos.memories;
 
   app.get('/v1/prompt-templates', async () => {
     return { prompt_templates: templates.list() };

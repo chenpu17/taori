@@ -15,21 +15,14 @@ import {
   type QuickCompareAnnotation,
 } from '@taori/shared';
 import type { BuildServerArgs } from '../server.js';
+import type { QuickCompareRepo, CostsRepo, ModelsRepo, MemoriesRepo, RunEventsRepo } from '../db/repos/index.js';
 import {
-  ConversationsRepo,
-  CostsRepo,
-  MemoriesRepo,
-  MessagesRepo,
-  ModelsRepo,
-  PersonasRepo,
-  ProvidersRepo,
-  QuickCompareRepo,
-  RunEventsRepo,
-} from '../db/repos/index.js';
-import { classifyProviderError, isToolPayloadUnsupportedError } from '../providers/registry.js';
+  classifyProviderError, isToolPayloadUnsupportedError,
+} from '../providers/registry.js';
 import { throwIfBudgetBlockedOrNeedsConfirmation } from '../cost/budget-guard.js';
 import { openDataStream } from '../chat/stream-dispatch.js';
 import { appendRunEvent } from '../chat/run-stream.js';
+import { writeAnnotationPart } from '../chat/protocol.js';
 import { shouldUseDeepSeekToolLoop } from '../chat/deepseek-tool-loop-policy.js';
 import { buildConversationToolPolicy } from '../chat/tool-policy.js';
 import {
@@ -37,6 +30,8 @@ import {
   buildUpstreamTools,
   withCapabilityToolInstruction,
   type ToolTracePayload,
+  MAX_STEPS_DEFAULT,
+  MAX_STEPS_WITH_WEB_TOOLS,
 } from '../chat/upstream-tools.js';
 import { executeDeepSeekToolLoop } from '../chat/deepseek-tools-loop.js';
 import { pickQuickCompareModels } from '../quick-compare/model-picker.js';
@@ -44,7 +39,7 @@ import type { CapabilityBus } from '../bus/index.js';
 import { createChatModel, resolveThinkingConfig } from '../providers/chat-model.js';
 
 function writeAnnotation(stream: PassThrough, annotations: QuickCompareAnnotation[]): void {
-  stream.write(`8:${JSON.stringify(annotations)}\n`);
+  writeAnnotationPart(stream, annotations);
 }
 
 function validationError(message: string): TaoriError {
@@ -358,7 +353,7 @@ async function runCompareParticipant(args: {
         maxTokens: 1200,
         temperature: 0.6,
         maxRetries: 0,
-        ...(upstreamTools.tools ? { tools: upstreamTools.tools, maxSteps: 3 } : {}),
+        ...(upstreamTools.tools ? { tools: upstreamTools.tools, maxSteps: upstreamTools.flags.web ? MAX_STEPS_WITH_WEB_TOOLS : MAX_STEPS_DEFAULT } : {}),
         abortSignal: args.signal,
       });
       for await (const delta of result.textStream) {
@@ -523,15 +518,16 @@ async function runCompareParticipant(args: {
 }
 
 export function registerQuickCompareRoute(app: FastifyInstance, deps: BuildServerArgs): void {
-  const convRepo = new ConversationsRepo(deps.db);
-  const msgRepo = new MessagesRepo(deps.db);
-  const modelsRepo = new ModelsRepo(deps.db);
-  const providersRepo = new ProvidersRepo(deps.db);
-  const memoriesRepo = new MemoriesRepo(deps.db);
-  const personasRepo = new PersonasRepo(deps.db);
-  const costsRepo = new CostsRepo(deps.db);
-  const runEventsRepo = new RunEventsRepo(deps.db);
-  const qcRepo = new QuickCompareRepo(deps.db);
+  const { repos } = deps;
+  const convRepo = repos.conversations;
+  const msgRepo = repos.messages;
+  const modelsRepo = repos.models;
+  const providersRepo = repos.providers;
+  const memoriesRepo = repos.memories;
+  const personasRepo = repos.personas;
+  const costsRepo = repos.costs;
+  const runEventsRepo = repos.runEvents;
+  const qcRepo = repos.quickCompare;
 
   app.post('/v1/quick-compare', async (req, reply) => {
     const parsed = QuickCompareRequestSchema.safeParse(req.body);

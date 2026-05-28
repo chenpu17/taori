@@ -115,6 +115,12 @@ describe('M2.4 — image_generate via /v1/tools/invoke', () => {
         controlBearer: null,
         isDev: true,
         version: '0.0.0-test',
+        testHooks: {
+          hermeticWeb: false,
+          hermeticAiPlanner: false,
+          forceClassification: true,
+          forceImageResult: true,
+        },
       },
       db,
       control: new ControlClient({ url: null, bearer: null }),

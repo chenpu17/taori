@@ -153,13 +153,6 @@ describe('QueryPlanner — buildQueryPlannerPrompt', () => {
 });
 
 describe('QueryPlanner — generateLLMQueries hermetic short-circuit', () => {
-  beforeEach(() => {
-    process.env.TAORI_HERMETIC_AI_PLANNER = '1';
-  });
-  afterEach(() => {
-    delete process.env.TAORI_HERMETIC_AI_PLANNER;
-  });
-
   it('returns ok=false immediately in hermetic mode (no model call)', async () => {
     const result = await generateLLMQueries(
       {
@@ -172,6 +165,7 @@ describe('QueryPlanner — generateLLMQueries hermetic short-circuit', () => {
       {
         modelsRepo: null as never,
         providersRepo: null as never,
+        testHooks: { hermeticAiPlanner: true },
       },
     );
     expect(result.ok).toBe(false);

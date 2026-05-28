@@ -21,6 +21,14 @@ import {
   withCapabilityToolInstruction,
 } from './upstream-tools.js';
 import { extractCachedPromptTokensFromOpenAiUsage } from './usage.js';
+import {
+  writeAnnotationPart,
+  writeErrorPart,
+  writeFinishPart,
+  writeStepFinishPart,
+  writeTextPart,
+  type StreamObserver,
+} from './protocol.js';
 import { zodToJsonSchema } from 'zod-to-json-schema';
 
 type DeepSeekToolCall = {
@@ -320,6 +328,7 @@ export async function produceDeepSeekUpstreamStream(
   modelRecord: Model,
   modelsRepo: ModelsRepo,
   memoriesRepo: MemoriesRepo,
+  observer?: StreamObserver,
 ): Promise<void> {
   const startedAt = Date.now();
   let firstTokenAt: number | null = null;
@@ -327,15 +336,11 @@ export async function produceDeepSeekUpstreamStream(
   const runtimeState: { imageGenerateCompleted?: boolean } = {};
   const write = (line: string): boolean => stream.write(line);
   const emitToolTrace: EmitToolTrace = (payload) => {
-    write(
-      `8:${JSON.stringify([
-        {
-          type: 'tool_trace',
-          message_id: ctx.messageId,
-          ...payload,
-        },
-      ])}\n`,
-    );
+    writeAnnotationPart(stream, [{
+      type: 'tool_trace',
+      message_id: ctx.messageId,
+      ...payload,
+    }], observer);
     recordRunEvent(ctx, {
       kind:
         payload.event === 'start'
@@ -415,7 +420,7 @@ export async function produceDeepSeekUpstreamStream(
     let chunks = 0;
     if (finalText != null && finalText.length > 0) {
       if (firstTokenAt == null) firstTokenAt = Date.now();
-      write(`0:${JSON.stringify(finalText)}\n`);
+      writeTextPart(stream, finalText, observer);
       chunks++;
     } else {
       const imageOnlyResult = await waitForTextDeltaOrImageToolGrace(
@@ -425,7 +430,7 @@ export async function produceDeepSeekUpstreamStream(
       if (imageOnlyResult === 'image-tool-finalize') {
         imageToolFinalizedWithoutModelText = true;
         if (firstTokenAt == null) firstTokenAt = Date.now();
-        write(`0:${JSON.stringify(IMAGE_TOOL_FINAL_TEXT)}\n`);
+        writeTextPart(stream, IMAGE_TOOL_FINAL_TEXT, observer);
         chunks++;
       }
     }
@@ -447,14 +452,12 @@ export async function produceDeepSeekUpstreamStream(
     if (!signal.aborted && chunks === 0) {
       const detail = '模型本次调用已完成，但没有返回任何可显示文本。请重试，或切换到另一模型继续。';
       const decision = buildFailureDecision('unknown', ctx, modelsRepo, memoriesRepo, detail);
-      write(`8:${JSON.stringify([decision])}\n`);
-      write(`3:${JSON.stringify(`provider_error/unknown: ${detail}`)}\n`);
-      write(
-        `d:${JSON.stringify({
-          finishReason: 'error',
-          usage: { promptTokens: promptTokens ?? 0, completionTokens: completionTokens ?? 0 },
-        })}\n`,
-      );
+      writeAnnotationPart(stream, [decision], observer);
+      writeErrorPart(stream, `provider_error/unknown: ${detail}`, observer);
+      writeFinishPart(stream, {
+        finishReason: 'error',
+        usage: { promptTokens: promptTokens ?? 0, completionTokens: completionTokens ?? 0 },
+      });
       recordRunEvent(ctx, {
         kind: 'model.failed',
         status: 'failed',
@@ -471,20 +474,16 @@ export async function produceDeepSeekUpstreamStream(
       return;
     }
 
-    write(
-      `8:${JSON.stringify([
-        {
-          type: 'cost',
-          message_id: ctx.messageId,
-          input_tokens: promptTokens,
-          cache_input_tokens: cacheInputTokens,
-          output_tokens: completionTokens,
-          actual_usd: actualUsd,
-          first_token_ms: firstTokenAt == null ? null : firstTokenAt - startedAt,
-          duration_ms: Date.now() - startedAt,
-        },
-      ])}\n`,
-    );
+    writeAnnotationPart(stream, [{
+      type: 'cost',
+      message_id: ctx.messageId,
+      input_tokens: promptTokens,
+      cache_input_tokens: cacheInputTokens,
+      output_tokens: completionTokens,
+      actual_usd: actualUsd,
+      first_token_ms: firstTokenAt == null ? null : firstTokenAt - startedAt,
+      duration_ms: Date.now() - startedAt,
+    }], observer);
     recordRunEvent(ctx, {
       kind: 'model.completed',
       status: 'completed',
@@ -500,19 +499,15 @@ export async function produceDeepSeekUpstreamStream(
         duration_ms: Date.now() - startedAt,
       },
     });
-    write(
-      `e:${JSON.stringify({
-        finishReason: signal.aborted ? 'abort' : 'stop',
-        usage: { promptTokens, completionTokens },
-        isContinued: false,
-      })}\n`,
-    );
-    write(
-      `d:${JSON.stringify({
-        finishReason: signal.aborted ? 'abort' : 'stop',
-        usage: { promptTokens: promptTokens ?? 0, completionTokens: completionTokens ?? 0 },
-      })}\n`,
-    );
+    writeStepFinishPart(stream, {
+      finishReason: signal.aborted ? 'abort' : 'stop',
+      usage: { promptTokens, completionTokens },
+      isContinued: false,
+    });
+    writeFinishPart(stream, {
+      finishReason: signal.aborted ? 'abort' : 'stop',
+      usage: { promptTokens: promptTokens ?? 0, completionTokens: completionTokens ?? 0 },
+    });
   } catch (e) {
     if (signal.aborted) {
       recordRunEvent(ctx, {
@@ -546,11 +541,9 @@ export async function produceDeepSeekUpstreamStream(
         memoriesRepo,
         cls.message || msg,
       );
-      write(`8:${JSON.stringify([decision])}\n`);
-      write(`3:${JSON.stringify(`provider_error/${cls.classification}: ${cls.message || msg}`)}\n`);
-      write(
-        `d:${JSON.stringify({ finishReason: 'error', usage: { promptTokens: 0, completionTokens: 0 } })}\n`,
-      );
+      writeAnnotationPart(stream, [decision], observer);
+      writeErrorPart(stream, `provider_error/${cls.classification}: ${cls.message || msg}`, observer);
+      writeFinishPart(stream, { finishReason: 'error', usage: { promptTokens: 0, completionTokens: 0 } });
     }
   } finally {
     stream.end();

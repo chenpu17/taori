@@ -5,6 +5,7 @@ import { openDb } from './db/index.js';
 import { ControlClient } from './control/client.js';
 import { buildKeyStore } from './keystore.js';
 import { buildServer } from './server.js';
+import { buildRepos } from './db/repos/index.js';
 import { formatHttpUrl, normalizeLocalConnectUrl } from './standalone-cli.js';
 
 export interface StartedSidecar {
@@ -36,7 +37,8 @@ export async function startSidecar(args?: {
   });
   const startedAt = Date.now();
 
-  const app = buildServer({ config, db, control, keystore, startedAt });
+  const repos = buildRepos(db);
+  const app = buildServer({ config, db, repos, control, keystore, startedAt });
   const address = await app.listen({ host: config.host ?? '127.0.0.1', port: config.port });
   const url = new URL(address);
   const port = Number(url.port);
@@ -44,11 +46,10 @@ export async function startSidecar(args?: {
   const bindUrl = formatHttpUrl(bindHost, port);
   const href = normalizeLocalConnectUrl(bindHost, port);
 
-  const { ProvidersRepo, ModelsRepo } = await import('./db/repos/index.js');
   const { scheduleCatalogSync } = await import('./catalog/index.js');
   const catalogTask = scheduleCatalogSync({
-    providers: new ProvidersRepo(db),
-    models: new ModelsRepo(db),
+    providers: repos.providers,
+    models: repos.models,
     keystore,
     log: {
       info: (...a) => process.stderr.write('[catalog] ' + a.join(' ') + '\n'),

@@ -546,17 +546,20 @@ async function listOpenAICompatibleModels(
   return [];
 }
 
-export function pickRecommendations(models: DiscoveredModel[]): {
-  chat: string | null;
-  vision: string | null;
-} {
+export function pickRecommendations(
+  models: DiscoveredModel[],
+  providerType?: ProviderType,
+): { chat: string | null; vision: string | null } {
   // Multimodal models still answer text — include them in the chat pool so
   // a single vision-capable model imported alone gives the user a working
   // chat default out of the box.
   const candidates = models.filter(
     (m) => m.capability === 'chat' || m.capability === 'multimodal',
   );
-  const preferChat = [
+
+  // Provider-specific preferences take priority
+  const adapter = providerType ? adapters[providerType] : undefined;
+  const preferChat = adapter?.recommendedChat ?? [
     'openai/gpt-4o-mini',
     'gpt-4o-mini',
     'deepseek-v4-flash',
@@ -568,13 +571,14 @@ export function pickRecommendations(models: DiscoveredModel[]): {
     'google/gemini-2.0-flash-001',
     'meta-llama/llama-3.3-70b-instruct',
   ];
-  const preferVision = [
+  const preferVision = adapter?.recommendedVision ?? [
     'openai/gpt-4o',
     'gpt-4o',
     'qwen2.5-vl-72b',
     'anthropic/claude-3.5-sonnet',
     'google/gemini-2.0-flash-001',
   ];
+
   const find = (preferred: string[], filter?: (m: DiscoveredModel) => boolean) => {
     const pool = filter ? candidates.filter(filter) : candidates;
     for (const want of preferred) {
@@ -589,39 +593,74 @@ export function pickRecommendations(models: DiscoveredModel[]): {
   };
 }
 
+/* ------------------------------------------------------------------ */
+/*  Provider adapter registry — single source of truth for per-type   */
+/*  test / list dispatching.  Adding a new provider only requires     */
+/*  inserting one entry here; no need to touch testProvider /         */
+/*  listProviderModels.                                               */
+/* ------------------------------------------------------------------ */
+
+interface ProviderAdapter {
+  test(base_url: string, api_key: string): Promise<ProviderTestResult>;
+  listModels(base_url: string, api_key: string): Promise<DiscoveredModel[]>;
+  apiKeyRequired?: boolean;           // default true
+  recommendedChat?: string[];         // priority-ordered model names for chat default
+  recommendedVision?: string[];       // priority-ordered model names for vision default
+}
+
+const adapters: Partial<Record<ProviderType, ProviderAdapter>> = {
+  openrouter: {
+    test: testOpenRouter,
+    listModels: listOpenRouterModels,
+    recommendedChat: ['openai/gpt-4o-mini', 'deepseek/deepseek-chat', 'anthropic/claude-3.5-haiku', 'google/gemini-2.0-flash-001', 'meta-llama/llama-3.3-70b-instruct'],
+    recommendedVision: ['openai/gpt-4o', 'anthropic/claude-3.5-sonnet', 'google/gemini-2.0-flash-001'],
+  },
+  openai: {
+    test: testOpenAI,
+    listModels: listOpenAICompatibleModels,
+    recommendedChat: ['gpt-4o-mini'],
+    recommendedVision: ['gpt-4o'],
+  },
+  custom: {
+    test: testOpenAI,
+    listModels: listOpenAICompatibleModels,
+  },
+  volcengine_ark: { test: testVolcengineArk, listModels: listVolcengineArkModels },
+  huawei_maas:    { test: testHuaweiMaas,    listModels: listHuaweiMaasModels },
+  deepseek: {
+    test: testDeepSeek,
+    listModels: listDeepSeekModels,
+    recommendedChat: ['deepseek-v4-flash', 'deepseek-v4-pro', 'deepseek-v3.2', 'DeepSeek-V3'],
+  },
+  packyapi:    { test: testPackyApi,    listModels: listPackyApiModels },
+  siliconflow: { test: testSiliconFlow, listModels: listSiliconFlowModels },
+  ollama: {
+    test: (base_url, _apiKey) => testOllama(base_url),
+    listModels: (base_url, _apiKey) => listOllamaModels(base_url),
+    apiKeyRequired: false,
+  },
+};
+
+/** Returns true when the provider type requires an API key (default). */
+export function providerRequiresApiKey(type: ProviderType): boolean {
+  return adapters[type]?.apiKeyRequired !== false;
+}
+
 export async function testProvider(args: {
   type: ProviderType;
   base_url: string;
   api_key?: string;
 }): Promise<ProviderTestResult> {
-  if (args.type === 'ollama') {
-    return testOllama(args.base_url);
-  }
-  if (!args.api_key) {
+  const adapter = adapters[args.type];
+  if (!adapter) return testOpenAI(args.base_url, args.api_key ?? '');
+  if (adapter.apiKeyRequired !== false && !args.api_key) {
     return {
       ok: false,
       classification: 'key_missing',
       message: 'API key is not configured',
     };
   }
-  switch (args.type) {
-    case 'openrouter':
-      return testOpenRouter(args.base_url, args.api_key);
-    case 'openai':
-      return testOpenAI(args.base_url, args.api_key);
-    case 'volcengine_ark':
-      return testVolcengineArk(args.base_url, args.api_key);
-    case 'huawei_maas':
-      return testHuaweiMaas(args.base_url, args.api_key);
-    case 'deepseek':
-      return testDeepSeek(args.base_url, args.api_key);
-    case 'packyapi':
-      return testPackyApi(args.base_url, args.api_key);
-    case 'siliconflow':
-      return testSiliconFlow(args.base_url, args.api_key);
-    default:
-      return testOpenAI(args.base_url, args.api_key);
-  }
+  return adapter.test(args.base_url, args.api_key ?? '');
 }
 
 export async function listProviderModels(args: {
@@ -629,30 +668,10 @@ export async function listProviderModels(args: {
   base_url: string;
   api_key?: string;
 }): Promise<DiscoveredModel[]> {
-  if (args.type === 'ollama') {
-    return listOllamaModels(args.base_url);
-  }
-  if (!args.api_key) {
+  const adapter = adapters[args.type];
+  if (!adapter) return listOpenAICompatibleModels(args.base_url, args.api_key ?? '');
+  if (adapter.apiKeyRequired !== false && !args.api_key) {
     throw new Error('API key is not configured');
   }
-  switch (args.type) {
-    case 'openrouter':
-      return listOpenRouterModels(args.base_url, args.api_key);
-    case 'openai':
-      return listOpenAICompatibleModels(args.base_url, args.api_key);
-    case 'volcengine_ark':
-      return listVolcengineArkModels(args.base_url, args.api_key);
-    case 'huawei_maas':
-      return listHuaweiMaasModels(args.base_url, args.api_key);
-    case 'deepseek':
-      return listDeepSeekModels(args.base_url, args.api_key);
-    case 'packyapi':
-      return listPackyApiModels(args.base_url, args.api_key);
-    case 'siliconflow':
-      return listSiliconFlowModels(args.base_url, args.api_key);
-    case 'custom':
-      return listOpenAICompatibleModels(args.base_url, args.api_key);
-    default:
-      return [];
-  }
+  return adapter.listModels(args.base_url, args.api_key ?? '');
 }

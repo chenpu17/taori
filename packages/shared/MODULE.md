@@ -32,3 +32,5 @@
 - `ProviderTypeSchema` 新增 `deepseek`、`packyapi` 与 `siliconflow`；共享常量新增 `DEFAULT_DEEPSEEK_BASE_URL`、`DEFAULT_PACKYAPI_BASE_URL`、`DEFAULT_SILICONFLOW_BASE_URL`，用于 Web onboarding 与 Sidecar provider adapter 保持默认接入点一致。
 - `ModelSchema` / `ModelCreateSchema` / `ModelUpdateSchema` / `BackupModelRecordSchema` 新增 `thinking_enabled: boolean | null`，用于“跟随全局 / 单模型覆盖”的思考开关合同。
 - `ResearchSessionSchema` 新增 `plan_origin: 'pending' | 'ai' | 'fallback'`；当前版本正常只会写入 `pending / ai`，`fallback` 仅用于读取历史会话，避免旧数据被误判成 AI 生成计划。
+- `ProviderTestRequestSchema` 扩展为 union：既支持临时连通性测试 `{ type, base_url, api_key? }`，也支持对已保存 Provider 的直接测试 `{ provider_id }`。
+- `ChatRequestSchema.messages` 新增上限：单次请求最多 200 条消息，单条 `content` 最多 200KB，防止超长历史在 Sidecar 预算估算和上游组装阶段造成不必要的内存放大。

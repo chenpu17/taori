@@ -159,6 +159,44 @@ describe('providers + models', () => {
     expect(body.sample_count).toBe(2);
   });
 
+  it('POST /v1/providers/test supports provider_id for saved providers', async () => {
+    mockOpenRouterModels([{ id: 'a/b' }, { id: 'c/d' }, { id: 'e/f' }]);
+    const create = await app.inject({
+      method: 'POST',
+      url: '/v1/providers',
+      headers: authJson,
+      payload: {
+        name: 'Saved OpenRouter',
+        type: 'openrouter',
+        base_url: 'https://openrouter.ai/api/v1',
+        api_key: 'sk-or-saved',
+      },
+    });
+    expect(create.statusCode).toBe(201);
+    const provider = create.json() as { id: string };
+
+    try {
+      const res = await app.inject({
+        method: 'POST',
+        url: '/v1/providers/test',
+        headers: authJson,
+        payload: {
+          provider_id: provider.id,
+        },
+      });
+      expect(res.statusCode).toBe(200);
+      const body = res.json();
+      expect(body.ok).toBe(true);
+      expect(body.sample_count).toBe(3);
+    } finally {
+      await app.inject({
+        method: 'DELETE',
+        url: `/v1/providers/${provider.id}`,
+        headers: auth,
+      });
+    }
+  });
+
   it('Ollama provider test works without an API key and normalizes /v1 for native tags', async () => {
     const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(
       new Response(JSON.stringify({ models: [{ name: 'llama3.2:latest' }] }), {

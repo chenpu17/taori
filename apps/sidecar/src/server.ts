@@ -12,10 +12,10 @@
 
 import Fastify, { type FastifyInstance } from 'fastify';
 import cors from '@fastify/cors';
-import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
+import { createHash, createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
 import fs from 'node:fs';
 import { TaoriError, ERROR_HTTP_STATUS } from '@taori/shared';
-import { type SidecarConfig } from './config.js';
+import { normalizeSidecarConfig, type SidecarConfig, type SidecarConfigInput } from './config.js';
 import { type Db } from './db/index.js';
 import { type ControlClient } from './control/client.js';
 import { type KeyStore } from './keystore.js';
@@ -48,12 +48,16 @@ import { createFileSearchTool } from './bus/builtins/file_search.js';
 import { createImageGenerateTool } from './bus/builtins/image_generate.js';
 import { createWebFetchTool, createWebFetchToolWithDeps } from './bus/builtins/web_fetch.js';
 import { createWebSearchTool, createWebSearchToolWithDeps } from './bus/builtins/web_search.js';
-import { CostsRepo, FilesRepo, FileChunksRepo, ProvidersRepo, ModelsRepo, MessagesRepo, ConversationsRepo, MemoriesRepo, ResearchRepo } from './db/repos/index.js';
+import { buildRepos, type Repos } from './db/repos/index.js';
+import { standaloneBrowserDisabledResponse, standaloneLoginResponse } from './standalone/login-page.js';
 import path from 'node:path';
+
+const BODY_LIMIT_BYTES = 25_000_000;
 
 export interface BuildServerArgs {
   config: SidecarConfig;
   db: Db;
+  repos: Repos;
   control: ControlClient;
   keystore: KeyStore;
   startedAt: number;
@@ -66,20 +70,28 @@ export interface BuildServerArgs {
   memoryProvider?: MemoryProvider;
 }
 
-export function buildServer(args: BuildServerArgs): FastifyInstance {
+type BuildServerInputArgs = Omit<BuildServerArgs, 'config' | 'repos'> & {
+  config: SidecarConfigInput;
+  repos?: Repos;
+};
+
+export function buildServer(input: BuildServerInputArgs): FastifyInstance {
+  const config = normalizeSidecarConfig(input.config);
+  const repos = input.repos ?? buildRepos(input.db);
+  const args: BuildServerArgs = { ...input, config, repos };
   const standaloneWeb = resolveStandaloneWebAssets(args.config);
   const standaloneCookieName = 'taori_standalone_session';
   const standaloneSessionSecret = randomBytes(32).toString('hex');
-  const standalonePassword = args.config.standalone ? args.config.standaloneAccessPassword : null;
-  const standaloneLoginEnabled = Boolean(standaloneWeb && standalonePassword);
+  const standalonePassword = config.standalone ? config.standaloneAccessPassword : null;
+  const standaloneLoginEnabled = Boolean(config.standalone && standalonePassword);
 
   const app = Fastify({
     // Chat requests can include image attachments as base64. Generated images
     // sent back into vision models commonly exceed Fastify's 1MB default, so
     // align the parser cap with ChatRequest's 20MB aggregate validation.
-    bodyLimit: 25_000_000,
+    bodyLimit: BODY_LIMIT_BYTES,
     logger: {
-      level: args.config.isDev ? 'info' : 'warn',
+      level: config.isDev ? 'info' : 'warn',
       // Sidecar logs go to stderr so stdout stays clean for the READY line.
       transport: undefined,
       stream: process.stderr,
@@ -100,9 +112,13 @@ export function buildServer(args: BuildServerArgs): FastifyInstance {
 
   app.register(cors, {
     origin: (origin, cb) => {
-      if (args.config.standalone && !origin) return cb(null, true);
       // Renderer either calls from http://localhost:5173 (vite dev) or
       // tauri://localhost / asset protocol. Allow all localhost origins.
+      // CORS only matters for browser requests that carry an Origin header.
+      // Non-browser callers (curl, SDKs, CLI) send no origin; allow them
+      // through so Bearer auth is the sole gate.  Without this, curl/SDK
+      // requests with a valid Bearer token get rejected by CORS before
+      // the auth hook even runs.
       if (!origin) return cb(null, true);
       const ok =
         /^https?:\/\/(127\.0\.0\.1|localhost)(:\d+)?$/.test(origin) ||
@@ -117,7 +133,7 @@ export function buildServer(args: BuildServerArgs): FastifyInstance {
   const staticAssetPrefixes = standaloneWeb ? ['/assets/', '/favicon', '/taori-browser-boot.js'] : [];
 
   function isStandaloneHtmlRequest(req: { method: string; headers: Record<string, unknown>; url: string }): boolean {
-    if (!standaloneWeb) return false;
+    if (!config.standalone) return false;
     if (req.method !== 'GET') return false;
     if (req.url.startsWith('/v1/') || req.url === '/health') return false;
     if (req.url.startsWith('/api/standalone-auth/')) return false;
@@ -132,13 +148,19 @@ export function buildServer(args: BuildServerArgs): FastifyInstance {
       if (index <= 0) continue;
       const key = part.slice(0, index).trim();
       const value = part.slice(index + 1).trim();
-      cookies.set(key, decodeURIComponent(value));
+      try {
+        cookies.set(key, decodeURIComponent(value));
+      } catch {
+        cookies.set(key, value);
+      }
     }
     return cookies;
   }
 
+  const STANDALONE_SESSION_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
+
   function signStandaloneSession(payload: string): string {
-    return createHash('sha256').update(`${standaloneSessionSecret}:${payload}`).digest('hex');
+    return createHmac('sha256', standaloneSessionSecret).update(payload).digest('hex');
   }
 
   function makeStandaloneSessionCookie(): string {
@@ -156,15 +178,18 @@ export function buildServer(args: BuildServerArgs): FastifyInstance {
     const payload = `${parts[0]}.${parts[1]}`;
     const actual = parts[2] ?? '';
     const expected = signStandaloneSession(payload);
-    const actualBuf = Buffer.from(actual, 'utf8');
-    const expectedBuf = Buffer.from(expected, 'utf8');
-    return actualBuf.length === expectedBuf.length && timingSafeEqual(actualBuf, expectedBuf);
+    if (!constantTimeStringEqual(actual, expected)) return false;
+    const issuedAt = Number(parts[0]);
+    if (!Number.isFinite(issuedAt) || Date.now() - issuedAt > STANDALONE_SESSION_MAX_AGE_MS) return false;
+    return true;
   }
+
+  const STANDALONE_SESSION_COOKIE_MAX_AGE = 7 * 24 * 60 * 60; // 7 days, in seconds
 
   function setStandaloneSessionCookie(reply: { header: (name: string, value: string) => void }): void {
     reply.header(
       'Set-Cookie',
-      `${standaloneCookieName}=${encodeURIComponent(makeStandaloneSessionCookie())}; Path=/; HttpOnly; SameSite=Lax`,
+      `${standaloneCookieName}=${encodeURIComponent(makeStandaloneSessionCookie())}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${STANDALONE_SESSION_COOKIE_MAX_AGE}`,
     );
   }
 
@@ -182,207 +207,25 @@ export function buildServer(args: BuildServerArgs): FastifyInstance {
     return verifyStandaloneSessionCookie(cookies.get(standaloneCookieName));
   }
 
-  function standaloneLoginResponse(args: { authenticated: boolean; bindUrl: string | null; localUrl: string | null }): string {
-    return `<!doctype html>
-<html lang="zh-CN">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Taori 登录</title>
-  <style>
-    :root {
-      color-scheme: light dark;
-      --bg: #0d1423;
-      --bg2: #132033;
-      --card: rgba(255,255,255,0.08);
-      --card-border: rgba(255,255,255,0.14);
-      --fg: #f8fafc;
-      --muted: #cbd5e1;
-      --accent: #59c3c3;
-      --accent2: #f97316;
-      --bad: #f87171;
-    }
-    * { box-sizing: border-box; }
-    body {
-      margin: 0;
-      min-height: 100vh;
-      font-family: Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', sans-serif;
-      background:
-        radial-gradient(900px 500px at 10% 0%, rgba(89,195,195,0.24), transparent 55%),
-        radial-gradient(1000px 640px at 100% 100%, rgba(249,115,22,0.18), transparent 60%),
-        linear-gradient(160deg, var(--bg) 0%, var(--bg2) 100%);
-      color: var(--fg);
-      display: grid;
-      place-items: center;
-      padding: 24px;
-    }
-    .shell {
-      width: min(480px, 100%);
-      padding: 28px;
-      border-radius: 24px;
-      background: var(--card);
-      border: 1px solid var(--card-border);
-      backdrop-filter: blur(18px);
-      box-shadow: 0 24px 60px rgba(0,0,0,0.35);
-    }
-    h1 { margin: 0 0 10px; font-size: 30px; }
-    p { margin: 0 0 16px; color: var(--muted); line-height: 1.6; }
-    form { display: grid; gap: 12px; margin-top: 18px; }
-    input {
-      width: 100%;
-      border: 1px solid rgba(255,255,255,0.12);
-      background: rgba(15,23,42,0.4);
-      color: var(--fg);
-      border-radius: 14px;
-      padding: 14px 16px;
-      font-size: 15px;
-    }
-    button {
-      border: 0;
-      border-radius: 14px;
-      padding: 14px 16px;
-      font-weight: 600;
-      font-size: 15px;
-      color: #08111f;
-      background: linear-gradient(135deg, var(--accent) 0%, #8be9d0 100%);
-      cursor: pointer;
-    }
-    .meta {
-      margin-top: 18px;
-      padding-top: 16px;
-      border-top: 1px solid rgba(255,255,255,0.12);
-      font-size: 13px;
-      color: var(--muted);
-      display: grid;
-      gap: 6px;
-    }
-    .error {
-      display: none;
-      margin-top: 10px;
-      color: var(--bad);
-      font-size: 14px;
-    }
-    .hint {
-      margin-top: 12px;
-      font-size: 13px;
-      color: var(--muted);
-    }
-    .ready {
-      display: ${args.authenticated ? 'block' : 'none'};
-      margin-top: 14px;
-      color: #8be9d0;
-      font-size: 14px;
-    }
-  </style>
-</head>
-<body>
-  <div class="shell">
-    <h1>Taori Browser Access</h1>
-    <p>这是 Taori standalone 的浏览器入口。输入启动服务时设置的访问密码后，即可进入完整 Web 界面。</p>
-    <form id="login-form" ${args.authenticated ? 'style="display:none"' : ''}>
-      <input id="password" name="password" type="password" placeholder="输入访问密码" autocomplete="current-password" required />
-      <button type="submit">登录 Taori</button>
-    </form>
-    <div class="ready" id="ready-box">已验证，正在进入 Taori…</div>
-    <div class="error" id="login-error"></div>
-    <div class="hint">脚本和自动化仍可继续使用 Bearer Token 访问 API；浏览器访问建议使用这个登录页。</div>
-    <div class="meta">
-      ${args.bindUrl ? `<div>Bind: ${escapeHtml(args.bindUrl)}</div>` : ''}
-      ${args.localUrl ? `<div>Local: ${escapeHtml(args.localUrl)}</div>` : ''}
-      <div>Health: <a href="/health" style="color:#8be9d0">/health</a></div>
-    </div>
-  </div>
-  <script>
-    const form = document.getElementById('login-form');
-    const errorBox = document.getElementById('login-error');
-    const readyBox = document.getElementById('ready-box');
-    async function goApp() {
-      window.location.replace('/app');
-    }
-    if (${JSON.stringify(args.authenticated)}) {
-      goApp();
-    }
-    form?.addEventListener('submit', async (event) => {
-      event.preventDefault();
-      errorBox.style.display = 'none';
-      const password = document.getElementById('password').value;
-      const response = await fetch('/api/standalone-auth/login', {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        credentials: 'same-origin',
-        body: JSON.stringify({ password })
-      });
-      if (!response.ok) {
-        let message = '登录失败，请检查密码。';
-        try {
-          const body = await response.json();
-          if (body && typeof body.message === 'string') message = body.message;
-        } catch {}
-        errorBox.textContent = message;
-        errorBox.style.display = 'block';
-        return;
-      }
-      readyBox.style.display = 'block';
-      goApp();
-    });
-  </script>
-</body>
-</html>`;
+  function isAllowedStandaloneOrigin(origin: string): boolean {
+    return /^https?:\/\/(127\.0\.0\.1|localhost)(:\d+)?$/.test(origin)
+      || origin === 'tauri://localhost'
+      || origin.startsWith('http://tauri.localhost');
   }
 
-  function standaloneBrowserDisabledResponse(args: { bindUrl: string | null; localUrl: string | null }): string {
-    return `<!doctype html>
-<html lang="zh-CN">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Taori 浏览器入口未启用</title>
-  <style>
-    body {
-      margin: 0;
-      min-height: 100vh;
-      display: grid;
-      place-items: center;
-      padding: 24px;
-      font-family: Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', sans-serif;
-      background: linear-gradient(160deg, #0f172a 0%, #111827 100%);
-      color: #f8fafc;
-    }
-    .card {
-      width: min(560px, 100%);
-      padding: 28px;
-      border-radius: 22px;
-      background: rgba(255,255,255,0.08);
-      border: 1px solid rgba(255,255,255,0.12);
-    }
-    h1 { margin: 0 0 12px; font-size: 28px; }
-    p, li { color: #cbd5e1; line-height: 1.7; }
-    code { color: #8be9d0; }
-  </style>
-</head>
-<body>
-  <div class="card">
-    <h1>Taori 浏览器入口未启用</h1>
-    <p>当前 standalone 已启动，但你没有设置 <code>--password</code>，所以浏览器 Web UI 登录入口不会开放。</p>
-    <p>重新启动示例：</p>
-    <p><code>taori --host 0.0.0.0 --port 4101 --password my-secret</code></p>
-    <p>你仍然可以直接使用：</p>
-    <ul>
-      <li><code>/health</code> 做探活</li>
-      <li>带 Bearer 的 API 调用做自动化访问</li>
-    </ul>
-    <p>Bind: ${escapeHtml(args.bindUrl ?? 'n/a')}</p>
-    <p>Local: ${escapeHtml(args.localUrl ?? 'n/a')}</p>
-  </div>
-</body>
-</html>`;
+  function authorizedByBearer(req: { headers: Record<string, unknown> }): boolean {
+    const auth = typeof req.headers.authorization === 'string' ? req.headers.authorization : '';
+    return constantTimeStringEqual(auth, expectedAuth);
+  }
+
+  function authorizedByCookie(req: { headers: Record<string, unknown> }): boolean {
+    return standaloneAuthorizedByCookie(req);
   }
 
   // Bearer auth (skip /health for liveness probes). Uses constant-time
   // comparison to defeat timing-based token recovery against this localhost
   // service. See docs/architecture/05-security.md.
   const expectedAuth = `Bearer ${args.config.bearer}`;
-  const expectedBuf = Buffer.from(expectedAuth, 'utf8');
   app.addHook('onRequest', async (req, reply) => {
     if (req.url === '/health') return;
     if (standaloneLoginEnabled && req.url === '/api/standalone-auth/session') return;
@@ -390,7 +233,7 @@ export function buildServer(args: BuildServerArgs): FastifyInstance {
     if (standaloneLoginEnabled && req.url === '/api/standalone-auth/logout') return;
     if (standaloneWeb && staticAssetPrefixes.some((prefix) => req.url.startsWith(prefix))) return;
     if (isStandaloneHtmlRequest(req)) {
-      if (standaloneWeb && !standaloneLoginEnabled) {
+      if (!standaloneLoginEnabled) {
         reply
           .type('text/html; charset=utf-8')
           .send(
@@ -401,7 +244,18 @@ export function buildServer(args: BuildServerArgs): FastifyInstance {
           );
         return;
       }
-      if (!standaloneLoginEnabled || standaloneAuthorizedByCookie(req)) return;
+      if (standaloneAuthorizedByCookie(req)) {
+        if (standaloneWeb) return;
+        reply
+          .type('text/html; charset=utf-8')
+          .send(
+            standaloneBrowserDisabledResponse({
+              bindUrl: formatStandaloneBindUrl(args.config),
+              localUrl: formatStandaloneLocalUrl(args.config),
+            }),
+          );
+        return;
+      }
       reply
         .type('text/html; charset=utf-8')
         .send(
@@ -413,19 +267,26 @@ export function buildServer(args: BuildServerArgs): FastifyInstance {
         );
       return;
     }
-    const auth = req.headers.authorization ?? '';
-    const authBuf = Buffer.from(auth, 'utf8');
-    const ok =
-      authBuf.length === expectedBuf.length &&
-      timingSafeEqual(authBuf, expectedBuf);
-    if (!ok && standaloneAuthorizedByCookie(req)) {
-      return;
-    }
-    if (!ok) {
+    const bearerOk = authorizedByBearer(req);
+    const cookieOk = authorizedByCookie(req);
+    if (!bearerOk && !cookieOk) {
       reply.code(ERROR_HTTP_STATUS.unauthorized).send({
         code: 'unauthorized',
         message: 'Missing or invalid bearer token',
       });
+      return;
+    }
+    // CSRF mitigation: cookie-authenticated mutating requests must come from
+    // an allowed origin. Bearer auth is immune because JS on another origin
+    // cannot read or attach the Bearer header. SameSite=Lax already blocks
+    // cross-site POST from simple form submissions, but this adds defense-in-
+    // depth for any browser-initiated request that carries the session cookie.
+    if (cookieOk && !bearerOk && req.method !== 'GET' && req.method !== 'HEAD' && req.method !== 'OPTIONS') {
+      const origin = typeof req.headers.origin === 'string' ? req.headers.origin : '';
+      if (!origin || !isAllowedStandaloneOrigin(origin)) {
+        reply.code(403).send({ code: 'forbidden', message: 'Cross-origin request denied' });
+        return;
+      }
     }
   });
 
@@ -443,9 +304,10 @@ export function buildServer(args: BuildServerArgs): FastifyInstance {
       return;
     }
     if (err.code === 'FST_ERR_CTP_BODY_TOO_LARGE') {
+      const limitMb = Math.round(BODY_LIMIT_BYTES / 1_000_000);
       reply.code(ERROR_HTTP_STATUS.validation_error).send({
         code: 'validation_error',
-        message: '请求体过大：图片或附件总大小不能超过 20MB（base64）',
+        message: `请求体过大：图片或附件总大小不能超过 ${limitMb}MB（base64）`,
       });
       return;
     }
@@ -569,28 +431,24 @@ export function buildServer(args: BuildServerArgs): FastifyInstance {
 
   // M2.3 — Capability Bus + builtin tools (created BEFORE chat so the chat
   // route can attach `image_generate` as an LLM tool — M2.5 §F-CR / batch A2).
-  const costs = new CostsRepo(args.db);
-  const files = new FilesRepo(args.db);
-  const fileChunks = new FileChunksRepo(args.db);
-  const memories = new MemoriesRepo(args.db);
-  const bus = args.bus ?? new CapabilityBus(costs);
+  const bus = args.bus ?? new CapabilityBus(repos.costs);
   if (!args.bus) {
-    bus.register(createFileReadTool(files));
-    bus.register(createFileSearchTool({ filesRepo: files, chunksRepo: fileChunks }));
-    if (process.env.TAORI_E2E_HERMETIC_WEB === '1') {
+    bus.register(createFileReadTool(repos.files));
+    bus.register(createFileSearchTool({ filesRepo: repos.files, chunksRepo: repos.fileChunks }));
+    if (args.config.testHooks.hermeticWeb) {
       bus.register(createWebSearchToolWithDeps({
         fetch: hermeticWebFetch,
         resolveConfig: (ctx) => ({
-          engine: (memories.getEffective(ctx.conversationId ?? null, 'builtin_web_search_engine') as 'duckduckgo' | 'exa' | 'bocha' | null) ?? 'duckduckgo',
-          bochaApiKey: memories.getEffective(ctx.conversationId ?? null, 'builtin_web_search_bocha_api_key'),
+          engine: (repos.memories.getEffective(ctx.conversationId ?? null, 'builtin_web_search_engine') as 'duckduckgo' | 'exa' | 'bocha' | null) ?? 'duckduckgo',
+          bochaApiKey: repos.memories.getEffective(ctx.conversationId ?? null, 'builtin_web_search_bocha_api_key'),
         }),
       }));
       bus.register(createWebFetchToolWithDeps({ fetch: hermeticWebFetch }));
     } else {
       bus.register(createWebSearchToolWithDeps({
         resolveConfig: (ctx) => ({
-          engine: (memories.getEffective(ctx.conversationId ?? null, 'builtin_web_search_engine') as 'duckduckgo' | 'exa' | 'bocha' | null) ?? 'duckduckgo',
-          bochaApiKey: memories.getEffective(ctx.conversationId ?? null, 'builtin_web_search_bocha_api_key'),
+          engine: (repos.memories.getEffective(ctx.conversationId ?? null, 'builtin_web_search_engine') as 'duckduckgo' | 'exa' | 'bocha' | null) ?? 'duckduckgo',
+          bochaApiKey: repos.memories.getEffective(ctx.conversationId ?? null, 'builtin_web_search_bocha_api_key'),
         }),
       }));
       bus.register(createWebFetchTool());
@@ -598,20 +456,20 @@ export function buildServer(args: BuildServerArgs): FastifyInstance {
     const filesDir = path.join(path.dirname(args.config.dbPath), 'files');
     bus.register(
       createImageGenerateTool({
-        models: new ModelsRepo(args.db),
-        providers: new ProvidersRepo(args.db),
-        files,
-        messages: new MessagesRepo(args.db),
-        conversations: new ConversationsRepo(args.db),
-        memories,
+        models: repos.models,
+        providers: repos.providers,
+        files: repos.files,
+        messages: repos.messages,
+        conversations: repos.conversations,
+        memories: repos.memories,
         keystore: args.keystore,
         filesDir,
       }),
     );
   }
-  void restoreMcpToolsAtStartup({ db: args.db, bus, config: args.config, log: app.log });
+  void restoreMcpToolsAtStartup({ repos: repos.mcpServers, bus, config: args.config, log: app.log });
   for (const tool of bus.list()) {
-    const persisted = memories.get('global', null, toolEnabledKey(tool.name));
+    const persisted = repos.memories.get('global', null, toolEnabledKey(tool.name));
     if (persisted === 'true' || persisted === 'false') {
       bus.setEnabled(tool.name, persisted === 'true');
     }
@@ -631,19 +489,19 @@ export function buildServer(args: BuildServerArgs): FastifyInstance {
   registerAdminRoute(app, argsWithBus);
   registerTemplatesPersonasRoute(app, argsWithBus);
   registerWorkflowRecipesRoute(app, argsWithBus);
-  const researchRepo = new ResearchRepo(args.db);
   const researchRunner = new ResearchRunner({
-    repo: researchRepo,
+    repo: repos.research,
     bus,
-    memories,
-    modelsRepo: new ModelsRepo(args.db),
-    providersRepo: new ProvidersRepo(args.db),
+    memories: repos.memories,
+    modelsRepo: repos.models,
+    providersRepo: repos.providers,
     keystore: args.keystore,
+    testHooks: args.config.testHooks,
     log: app.log,
   });
   registerResearchRoute(app, { ...argsWithBus, researchRunner, keystore: args.keystore });
 
-  registerToolsRoute(app, { bus, memories, costs });
+  registerToolsRoute(app, { bus, memories: repos.memories, costs: repos.costs, testHooks: args.config.testHooks });
   registerMcpRoute(app, { ...argsWithBus, bus });
   registerRoundtableRoute(app, argsWithBus);
   registerQuickCompareRoute(app, argsWithBus);
@@ -700,6 +558,12 @@ function formatStandaloneLocalUrl(config: SidecarConfig): string | null {
   if (!config.standalone) return null;
   const host = config.host === '0.0.0.0' ? '127.0.0.1' : config.host || '127.0.0.1';
   return `http://${host}:${config.port}`;
+}
+
+function constantTimeStringEqual(actual: string, expected: string): boolean {
+  const actualHash = createHash('sha256').update(actual, 'utf8').digest();
+  const expectedHash = createHash('sha256').update(expected, 'utf8').digest();
+  return timingSafeEqual(actualHash, expectedHash);
 }
 
 async function hermeticWebFetch(

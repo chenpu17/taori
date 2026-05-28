@@ -14,10 +14,20 @@ import {
   recordRunEvent,
   type ProduceCtx,
 } from './run-stream.js';
+import {
+  writeAnnotationPart,
+  writeErrorPart,
+  writeFinishPart,
+  writeStepFinishPart,
+  writeTextPart,
+  type StreamObserver,
+} from './protocol.js';
 import { createChatModel } from '../providers/chat-model.js';
 import {
   buildUpstreamTools,
   withCapabilityToolInstruction,
+  MAX_STEPS_DEFAULT,
+  MAX_STEPS_WITH_WEB_TOOLS,
 } from './upstream-tools.js';
 import { extractCachedPromptTokensFromProviderMetadata } from './usage.js';
 
@@ -90,6 +100,7 @@ export async function produceUpstreamStream(
   modelRecord: Model,
   modelsRepo: ModelsRepo,
   memoriesRepo: MemoriesRepo,
+  observer?: StreamObserver,
 ): Promise<void> {
   const startedAt = Date.now();
   let firstTokenAt: number | null = null;
@@ -109,15 +120,11 @@ export async function produceUpstreamStream(
       duration_ms?: number;
     },
   ): void => {
-    write(
-      `8:${JSON.stringify([
-        {
-          type: 'tool_trace',
-          message_id: ctx.messageId,
-          ...payload,
-        },
-      ])}\n`,
-    );
+    writeAnnotationPart(stream, [{
+      type: 'tool_trace',
+      message_id: ctx.messageId,
+      ...payload,
+    }], observer);
     recordRunEvent(ctx, {
       kind:
         payload.event === 'start'
@@ -161,6 +168,8 @@ export async function produceUpstreamStream(
         supports_tools: ctx.supportsTools,
       },
     });
+    // dev-only: simulate provider errors for testing failure/recovery paths.
+    // Requires TAORI_FORCE_CLASSIFICATION=1 env; always null in production.
     if (ctx.forcedClassification) {
       const synthetic = new Error(`forced ${ctx.forcedClassification}`);
       (synthetic as { _forcedClassification?: string })._forcedClassification =
@@ -186,7 +195,7 @@ export async function produceUpstreamStream(
         ? withCapabilityToolInstruction(upstream.messages, upstreamTools.flags)
         : upstream.messages,
       abortSignal: signal,
-      ...(tools && { tools, maxSteps: 3 }),
+      ...(tools && { tools, maxSteps: upstreamTools.flags.web ? MAX_STEPS_WITH_WEB_TOOLS : MAX_STEPS_DEFAULT }),
     });
 
     let chunks = 0;
@@ -199,14 +208,14 @@ export async function produceUpstreamStream(
         if (next === 'image-tool-finalize') {
           imageToolFinalizedWithoutModelText = true;
           if (firstTokenAt == null) firstTokenAt = Date.now();
-          write(`0:${JSON.stringify(IMAGE_TOOL_FINAL_TEXT)}\n`);
+          writeTextPart(stream, IMAGE_TOOL_FINAL_TEXT, observer);
           chunks++;
           break;
         }
         if (next.done) break;
         const delta = next.value;
         if (firstTokenAt == null) firstTokenAt = Date.now();
-        write(`0:${JSON.stringify(delta)}\n`);
+        writeTextPart(stream, delta, observer);
         chunks++;
       }
     } finally {
@@ -243,18 +252,12 @@ export async function produceUpstreamStream(
       : await result.finishReason.catch(() => undefined);
     if (!signal.aborted && finishReason === 'content-filter') {
       const decision = buildFailureDecision('content_filter', ctx, modelsRepo, memoriesRepo);
-      write(`8:${JSON.stringify([decision])}\n`);
-      write(
-        `3:${JSON.stringify(
-          'provider_error/content_filter: 内容被供应商安全策略拦截',
-        )}\n`,
-      );
-      write(
-        `d:${JSON.stringify({
-          finishReason: 'error',
-          usage: { promptTokens: promptTokens ?? 0, completionTokens: completionTokens ?? 0 },
-        })}\n`,
-      );
+      writeAnnotationPart(stream, [decision], observer);
+      writeErrorPart(stream, 'provider_error/content_filter: 内容被供应商安全策略拦截', observer);
+      writeFinishPart(stream, {
+        finishReason: 'error',
+        usage: { promptTokens: promptTokens ?? 0, completionTokens: completionTokens ?? 0 },
+      });
       ctx.log.warn({ chunks }, 'chat.upstream_content_filter');
       recordRunEvent(ctx, {
         kind: 'model.failed',
@@ -269,16 +272,12 @@ export async function produceUpstreamStream(
     if (!signal.aborted && chunks === 0) {
       const detail = '模型本次调用已完成，但没有返回任何可显示文本。请重试，或切换到另一模型继续。';
       const decision = buildFailureDecision('unknown', ctx, modelsRepo, memoriesRepo, detail);
-      write(`8:${JSON.stringify([decision])}\n`);
-      write(
-        `3:${JSON.stringify(`provider_error/unknown: ${detail}`)}\n`,
-      );
-      write(
-        `d:${JSON.stringify({
-          finishReason: 'error',
-          usage: { promptTokens: promptTokens ?? 0, completionTokens: completionTokens ?? 0 },
-        })}\n`,
-      );
+      writeAnnotationPart(stream, [decision], observer);
+      writeErrorPart(stream, `provider_error/unknown: ${detail}`, observer);
+      writeFinishPart(stream, {
+        finishReason: 'error',
+        usage: { promptTokens: promptTokens ?? 0, completionTokens: completionTokens ?? 0 },
+      });
       ctx.log.warn({ finishReason, durationMs: Date.now() - startedAt }, 'chat.empty_response');
       recordRunEvent(ctx, {
         kind: 'model.failed',
@@ -306,23 +305,19 @@ export async function produceUpstreamStream(
         `工具「${failedTool.label}」执行失败，可跳过该工具后重试。`,
         failedTool,
       );
-      write(`8:${JSON.stringify([decision])}\n`);
+      writeAnnotationPart(stream, [decision], observer);
     }
 
-    write(
-      `8:${JSON.stringify([
-        {
-          type: 'cost',
-          message_id: ctx.messageId,
-          input_tokens: promptTokens,
-          cache_input_tokens: cacheInputTokens,
-          output_tokens: completionTokens,
-          actual_usd: actualUsd,
-          first_token_ms: firstTokenAt == null ? null : firstTokenAt - startedAt,
-          duration_ms: Date.now() - startedAt,
-        },
-      ])}\n`,
-    );
+    writeAnnotationPart(stream, [{
+      type: 'cost',
+      message_id: ctx.messageId,
+      input_tokens: promptTokens,
+      cache_input_tokens: cacheInputTokens,
+      output_tokens: completionTokens,
+      actual_usd: actualUsd,
+      first_token_ms: firstTokenAt == null ? null : firstTokenAt - startedAt,
+      duration_ms: Date.now() - startedAt,
+    }], observer);
     recordRunEvent(ctx, {
       kind: 'model.completed',
       status: 'completed',
@@ -339,19 +334,15 @@ export async function produceUpstreamStream(
       },
     });
 
-    write(
-      `e:${JSON.stringify({
-        finishReason: signal.aborted ? 'abort' : 'stop',
-        usage: { promptTokens, completionTokens },
-        isContinued: false,
-      })}\n`,
-    );
-    write(
-      `d:${JSON.stringify({
-        finishReason: signal.aborted ? 'abort' : 'stop',
-        usage: { promptTokens: promptTokens ?? 0, completionTokens: completionTokens ?? 0 },
-      })}\n`,
-    );
+    writeStepFinishPart(stream, {
+      finishReason: signal.aborted ? 'abort' : 'stop',
+      usage: { promptTokens, completionTokens },
+      isContinued: false,
+    });
+    writeFinishPart(stream, {
+      finishReason: signal.aborted ? 'abort' : 'stop',
+      usage: { promptTokens: promptTokens ?? 0, completionTokens: completionTokens ?? 0 },
+    });
     ctx.log.info({ chunks, durationMs: Date.now() - startedAt }, 'chat.upstream_done');
   } catch (e) {
     if (signal.aborted) {
@@ -418,13 +409,12 @@ export async function produceUpstreamStream(
         memoriesRepo,
         detail,
       );
-      write(`8:${JSON.stringify([decision])}\n`);
-      write(
-        `3:${JSON.stringify(`provider_error/${cls.classification}: ${cls.message || msg}`)}\n`,
-      );
-      write(
-        `d:${JSON.stringify({ finishReason: 'error', usage: { promptTokens: 0, completionTokens: 0 } })}\n`,
-      );
+      writeAnnotationPart(stream, [decision], observer);
+      writeErrorPart(stream, `provider_error/${cls.classification}: ${cls.message || msg}`, observer);
+      writeFinishPart(stream, {
+        finishReason: 'error',
+        usage: { promptTokens: 0, completionTokens: 0 },
+      });
     }
   } finally {
     stream.end();
@@ -461,8 +451,8 @@ export async function produceKeyMissingStream(
   ctx: ProduceCtx,
   modelsRepo: ModelsRepo,
   memoriesRepo: MemoriesRepo,
+  observer?: StreamObserver,
 ): Promise<void> {
-  const write = (line: string): boolean => stream.write(line);
   captureContextWindowStats(ctx);
   emitMetaAndContextSnapshot(stream, ctx);
   recordRunEvent(ctx, {
@@ -473,7 +463,7 @@ export async function produceKeyMissingStream(
     payload: { model_id: ctx.modelDbId, model_name: ctx.modelNameSnapshot },
   });
   const decision = buildFailureDecision('key_missing', ctx, modelsRepo, memoriesRepo);
-  write(`8:${JSON.stringify([decision])}\n`);
+  writeAnnotationPart(stream, [decision], observer);
   recordRunEvent(ctx, {
     kind: 'model.failed',
     status: 'failed',
@@ -481,14 +471,11 @@ export async function produceKeyMissingStream(
     summary: 'API key 已失效或未配置',
     payload: { classification: 'key_missing' },
   });
-  write(
-    `3:${JSON.stringify(
-      'provider_error/key_missing: API key 已失效或未配置 — 请在「模型中心」重新输入 API Key',
-    )}\n`,
-  );
-  write(
-    `d:${JSON.stringify({ finishReason: 'error', usage: { promptTokens: 0, completionTokens: 0 } })}\n`,
-  );
+  writeErrorPart(stream, 'provider_error/key_missing: API key 已失效或未配置 — 请在「模型中心」重新输入 API Key', observer);
+  writeFinishPart(stream, {
+    finishReason: 'error',
+    usage: { promptTokens: 0, completionTokens: 0 },
+  });
   stream.end();
 }
 
@@ -498,10 +485,10 @@ export async function produceMockStream(
   ctx: ProduceCtx,
   modelsRepo: ModelsRepo,
   memoriesRepo: MemoriesRepo,
+  observer?: StreamObserver,
 ): Promise<void> {
   const startedAt = Date.now();
   let firstTokenAt: number | null = null;
-  const write = (line: string): boolean => stream.write(line);
   captureContextWindowStats(ctx);
   emitMetaAndContextSnapshot(stream, ctx);
   recordRunEvent(ctx, {
@@ -522,7 +509,7 @@ export async function produceMockStream(
       ? ctx.forcedClassification
       : 'unknown';
     const decision = buildFailureDecision(cls, ctx, modelsRepo, memoriesRepo);
-    write(`8:${JSON.stringify([decision])}\n`);
+    writeAnnotationPart(stream, [decision], observer);
     recordRunEvent(ctx, {
       kind: 'model.failed',
       status: 'failed',
@@ -530,10 +517,11 @@ export async function produceMockStream(
       summary: `forced ${cls}`,
       payload: { classification: cls, mock: true },
     });
-    write(`3:${JSON.stringify(`provider_error/${cls}: forced ${cls}`)}\n`);
-    write(
-      `d:${JSON.stringify({ finishReason: 'error', usage: { promptTokens: 0, completionTokens: 0 } })}\n`,
-    );
+    writeErrorPart(stream, `provider_error/${cls}: forced ${cls}`, observer);
+    writeFinishPart(stream, {
+      finishReason: 'error',
+      usage: { promptTokens: 0, completionTokens: 0 },
+    });
     stream.end();
     return;
   }
@@ -554,24 +542,20 @@ export async function produceMockStream(
       return;
     }
     if (firstTokenAt == null) firstTokenAt = Date.now();
-    write(`0:${JSON.stringify(chunk)}\n`);
+    writeTextPart(stream, chunk, observer);
     i++;
     await sleep(40);
   }
 
-  write(
-    `8:${JSON.stringify([
-      {
-        type: 'cost',
-        message_id: ctx.messageId,
-        input_tokens: 12,
-        output_tokens: text.length,
-        actual_usd: 0.00009,
-        first_token_ms: firstTokenAt == null ? null : firstTokenAt - startedAt,
-        duration_ms: Date.now() - startedAt,
-      },
-    ])}\n`,
-  );
+  writeAnnotationPart(stream, [{
+    type: 'cost',
+    message_id: ctx.messageId,
+    input_tokens: 12,
+    output_tokens: text.length,
+    actual_usd: 0.00009,
+    first_token_ms: firstTokenAt == null ? null : firstTokenAt - startedAt,
+    duration_ms: Date.now() - startedAt,
+  }], observer);
   recordRunEvent(ctx, {
     kind: 'model.completed',
     status: 'completed',
@@ -587,8 +571,8 @@ export async function produceMockStream(
   });
 
   const usage = { promptTokens: 12, completionTokens: text.length };
-  write(`e:${JSON.stringify({ finishReason: 'stop', usage, isContinued: false })}\n`);
-  write(`d:${JSON.stringify({ finishReason: 'stop', usage })}\n`);
+  writeStepFinishPart(stream, { finishReason: 'stop', usage, isContinued: false });
+  writeFinishPart(stream, { finishReason: 'stop', usage });
   stream.end();
 }
 

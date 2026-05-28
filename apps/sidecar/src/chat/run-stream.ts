@@ -1,6 +1,5 @@
 import type { PassThrough } from 'node:stream';
 import {
-  calculateCostUsd,
   type ErrorClassification,
   type FileSearchResult,
 } from '@taori/shared';
@@ -21,6 +20,7 @@ import type { KeyStore } from '../keystore.js';
 import { scheduleMemoryExtraction } from '../memory/extraction.js';
 import { applyContextWindow, type ContextWindowStats } from './context-window.js';
 import { getVisibleToolNames } from './upstream-tools.js';
+import type { StreamObserver } from './protocol.js';
 
 export interface ProduceCtx {
   runId: string;
@@ -72,35 +72,7 @@ export function appendRunEvent(
   repo: RunEventsRepo,
   input: RunEventInsert,
 ): void {
-  try {
-    repo.append(input);
-  } catch (e) {
-    const message = e instanceof Error ? e.message : String(e);
-    if (/FOREIGN KEY constraint failed/i.test(message)) {
-      try {
-        repo.append({ ...input, message_id: null });
-        return;
-      } catch (messageRetryError) {
-        const retryMessage =
-          messageRetryError instanceof Error
-            ? messageRetryError.message
-            : String(messageRetryError);
-        if (/FOREIGN KEY constraint failed/i.test(retryMessage)) {
-          try {
-            repo.append({ ...input, conversation_id: null, message_id: null });
-            return;
-          } catch (orphanRetryError) {
-            log.warn(
-              { err: orphanRetryError, runId: input.run_id, kind: input.kind },
-              'run_event.write_failed',
-            );
-            return;
-          }
-        }
-      }
-    }
-    log.warn({ err: e, runId: input.run_id, kind: input.kind }, 'run_event.write_failed');
-  }
+  repo.appendSafe(input, log);
 }
 
 export function recordRunEvent(
@@ -328,9 +300,8 @@ export function finalizeOnEnd(
   memoriesRepo?: MemoriesRepo,
   structuredMemoriesRepo?: StructuredMemoriesRepo,
   keystore?: KeyStore,
-): () => void {
+): { finalize: () => void; observer: StreamObserver } {
   let collected = '';
-  let lineBuffer = '';
   let usage: {
     input: number;
     cacheInput: number | null;
@@ -338,6 +309,9 @@ export function finalizeOnEnd(
     durationMs: number;
     firstTokenMs: number | null;
     calls: number;
+    /** Pre-computed cost from the stream producer, if available.
+     *  Avoids recalculating and drifting from the value sent to the UI. */
+    precomputedCostUsd: number | null;
   } = {
     input: 0,
     cacheInput: null,
@@ -345,79 +319,43 @@ export function finalizeOnEnd(
     durationMs: 0,
     firstTokenMs: null,
     calls: 1,
+    precomputedCostUsd: null,
   };
   let upstreamErrored = false;
   let upstreamClassification: string | null = null;
   let upstreamErrorMessage: string | null = null;
-  // Tap text chunks for persistence. The producers write `0:"…"\n` lines for
-  // text — parse them back so we can reconstruct what was actually sent. The
-  // PassThrough stream may emit `data` events whose boundaries do NOT align
-  // with our line writes (TCP/buffer coalescing), so accumulate into a line
-  // buffer and only parse complete lines (terminated by `\n`).
-  const parseLine = (line: string): void => {
-    if (line.startsWith('0:')) {
-      try {
-        const part = JSON.parse(line.slice(2));
-        if (typeof part === 'string') collected += part;
-      } catch {
-        /* ignore non-JSON tail */
-      }
-      return;
-    }
-    if (line.startsWith('8:')) {
-      try {
-        const arr = JSON.parse(line.slice(2)) as Array<Record<string, unknown>>;
-        for (const ann of arr) {
-          if (ann?.type === 'cost') {
-            usage.input = (ann.input_tokens as number) ?? usage.input;
-            usage.cacheInput =
-              typeof ann.cache_input_tokens === 'number'
-                ? ann.cache_input_tokens as number
-                : usage.cacheInput;
-            usage.output = (ann.output_tokens as number) ?? usage.output;
-            usage.durationMs = (ann.duration_ms as number) ?? usage.durationMs;
-            usage.firstTokenMs = (ann.first_token_ms as number | null) ?? usage.firstTokenMs;
+  const observer: StreamObserver = {
+    onText(text) { collected += text; },
+    onAnnotation(anns) {
+      for (const ann of anns) {
+        if (ann?.type === 'cost') {
+          usage.input = (ann.input_tokens as number) ?? usage.input;
+          usage.cacheInput =
+            typeof ann.cache_input_tokens === 'number'
+              ? ann.cache_input_tokens as number
+              : usage.cacheInput;
+          usage.output = (ann.output_tokens as number) ?? usage.output;
+          usage.durationMs = (ann.duration_ms as number) ?? usage.durationMs;
+          usage.firstTokenMs = (ann.first_token_ms as number | null) ?? usage.firstTokenMs;
+          // Capture the cost already computed by the stream producer so
+          // writeCost uses the same value instead of recalculating.
+          if (typeof ann.actual_usd === 'number') {
+            usage.precomputedCostUsd = ann.actual_usd;
           }
         }
-      } catch {
-        /* ignore */
       }
-      return;
-    }
-    if (line.startsWith('3:')) {
+    },
+    onError(message) {
       upstreamErrored = true;
-      // Frame format: `3:"provider_error/<classification>: <msg>"` — extract
-      // the classification token so finalizeOnEnd can decide whether to
-      // strike the model. Only quota/rate_limit/network are scored.
-      try {
-        const payload = JSON.parse(line.slice(2));
-        if (typeof payload === 'string') {
-          const m = /^provider_error\/([a-z_]+)/.exec(payload);
-          if (m) upstreamClassification = m[1] ?? null;
-          upstreamErrorMessage = payload.replace(/^provider_error\/[a-z_]+:\s*/i, '') || payload;
-        }
-      } catch {
-        /* ignore non-JSON */
-      }
-    }
+      const m = /^provider_error\/([a-z_]+)/.exec(message);
+      if (m) upstreamClassification = m[1] ?? null;
+      upstreamErrorMessage = message.replace(/^provider_error\/[a-z_]+:\s*/i, '') || message;
+    },
   };
-  stream.on('data', (chunk: Buffer) => {
-    lineBuffer += chunk.toString('utf8');
-    const lines = lineBuffer.split('\n');
-    lineBuffer = lines.pop() ?? '';
-    for (const line of lines) parseLine(line);
-  });
   const writeCost = (success: boolean): number | null => {
-    const actual = success
-      ? calculateCostUsd({
-          inputTokens: usage.input,
-          outputTokens: usage.output,
-          callCount: usage.calls,
-          priceInputPer1m: ctx.priceInputPer1m,
-          priceOutputPer1m: ctx.priceOutputPer1m,
-          pricePerCall: ctx.pricePerCall,
-        })
-      : null;
+    // Use the cost already computed by the stream producer when available.
+    // This guarantees the DB cost_record matches the cost annotation sent to UI.
+    const actual = success ? usage.precomputedCostUsd : null;
     try {
       const costRow = costsRepo.insert({
         conversation_id: ctx.conversationId,
@@ -473,7 +411,6 @@ export function finalizeOnEnd(
   const finalize = (): void => {
     if (finalized) return;
     finalized = true;
-    if (lineBuffer) parseLine(lineBuffer);
     const aborted = isAborted();
     const status: MessageRow['status'] = upstreamErrored
       ? 'failed'
@@ -558,7 +495,6 @@ export function finalizeOnEnd(
   stream.on('error', (err) => {
     if (finalized) return;
     finalized = true;
-    if (lineBuffer) parseLine(lineBuffer);
     msgRepo.finalize(ctx.messageId, {
       content: collected,
       status: 'failed',
@@ -576,5 +512,5 @@ export function finalizeOnEnd(
       },
     });
   });
-  return finalize;
+  return { finalize, observer };
 }

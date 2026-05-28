@@ -11,7 +11,6 @@
 
 import type { FastifyInstance } from 'fastify';
 import { CatalogSyncRequestSchema, TaoriError } from '@taori/shared';
-import { ModelsRepo, ProvidersRepo } from '../db/repos/index.js';
 import { syncCatalog } from '../catalog/index.js';
 import type { KeyStore } from '../keystore.js';
 import type { BuildServerArgs } from '../server.js';
@@ -24,8 +23,8 @@ export function registerCatalogRoute(
   app: FastifyInstance,
   deps: CatalogRouteDeps,
 ): void {
-  const providers = new ProvidersRepo(deps.db);
-  const models = new ModelsRepo(deps.db);
+  const providers = deps.repos.providers;
+  const models = deps.repos.models;
 
   app.post('/v1/catalog/sync', async (req) => {
     const parsed = CatalogSyncRequestSchema.safeParse(req.body ?? {});

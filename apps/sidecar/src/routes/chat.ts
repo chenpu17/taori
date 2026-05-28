@@ -37,27 +37,6 @@ import {
 } from '@taori/shared';
 import type { BuildServerArgs } from '../server.js';
 import {
-  ConversationsRepo,
-  MessagesRepo,
-  ModelsRepo,
-  ProvidersRepo,
-  CostsRepo,
-  MemoriesRepo,
-  FilesRepo,
-  FileChunksRepo,
-  PersonasRepo,
-  RunEventsRepo,
-  StructuredMemoriesRepo,
-} from '../db/repos/index.js';
-import {
-  classifyProviderError,
-  isToolPayloadUnsupportedError,
-} from '../providers/registry.js';
-import {
-  prepareContinueRunAction,
-  prepareRecoverRunAction,
-} from '../chat/run-actions.js';
-import {
   appendRunEvent,
 } from '../chat/run-stream.js';
 import {
@@ -65,13 +44,13 @@ import {
   findRunModelId,
 } from '../chat/recovery.js';
 import { dispatchChatProducer, openDataStream } from '../chat/stream-dispatch.js';
-import { requireRecoveryCostConfirmationIfNeeded } from '../chat/cost-confirmation.js';
 import { buildProduceCtx } from '../chat/run-context.js';
 import { prepareChatRequest } from '../chat/request-prep.js';
 import { throwIfBudgetBlockedOrNeedsConfirmation } from '../cost/budget-guard.js';
+import { continueRun } from '../services/chat/continue-run.js';
+import { recoverRun } from '../services/chat/recover-run.js';
+import { handleCapabilityRoute } from '../services/chat/handle-capability-route.js';
 
-const TEST_HOOKS_ENABLED = process.env.NODE_ENV !== 'production'
-  && process.env.TAORI_DISABLE_TEST_HOOKS !== '1';
 const FORCE_CLASSIFICATION_HEADER = 'x-test-force-classification';
 const VALID_FORCED_CLASSIFICATIONS = new Set([
   'quota', 'network', 'rate_limit', 'content_filter', 'auth', 'unknown',
@@ -97,17 +76,19 @@ export function registerChatRoute(
   app: FastifyInstance,
   deps: BuildServerArgs,
 ): void {
-  const convRepo = new ConversationsRepo(deps.db);
-  const msgRepo = new MessagesRepo(deps.db);
-  const modelsRepo = new ModelsRepo(deps.db);
-  const providersRepo = new ProvidersRepo(deps.db);
-  const costsRepo = new CostsRepo(deps.db);
-  const memoriesRepo = new MemoriesRepo(deps.db);
-  const filesRepo = new FilesRepo(deps.db);
-  const fileChunksRepo = new FileChunksRepo(deps.db);
-  const personasRepo = new PersonasRepo(deps.db);
-  const runEventsRepo = new RunEventsRepo(deps.db);
-  const structuredMemoriesRepo = new StructuredMemoriesRepo(deps.db);
+  const { repos } = deps;
+  const convRepo = repos.conversations;
+  const msgRepo = repos.messages;
+  const modelsRepo = repos.models;
+  const providersRepo = repos.providers;
+  const costsRepo = repos.costs;
+  const memoriesRepo = repos.memories;
+  const filesRepo = repos.files;
+  const fileChunksRepo = repos.fileChunks;
+  const personasRepo = repos.personas;
+  const runEventsRepo = repos.runEvents;
+  const structuredMemoriesRepo = repos.structuredMemories;
+  const forceClassificationEnabled = deps.config.testHooks.forceClassification;
 
   app.post('/v1/chat', async (req, reply) => {
     const parsed = ChatRequestSchema.safeParse(req.body);
@@ -142,70 +123,14 @@ export function registerChatRoute(
 
     // M2.4 explicit image-command path: emit capability_route annotation, end.
     if (intentRoute) {
-      const dataStream = openDataStream(req.headers.origin, reply);
-      const { stream } = dataStream;
-      const runId = makeId('run');
-      appendRunEvent(req.log, runEventsRepo, {
-        run_id: runId,
-        conversation_id: conversation.id,
-        message_id: null,
-        kind: 'turn.started',
-        status: 'started',
-        label: '用户回合开始',
-        summary: lastUserMsg?.content?.slice(0, 120) ?? null,
-        payload: { route: 'capability', capability: 'image' },
-      });
-      appendRunEvent(req.log, runEventsRepo, {
-        run_id: runId,
-        conversation_id: conversation.id,
-        message_id: null,
-        kind: 'capability.routed',
-        status: 'completed',
-        label: '路由到图像生成',
-        summary: intentRoute.prompt.slice(0, 180),
-        payload: {
-          capability: 'image',
-          user_message_id: intentRoute.user_message_id,
-        },
-      });
-      stream.write(
-        `8:${JSON.stringify([
-          {
-            type: 'meta',
-            conversation_id: conversation.id,
-            message_id: null,
-            model_id: null,
-            run_id: runId,
-          },
-        ])}\n`,
-      );
-      stream.write(
-        `8:${JSON.stringify([
-          {
-            type: 'capability_route',
-            capability: 'image',
-            prompt: intentRoute.prompt,
-            user_message_id: intentRoute.user_message_id,
-            conversation_id: conversation.id,
-          },
-        ])}\n`,
-      );
-      stream.write(
-        `d:${JSON.stringify({
-          finishReason: 'stop',
-          usage: { promptTokens: 0, completionTokens: 0 },
-        })}\n`,
-      );
-      appendRunEvent(req.log, runEventsRepo, {
-        run_id: runId,
-        conversation_id: conversation.id,
-        message_id: null,
-        kind: 'turn.completed',
-        status: 'completed',
-        label: '用户回合完成',
-        summary: '已等待用户选择图像生成模型',
-      });
-      stream.end();
+      await handleCapabilityRoute(repos, {
+        conversationId: conversation.id,
+        capability: 'image',
+        prompt: intentRoute.prompt,
+        userMessageId: intentRoute.user_message_id,
+        lastUserContent: lastUserMsg?.content?.slice?.(0, 120) ?? null,
+        origin: req.headers.origin,
+      }, reply, req.log);
       return;
     }
 
@@ -224,66 +149,82 @@ export function registerChatRoute(
     }
 
     const runId = makeId('run');
-    const ctx = await buildProduceCtx({
-      runId,
-      conversationId: conversation.id,
-      messageId: assistantMsg!.id,
-      requestModelId: body.model_id,
-      model: model ?? null,
-      userText: lastUserMsg?.content ?? '',
-      messages: body.messages,
-      attachments,
-      boundPersona: resolvedPersona,
-      log: req.log,
-      forcedClassification: TEST_HOOKS_ENABLED
-        ? readForcedClassification(req.headers[FORCE_CLASSIFICATION_HEADER])
-        : null,
-      sourceUserMessageId,
-      deps,
-      modelsRepo,
-      memoriesRepo,
-      structuredMemoriesRepo,
-      filesRepo,
-      fileChunksRepo,
-      runEventsRepo,
-    });
-    const dataStream = openDataStream(req.headers.origin, reply);
-    const { stream, abortController } = dataStream;
-    appendRunEvent(req.log, runEventsRepo, {
-      run_id: runId,
-      conversation_id: conversation.id,
-      message_id: assistantMsg!.id,
-      kind: 'turn.started',
-      status: 'started',
-      label: '用户回合开始',
-      summary: lastUserMsg?.content?.slice(0, 120) ?? null,
-      payload: {
-        model_id: model?.id ?? body.model_id,
-        source_user_message_id: sourceUserMessageId,
-        attachment_count: attachments.length,
-        persona: resolvedPersona?.name ?? null,
-      },
-    });
+    try {
+      const ctx = await buildProduceCtx({
+        runId,
+        conversationId: conversation.id,
+        messageId: assistantMsg!.id,
+        requestModelId: body.model_id,
+        model: model ?? null,
+        userText: lastUserMsg?.content ?? '',
+        messages: body.messages,
+        attachments,
+        boundPersona: resolvedPersona,
+        log: req.log,
+        forcedClassification: forceClassificationEnabled
+          ? readForcedClassification(req.headers[FORCE_CLASSIFICATION_HEADER])
+          : null,
+        sourceUserMessageId,
+        deps,
+        modelsRepo,
+        memoriesRepo,
+        structuredMemoriesRepo,
+        filesRepo,
+        fileChunksRepo,
+        runEventsRepo,
+      });
+      const dataStream = openDataStream(req.headers.origin, reply);
+      const { stream, abortController } = dataStream;
+      appendRunEvent(req.log, runEventsRepo, {
+        run_id: runId,
+        conversation_id: conversation.id,
+        message_id: assistantMsg!.id,
+        kind: 'turn.started',
+        status: 'started',
+        label: '用户回合开始',
+        summary: lastUserMsg?.content?.slice(0, 120) ?? null,
+        payload: {
+          model_id: model?.id ?? body.model_id,
+          source_user_message_id: sourceUserMessageId,
+          attachment_count: attachments.length,
+          persona: resolvedPersona?.name ?? null,
+        },
+      });
 
-    await dispatchChatProducer({
-      stream,
-      abortSignal: abortController.signal,
-      isAborted: dataStream.isAborted,
-      ctx,
-      model: model ?? null,
-      provider: model ? provider : null,
-      modelName: model?.model_name ?? body.model_id,
-      keystore: deps.keystore,
-      msgRepo,
-      costsRepo,
-      modelsRepo,
-      providersRepo,
-      memoriesRepo,
-      structuredMemoriesRepo,
-      setForceFinalize: dataStream.setForceFinalize,
-      keyReadFailedLogName: 'chat.keystore_read_failed',
-      unhandledLogName: 'chat.upstream_unhandled',
-    });
+      await dispatchChatProducer({
+        stream,
+        abortSignal: abortController.signal,
+        isAborted: dataStream.isAborted,
+        ctx,
+        model: model ?? null,
+        provider: model ? provider : null,
+        modelName: model?.model_name ?? body.model_id,
+        keystore: deps.keystore,
+        msgRepo,
+        costsRepo,
+        modelsRepo,
+        providersRepo,
+        memoriesRepo,
+        structuredMemoriesRepo,
+        setForceFinalize: dataStream.setForceFinalize,
+        keyReadFailedLogName: 'chat.keystore_read_failed',
+        unhandledLogName: 'chat.upstream_unhandled',
+      });
+    } catch (err) {
+      // prepareChatRequest already created the assistant message with
+      // status='streaming'. If anything after it throws, finalize the
+      // message as 'failed' so it doesn't stay stuck in streaming forever.
+      try {
+        msgRepo.finalize(assistantMsg!.id, {
+          content: '',
+          status: 'failed',
+          error: err instanceof Error ? err.message : String(err),
+        });
+      } catch (finalizeErr) {
+        req.log.error({ err: finalizeErr, messageId: assistantMsg!.id }, 'chat.finalize_on_error_failed');
+      }
+      throw err;
+    }
   });
 
   app.post<{ Params: { id: string } }>('/v1/runs/:id/continue', async (req, reply) => {
@@ -294,108 +235,19 @@ export function registerChatRoute(
         message: parsed.error.errors.map((e) => e.message).join('; '),
       });
     }
-    const action = prepareContinueRunAction({
-      runId: req.params.id,
-      convRepo,
-      msgRepo,
-      modelsRepo,
-      providersRepo,
-      memoriesRepo,
-      personasRepo,
-      runEventsRepo,
-    });
-    const {
-      originalAssistant,
-      sourceUserMessageId,
-      conversationId,
-      model,
-      provider,
-      boundPersona,
-      upstreamMessages,
-    } = action;
-
-    requireRecoveryCostConfirmationIfNeeded({
-      confirmed: parsed.data?.confirmed_cost === true,
-      conversationId,
-      model,
-      messages: upstreamMessages,
-      costsRepo,
-      memoriesRepo,
-    });
-
-    const assistantMsg = msgRepo.insert({
-      conversation_id: conversationId,
-      role: 'assistant',
-      content: '',
-      model_id: model.id,
-      parent_message_id: originalAssistant.id,
-      status: 'streaming',
-    });
-
-    const dataStream = openDataStream(req.headers.origin, reply);
-    const { stream, abortController } = dataStream;
-
-    const runId = makeId('run');
-    const ctx = await buildProduceCtx({
-      runId,
-      conversationId,
-      messageId: assistantMsg.id,
-      requestModelId: model.id,
-      model,
-      userText: '请继续上文',
-      messages: upstreamMessages,
-      boundPersona,
-      log: req.log,
-      forcedClassification: TEST_HOOKS_ENABLED
-        ? readForcedClassification(req.headers[FORCE_CLASSIFICATION_HEADER])
-        : null,
-      sourceUserMessageId,
-      deps,
-      modelsRepo,
-      memoriesRepo,
-      structuredMemoriesRepo,
-      filesRepo,
-      fileChunksRepo,
-      runEventsRepo,
-    });
-
-    appendRunEvent(req.log, runEventsRepo, {
-      run_id: runId,
-      conversation_id: conversationId,
-      message_id: assistantMsg.id,
-      kind: 'turn.started',
-      status: 'started',
-      label: '续写开始',
-      summary: originalAssistant.content?.slice(0, 120) ?? null,
-      payload: {
-        run_kind: 'continue',
-        parent_run_id: req.params.id,
-        model_id: model.id,
-        source_user_message_id: sourceUserMessageId,
-        assistant_message_id: assistantMsg.id,
-        continued_from_message_id: originalAssistant.id,
+    await continueRun(
+      { repos, keystore: deps.keystore, bus: deps.bus, config: deps.config, db: deps.db },
+      {
+        runId: req.params.id,
+        confirmedCost: parsed.data?.confirmed_cost === true,
+        forcedClassification: forceClassificationEnabled
+          ? readForcedClassification(req.headers[FORCE_CLASSIFICATION_HEADER])
+          : null,
+        origin: req.headers.origin,
       },
-    });
-
-    await dispatchChatProducer({
-      stream,
-      abortSignal: abortController.signal,
-      isAborted: dataStream.isAborted,
-      ctx,
-      model,
-      provider,
-      modelName: model.model_name,
-      keystore: deps.keystore,
-      msgRepo,
-      costsRepo,
-      modelsRepo,
-      providersRepo,
-      memoriesRepo,
-      structuredMemoriesRepo,
-      setForceFinalize: dataStream.setForceFinalize,
-      keyReadFailedLogName: 'chat.continue_keystore_read_failed',
-      unhandledLogName: 'chat.continue_upstream_unhandled',
-    });
+      reply,
+      req.log,
+    );
   });
 
   app.get<{ Params: { id: string } }>('/v1/runs/:id/resume-state', async (req) => {
@@ -465,206 +317,19 @@ export function registerChatRoute(
         message: parsed.error.errors.map((e) => e.message).join('; '),
       });
     }
-    const prepared = prepareRecoverRunAction({
-      runId: req.params.id,
-      request: parsed.data,
-      convRepo,
-      msgRepo,
-      modelsRepo,
-      providersRepo,
-      memoriesRepo,
-      personasRepo,
-      runEventsRepo,
-    });
-    const {
-      action,
-      failedTool,
-      skipToolName,
-      originalAssistantId,
-      sourceUserMessageId,
-      sourceUser,
-      conversationId,
-      model,
-      provider,
-      boundPersona,
-      compacted,
-      recoveryMessages,
-    } = prepared;
-
-    requireRecoveryCostConfirmationIfNeeded({
-      confirmed: parsed.data.confirmed_cost === true,
-      conversationId,
-      model,
-      messages: recoveryMessages,
-      costsRepo,
-      memoriesRepo,
-    });
-
-    const assistantMsg = msgRepo.insert({
-      conversation_id: conversationId,
-      role: 'assistant',
-      content: '',
-      model_id: model.id,
-      parent_message_id: originalAssistantId,
-      status: 'streaming',
-    });
-
-    const dataStream = openDataStream(req.headers.origin, reply);
-    const { stream, abortController } = dataStream;
-
-    const runId = makeId('run');
-    const ctx = await buildProduceCtx({
-      runId,
-      conversationId,
-      messageId: assistantMsg.id,
-      requestModelId: model.id,
-      model,
-      userText: sourceUser.content ?? '',
-      messages: recoveryMessages,
-      boundPersona,
-      skipToolName,
-      log: req.log,
-      forcedClassification: TEST_HOOKS_ENABLED
-        ? readForcedClassification(req.headers[FORCE_CLASSIFICATION_HEADER])
-        : null,
-      sourceUserMessageId,
-      deps,
-      modelsRepo,
-      memoriesRepo,
-      structuredMemoriesRepo,
-      filesRepo,
-      fileChunksRepo,
-      runEventsRepo,
-    });
-
-    appendRunEvent(req.log, runEventsRepo, {
-      run_id: runId,
-      conversation_id: conversationId,
-      message_id: assistantMsg.id,
-      kind: 'recovery.started',
-      status: 'retrying',
-      label: '恢复开始',
-      summary:
-        action === 'switch_model'
-          ? `切换到 ${model.model_name}`
-          : action === 'skip_tool'
-            ? `跳过 ${failedTool?.label ?? skipToolName}`
-            : action === 'compact_context'
-            ? '压缩上下文后重试'
-            : '重试当前模型',
-      payload: {
-        action,
-        parent_run_id: req.params.id,
-        model_id: model.id,
-        source_user_message_id: sourceUserMessageId,
-        assistant_message_id: assistantMsg.id,
-        original_assistant_message_id: originalAssistantId,
-        ...(skipToolName ? { skipped_tool_name: skipToolName, skipped_tool_label: failedTool?.label ?? skipToolName } : {}),
-        ...(compacted
-          ? {
-              compacted_message_count: compacted.compacted_message_count,
-              compacted_summary_chars: compacted.summary_chars,
-            }
-          : {}),
+    await recoverRun(
+      { repos, keystore: deps.keystore, bus: deps.bus, config: deps.config, db: deps.db },
+      {
+        runId: req.params.id,
+        request: parsed.data,
+        forcedClassification: forceClassificationEnabled
+          ? readForcedClassification(req.headers[FORCE_CLASSIFICATION_HEADER])
+          : null,
+        origin: req.headers.origin,
       },
-    });
-    appendRunEvent(req.log, runEventsRepo, {
-      run_id: runId,
-      conversation_id: conversationId,
-      message_id: assistantMsg.id,
-      kind: 'turn.started',
-      status: 'started',
-      label:
-        action === 'switch_model'
-          ? '切换模型重试开始'
-          : action === 'skip_tool'
-            ? '跳过工具重试开始'
-            : action === 'compact_context'
-            ? '压缩上下文重试开始'
-            : '重试开始',
-      summary: sourceUser.content?.slice(0, 120) ?? null,
-      payload: {
-        run_kind: 'retry',
-        parent_run_id: req.params.id,
-        recovery_policy: action,
-        model_id: model.id,
-        source_user_message_id: sourceUserMessageId,
-        assistant_message_id: assistantMsg.id,
-        ...(skipToolName ? { skipped_tool_name: skipToolName, skipped_tool_label: failedTool?.label ?? skipToolName } : {}),
-        ...(compacted
-          ? {
-              compacted_message_count: compacted.compacted_message_count,
-              compacted_summary_chars: compacted.summary_chars,
-            }
-          : {}),
-      },
-    });
-
-    const recordRecoveryTerminal = (): void => {
-      const latest = msgRepo.get(assistantMsg.id);
-      if (!latest) return;
-      if (latest.status === 'complete') {
-        appendRunEvent(req.log, runEventsRepo, {
-          run_id: runId,
-          conversation_id: conversationId,
-          message_id: assistantMsg.id,
-          kind: 'recovery.completed',
-          status: 'completed',
-          label: '恢复完成',
-          summary:
-            action === 'switch_model'
-              ? `已切换到 ${model.model_name}`
-              : action === 'skip_tool'
-                ? `已跳过 ${failedTool?.label ?? skipToolName}`
-              : action === 'compact_context'
-                ? '压缩上下文后重试完成'
-                : '重试完成',
-          payload: {
-            action,
-            parent_run_id: req.params.id,
-            assistant_message_id: assistantMsg.id,
-            ...(skipToolName ? { skipped_tool_name: skipToolName, skipped_tool_label: failedTool?.label ?? skipToolName } : {}),
-          },
-        });
-      } else if (latest.status === 'failed') {
-        appendRunEvent(req.log, runEventsRepo, {
-          run_id: runId,
-          conversation_id: conversationId,
-          message_id: assistantMsg.id,
-          kind: 'recovery.failed',
-          status: 'failed',
-          label: '恢复失败',
-          summary: latest.error ?? latest.status,
-          payload: {
-            action,
-            parent_run_id: req.params.id,
-            assistant_message_id: assistantMsg.id,
-            ...(skipToolName ? { skipped_tool_name: skipToolName, skipped_tool_label: failedTool?.label ?? skipToolName } : {}),
-          },
-        });
-      }
-    };
-
-    await dispatchChatProducer({
-      stream,
-      abortSignal: abortController.signal,
-      isAborted: dataStream.isAborted,
-      ctx,
-      model,
-      provider,
-      modelName: model.model_name,
-      keystore: deps.keystore,
-      msgRepo,
-      costsRepo,
-      modelsRepo,
-      providersRepo,
-      memoriesRepo,
-      structuredMemoriesRepo,
-      setForceFinalize: dataStream.setForceFinalize,
-      onFinish: recordRecoveryTerminal,
-      keyReadFailedLogName: 'chat.recover_keystore_read_failed',
-      unhandledLogName: 'chat.recover_upstream_unhandled',
-    });
+      reply,
+      req.log,
+    );
   });
 }
 

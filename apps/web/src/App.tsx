@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState, type CSSProperties, type MouseEvent, type ReactNode } from 'react';
-import { BrandMark, Icon, MODELS, ThreadNode, type IconName, type ModelId } from './primitives';
+import { BrandMark, Icon, MODELS, ThreadNode, type ModelId } from './primitives';
 import { AssistantMsg, CompareCard, ImageCard, ResearchDone, ResearchInProgress, RoundtableCard, UserMsg } from './cards';
 import {
   Banner,
@@ -17,199 +17,20 @@ import {
   type DrawerId,
   type Theme,
 } from './surfaces';
-import { MODES, SCENARIOS, SIDEBAR_GROUPS, type Message, type ModeId, type ScenarioId } from './scenarios';
-import { postChat, patchConversation, deleteConversation, type Conversation, type ConversationMessage } from './api';
+import { SCENARIOS, type Message, type ModeId, type ScenarioId } from './scenarios';
+import {
+  deleteConversation,
+  patchConversation,
+  patchConversationMessage,
+  postChat,
+  type ConversationMessage,
+} from './api';
 import { useConversations, useFooterHealth, useMessages, useModels, useRealtimeCost, useTodayBreakdown } from './useLiveData';
-
-// ── Markdown renderer ─────────────────────────────────────────
-function CodeBlockWithCopy({ code, lang }: { code: string; lang?: string }) {
-  const [copied, setCopied] = useState(false);
-  const handleCopy = () => {
-    navigator.clipboard.writeText(code);
-    setCopied(true);
-    setTimeout(() => setCopied(false), 1500);
-  };
-  return (
-    <div className="md-codeblock">
-      <div className="md-codeblock-head">
-        <span>{lang || ''}</span>
-        <button type="button" className="md-codeblock-copy" onClick={handleCopy}>
-          {copied ? '已复制' : '复制'}
-        </button>
-      </div>
-      <pre><code>{code}</code></pre>
-    </div>
-  );
-}
-
-function renderMarkdown(raw: string): ReactNode[] {
-  try {
-    return _renderMarkdownInner(raw);
-  } catch {
-    return [raw];
-  }
-}
-
-function _renderMarkdownInner(raw: string): ReactNode[] {
-  const nodes: ReactNode[] = [];
-  const lines = raw.split('\n');
-  let i = 0;
-  let key = 0;
-  const nk = () => `md${key++}`;
-
-  while (i < lines.length) {
-    const line = lines[i];
-
-    // Fenced code block
-    const fenceMatch = line.match(/^(`{3,})(\w*)/);
-    if (fenceMatch) {
-      const fence = fenceMatch[1];
-      const lang = fenceMatch[2];
-      const codeLines: string[] = [];
-      i++;
-      while (i < lines.length && !lines[i].startsWith(fence)) {
-        codeLines.push(lines[i]);
-        i++;
-      }
-      i++; // skip closing fence
-      nodes.push(<CodeBlockWithCopy key={nk()} code={codeLines.join('\n')} lang={lang} />);
-      continue;
-    }
-
-    // Headers
-    const hdrMatch = line.match(/^(#{1,4})\s+(.+)/);
-    if (hdrMatch) {
-      const level = Math.min(hdrMatch[1].length + 1, 4);
-      const Tag = `h${level}` as keyof JSX.IntrinsicElements;
-      nodes.push(<Tag key={nk()}>{parseInline(hdrMatch[2], nk)}</Tag>);
-      i++;
-      continue;
-    }
-
-    // Blockquote
-    if (line.startsWith('> ')) {
-      const quoteLines: string[] = [];
-      while (i < lines.length && (lines[i].startsWith('> ') || lines[i] === '>')) {
-        quoteLines.push(lines[i].replace(/^> ?/, ''));
-        i++;
-      }
-      nodes.push(<blockquote key={nk()}>{renderMarkdown(quoteLines.join('\n'))}</blockquote>);
-      continue;
-    }
-
-    // Unordered list
-    if (line.match(/^\s*[-*]\s+/)) {
-      const items: string[] = [];
-      while (i < lines.length && lines[i].match(/^\s*[-*]\s+/)) {
-        items.push(lines[i].replace(/^\s*[-*]\s+/, ''));
-        i++;
-      }
-      nodes.push(<ul key={nk()}>{items.map((item, idx) => <li key={idx}>{parseInline(item, nk)}</li>)}</ul>);
-      continue;
-    }
-
-    // Ordered list
-    if (line.match(/^\s*\d+\.\s+/)) {
-      const items: string[] = [];
-      while (i < lines.length && lines[i].match(/^\s*\d+\.\s+/)) {
-        items.push(lines[i].replace(/^\s*\d+\.\s+/, ''));
-        i++;
-      }
-      nodes.push(<ol key={nk()}>{items.map((item, idx) => <li key={idx}>{parseInline(item, nk)}</li>)}</ol>);
-      continue;
-    }
-
-    // Empty line
-    if (line.trim() === '') {
-      i++;
-      continue;
-    }
-
-    // Paragraph — collect consecutive non-special lines
-    const paraLines: string[] = [];
-    while (
-      i < lines.length &&
-      lines[i].trim() !== '' &&
-      !lines[i].match(/^(`{3,})/) &&
-      !lines[i].match(/^#{1,4}\s/) &&
-      !lines[i].startsWith('> ') &&
-      !lines[i].match(/^\s*[-*]\s+/) &&
-      !lines[i].match(/^\s*\d+\.\s+/)
-    ) {
-      paraLines.push(lines[i]);
-      i++;
-    }
-    nodes.push(<p key={nk()}>{parseInline(paraLines.join('\n'), nk)}</p>);
-  }
-
-  return nodes;
-}
-
-function parseInline(text: string, nk: () => string): ReactNode[] {
-  const nodes: ReactNode[] = [];
-  // Process inline elements using regex splitting
-  // Order: inline code → bold → italic → links → remaining text
-  const regex = /(`[^`\n]+`)|(\*\*[^*]+\*\*)|(\*[^*]+\*)|(\[[^\]]+\]\([^)]+\))/g;
-  let lastIndex = 0;
-  let match: RegExpExecArray | null;
-
-  while ((match = regex.exec(text)) !== null) {
-    // Add plain text before this match
-    if (match.index > lastIndex) {
-      const plain = text.slice(lastIndex, match.index);
-      nodes.push(...handleLineBreaks(plain));
-    }
-
-    const full = match[0];
-
-    if (full.startsWith('`') && full.endsWith('`')) {
-      // Inline code
-      const code = full.slice(1, -1);
-      nodes.push(<code key={nk()}>{code}</code>);
-    } else if (full.startsWith('**') && full.endsWith('**')) {
-      // Bold
-      const content = full.slice(2, -2);
-      nodes.push(<strong key={nk()}>{parseInline(content, nk)}</strong>);
-    } else if (full.startsWith('*') && full.endsWith('*')) {
-      // Italic
-      const content = full.slice(1, -1);
-      nodes.push(<em key={nk()}>{parseInline(content, nk)}</em>);
-    } else if (full.startsWith('[') && full.includes('](')) {
-      // Link
-      const linkMatch = full.match(/^\[([^\]]+)\]\(([^)]+)\)$/);
-      if (linkMatch) {
-        nodes.push(
-          <a key={nk()} href={linkMatch[2]} target="_blank" rel="noopener noreferrer">
-            {linkMatch[1]}
-          </a>
-        );
-      } else {
-        nodes.push(full);
-      }
-    }
-
-    lastIndex = regex.lastIndex;
-  }
-
-  // Remaining text
-  if (lastIndex < text.length) {
-    const plain = text.slice(lastIndex);
-    nodes.push(...handleLineBreaks(plain));
-  }
-
-  return nodes;
-}
-
-function handleLineBreaks(text: string): ReactNode[] {
-  const parts = text.split('\n');
-  const result: ReactNode[] = [];
-  let k = 0;
-  for (let j = 0; j < parts.length; j++) {
-    if (parts[j]) result.push(parts[j]);
-    if (j < parts.length - 1) result.push(<br key={`br${k++}`} />);
-  }
-  return result;
-}
+import { type PendingAttachment, toPendingAttachment } from './attachments';
+import { applyStreamAnnotations, buildChatMessages } from './chatStream';
+import { renderMarkdown } from './markdown';
+import { Sidebar } from './Sidebar';
+import { Composer } from './Composer';
 
 // ── Error Boundary ────────────────────────────────────────────
 export class ErrorBoundary extends React.Component<{ children: React.ReactNode }, { hasError: boolean; error: string }> {
@@ -228,363 +49,6 @@ export class ErrorBoundary extends React.Component<{ children: React.ReactNode }
     }
     return this.props.children;
   }
-}
-
-// ── Sidebar ──────────────────────────────────────────────────
-function Sidebar({
-  scenario,
-  onSelect,
-  conversations,
-  loading,
-  selectedConvId,
-  onSelectConversation,
-  onNewChat,
-  open,
-  onClose,
-  onRename,
-  onDelete,
-  onPin,
-  onTag,
-  onExport,
-}: {
-  scenario: ScenarioId;
-  onSelect: (id: ScenarioId) => void;
-  conversations?: Conversation[];
-  loading?: boolean;
-  selectedConvId?: string | null;
-  onSelectConversation?: (id: string) => void;
-  onNewChat?: () => void;
-  open?: boolean;
-  onClose?: () => void;
-  onRename?: (id: string, title: string) => Promise<void>;
-  onDelete?: (id: string) => Promise<void>;
-  onPin?: (id: string, pinned: boolean) => Promise<void>;
-  onTag?: (id: string, tags: string[]) => Promise<void>;
-  onExport?: (id: string) => void;
-}) {
-  const isLive = conversations !== undefined;
-  const kindIcon = (k: string): IconName | null =>
-    k === 'roundtable' ? 'roundtable' : k === 'research' ? 'research' : k === 'image' ? 'image' : null;
-
-  // Context menu state (live mode only)
-  const [ctxMenu, setCtxMenu] = useState<{ id: string; x: number; y: number } | null>(null);
-  const [renaming, setRenaming] = useState<string | null>(null);
-  const [renameVal, setRenameVal] = useState('');
-  const [confirmDel, setConfirmDel] = useState<string | null>(null);
-  const [search, setSearch] = useState('');
-  const [tagFilter, setTagFilter] = useState<string | null>(null);
-  const [tagEditId, setTagEditId] = useState<string | null>(null);
-  const [tagEditVal, setTagEditVal] = useState('');
-  const renameRef = useRef<HTMLInputElement>(null);
-
-  // Close context menu on outside click or Escape
-  useEffect(() => {
-    if (!ctxMenu && !renaming && !confirmDel && !tagEditId) return;
-    const onMouseDown = () => { setCtxMenu(null); };
-    const onKeyDown = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') {
-        setCtxMenu(null);
-        if (renaming) setRenaming(null);
-        setConfirmDel(null);
-        setTagEditId(null);
-      }
-    };
-    document.addEventListener('mousedown', onMouseDown);
-    document.addEventListener('keydown', onKeyDown);
-    return () => {
-      document.removeEventListener('mousedown', onMouseDown);
-      document.removeEventListener('keydown', onKeyDown);
-    };
-  }, [ctxMenu, renaming, confirmDel]);
-
-  // Focus rename input when it appears
-  useEffect(() => {
-    if (renaming) renameRef.current?.focus();
-  }, [renaming]);
-
-  const handleContextMenu = (e: MouseEvent<HTMLDivElement>, id: string) => {
-    e.preventDefault();
-    setCtxMenu({ id, x: e.clientX, y: e.clientY });
-  };
-
-  const startRename = () => {
-    const conv = conversations?.find((c) => c.id === ctxMenu?.id);
-    if (!conv) return;
-    setRenameVal(conv.title);
-    setRenaming(conv.id);
-    setCtxMenu(null);
-  };
-
-  const commitRename = async () => {
-    const trimmed = renameVal.trim();
-    if (!trimmed || !renaming) { setRenaming(null); return; }
-    await onRename?.(renaming, trimmed);
-    setRenaming(null);
-  };
-
-  const startDelete = () => {
-    if (!ctxMenu) return;
-    setConfirmDel(ctxMenu.id);
-    setCtxMenu(null);
-  };
-
-  const commitDelete = async () => {
-    if (!confirmDel) return;
-    await onDelete?.(confirmDel);
-    setConfirmDel(null);
-  };
-
-  const togglePin = async () => {
-    if (!ctxMenu) return;
-    const conv = conversations?.find((c) => c.id === ctxMenu.id);
-    if (!conv) return;
-    await onPin?.(conv.id, !conv.pinned);
-    setCtxMenu(null);
-  };
-
-  const startTagEdit = () => {
-    if (!ctxMenu) return;
-    const conv = conversations?.find((c) => c.id === ctxMenu.id);
-    if (!conv) return;
-    setTagEditVal((conv.tags ?? []).join(', '));
-    setTagEditId(conv.id);
-    setCtxMenu(null);
-  };
-
-  const commitTagEdit = async () => {
-    if (!tagEditId) return;
-    const tags = tagEditVal.split(/[,，]\s*/).map((t) => t.trim()).filter(Boolean);
-    await onTag?.(tagEditId, tags);
-    setTagEditId(null);
-  };
-
-  const handleExport = () => {
-    if (!ctxMenu) return;
-    onExport?.(ctxMenu.id);
-    setCtxMenu(null);
-  };
-
-  // All unique tags across conversations
-  const allTags = useMemo(() => {
-    if (!conversations) return [];
-    const set = new Set<string>();
-    for (const c of conversations) c.tags?.forEach((t) => set.add(t));
-    return Array.from(set).sort();
-  }, [conversations]);
-
-  const grouped = useMemo(() => {
-    if (!conversations || conversations.length === 0) return [];
-    let filtered = search
-      ? conversations.filter((c) => c.title.toLowerCase().includes(search.toLowerCase()))
-      : conversations;
-    if (tagFilter) {
-      filtered = filtered.filter((c) => c.tags?.includes(tagFilter));
-    }
-    // Separate pinned conversations
-    const pinned = filtered.filter((c) => c.pinned);
-    const unpinned = filtered.filter((c) => !c.pinned);
-    const nowMs = Date.now();
-    const sod = (ms: number) => new Date(ms).setHours(0, 0, 0, 0);
-    const todayMs = sod(nowMs);
-    const timeGroup = (list: Conversation[]) => {
-      const groups: { label: string; list: Conversation[] }[] = [
-        { label: '今天', list: [] },
-        { label: '昨天', list: [] },
-        { label: '本周', list: [] },
-        { label: '更早', list: [] },
-      ];
-      for (const c of list) {
-        const ts = c.updated_at > 1e12 ? c.updated_at : c.updated_at * 1000;
-        if (ts >= todayMs) groups[0].list.push(c);
-        else if (ts >= todayMs - 86400000) groups[1].list.push(c);
-        else if (ts >= todayMs - 7 * 86400000) groups[2].list.push(c);
-        else groups[3].list.push(c);
-      }
-      return groups.filter((g) => g.list.length > 0);
-    };
-    const result: { label: string; list: Conversation[]; isPinned?: boolean }[] = [];
-    if (pinned.length > 0) result.push({ label: '置顶', list: pinned, isPinned: true });
-    result.push(...timeGroup(unpinned));
-    return result;
-  }, [conversations, search, tagFilter]);
-
-  return (
-    <aside className={'side' + (open ? ' open' : '')}>
-      <button className="side-newbtn" type="button" onClick={() => { onNewChat?.(); onClose?.(); }}>
-        <Icon name="plus" size={14} className="ico" />
-        <span>新对话</span>
-        <span style={{ flex: 1 }} />
-        <span className="composer-input-hint">⌘N</span>
-      </button>
-      <div className="side-search">
-        <Icon name="search" size={13} className="ico" />
-        <input placeholder="搜索对话" value={search} onChange={(e) => setSearch(e.target.value)} />
-        {search && <button type="button" style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--text-muted)', padding: 2 }} onClick={() => setSearch('')}><Icon name="x" size={11} /></button>}
-      </div>
-
-      {/* Tag filter bar */}
-      {allTags.length > 0 && (
-        <div className="side-tags-bar">
-          <button type="button" className={'side-tag-filter' + (!tagFilter ? ' active' : '')} onClick={() => setTagFilter(null)}>全部</button>
-          {allTags.map((t) => (
-            <button key={t} type="button" className={'side-tag-filter' + (tagFilter === t ? ' active' : '')} onClick={() => setTagFilter(tagFilter === t ? null : t)}>{t}</button>
-          ))}
-        </div>
-      )}
-
-      {/* Skeleton rows while live conversations are loading */}
-      {loading && !conversations && Array.from({ length: 5 }, (_, i) => (
-        <div key={`skel-${i}`} className="side-item" style={{ opacity: 0.6, flexDirection: 'column', alignItems: 'flex-start', gap: 4 }}>
-          <div className="skeleton" style={{ width: `${55 - i * 5}%`, height: 14 }} />
-          <div className="skeleton" style={{ width: `${35 - i * 3}%`, height: 10 }} />
-        </div>
-      ))}
-
-      {isLive ? (
-        grouped.map((g) => (
-          <div key={g.label}>
-            <div className="side-section">{g.label}</div>
-            {g.list.map((c) => {
-              const ki = kindIcon(c.type);
-              const isRenaming = renaming === c.id;
-              const isDeleting = confirmDel === c.id;
-              const isTagEditing = tagEditId === c.id;
-              return (
-                <div
-                  key={c.id}
-                  className={'side-item' + (selectedConvId === c.id ? ' active' : '')}
-                  onClick={() => {
-                    if (!isRenaming && !isDeleting && !isTagEditing) { onSelectConversation?.(c.id); onClose?.(); }
-                  }}
-                  onContextMenu={(e) => handleContextMenu(e, c.id)}
-                >
-                  {c.pinned && !isRenaming && <span className="side-item-pin">📌</span>}
-                  {isRenaming ? (
-                    <input
-                      ref={renameRef}
-                      className="side-item-input"
-                      value={renameVal}
-                      onChange={(e) => setRenameVal(e.target.value)}
-                      onKeyDown={(e) => {
-                        e.stopPropagation();
-                        if (e.key === 'Enter') commitRename();
-                        if (e.key === 'Escape') setRenaming(null);
-                      }}
-                      onBlur={() => commitRename()}
-                      onClick={(e) => e.stopPropagation()}
-                    />
-                  ) : (
-                    <span className="side-item-title">{c.title}</span>
-                  )}
-                  {!isRenaming && !isDeleting && !isTagEditing && c.tags && c.tags.length > 0 && (
-                    <span className="side-item-tags">
-                      {c.tags.map((t) => <span key={t} className="side-tag">{t}</span>)}
-                    </span>
-                  )}
-                  {ki && !isRenaming && !isDeleting && !isTagEditing && <span className="side-item-kind"><Icon name={ki} size={12} /></span>}
-                  {!isRenaming && !isDeleting && !isTagEditing && (
-                    <button
-                      type="button"
-                      className="side-item-menu"
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        const rect = e.currentTarget.getBoundingClientRect();
-                        setCtxMenu({ id: c.id, x: rect.right, y: rect.top });
-                      }}
-                    >
-                      <Icon name="more" size={14} />
-                    </button>
-                  )}
-                  {isDeleting && (
-                    <span className="side-item-confirm">
-                      <span className="side-item-confirm-text">确定删除？</span>
-                      <button type="button" className="side-item-confirm-btn danger" onClick={(e) => { e.stopPropagation(); commitDelete(); }}>删除</button>
-                      <button type="button" className="side-item-confirm-btn" onClick={(e) => { e.stopPropagation(); setConfirmDel(null); }}>取消</button>
-                    </span>
-                  )}
-                  {isTagEditing && (
-                    <input
-                      className="side-item-input"
-                      style={{ fontSize: 12 }}
-                      value={tagEditVal}
-                      placeholder="标签1, 标签2"
-                      onChange={(e) => setTagEditVal(e.target.value)}
-                      onKeyDown={(e) => {
-                        e.stopPropagation();
-                        if (e.key === 'Enter') commitTagEdit();
-                        if (e.key === 'Escape') setTagEditId(null);
-                      }}
-                      onBlur={() => commitTagEdit()}
-                      onClick={(e) => e.stopPropagation()}
-                      autoFocus
-                    />
-                  )}
-                </div>
-              );
-            })}
-          </div>
-        ))
-      ) : (
-        SIDEBAR_GROUPS.map((g) => (
-          <div key={g.date}>
-            <div className="side-section">{g.date}</div>
-            {g.list.map((it) => {
-              const ki = kindIcon(it.kind);
-              const isScenario = (id: string): id is ScenarioId =>
-                ['empty', 'nokey', 'pricing', 'research', 'researchDone', 'resume', 'opening', 'poster'].includes(id);
-              const handleClick = () => {
-                if (isScenario(it.id)) { onSelect(it.id); onClose?.(); }
-              };
-              return (
-                <div
-                  key={it.id}
-                  className={'side-item' + (scenario === it.id ? ' active' : '')}
-                  onClick={handleClick}
-                >
-                  <span className="side-item-title">{it.title}</span>
-                  {ki && <span className="side-item-kind"><Icon name={ki} size={12} /></span>}
-                </div>
-              );
-            })}
-          </div>
-        ))
-      )}
-
-      {/* Context menu */}
-      {ctxMenu && (() => {
-        const conv = conversations?.find((c) => c.id === ctxMenu.id);
-        return (
-          <div
-            className="side-ctx-menu"
-            style={{ top: ctxMenu.y, left: ctxMenu.x }}
-            onMouseDown={(e) => e.stopPropagation()}
-          >
-            <div className="side-ctx-item" onClick={startRename}>
-              <Icon name="edit" size={13} style={{ marginRight: 8 }} />
-              重命名
-            </div>
-            <div className="side-ctx-item" onClick={togglePin}>
-              <span style={{ marginRight: 8, fontSize: 13 }}>📌</span>
-              {conv?.pinned ? '取消置顶' : '置顶'}
-            </div>
-            <div className="side-ctx-item" onClick={startTagEdit}>
-              <span style={{ marginRight: 8, fontSize: 13 }}>🏷️</span>
-              编辑标签
-            </div>
-            <div className="side-ctx-item" onClick={handleExport}>
-              <span style={{ marginRight: 8, fontSize: 13 }}>📋</span>
-              导出 Markdown
-            </div>
-            <div className="side-ctx-sep" />
-            <div className="side-ctx-item danger" onClick={startDelete}>
-              <Icon name="x" size={13} style={{ marginRight: 8 }} />
-              删除
-            </div>
-          </div>
-        );
-      })()}
-    </aside>
-  );
 }
 
 // ── Live message (from Sidecar) ──────────────────────────────
@@ -776,166 +240,6 @@ function Footer({
   );
 }
 
-// ── Composer ─────────────────────────────────────────────────
-interface ComposerProps {
-  mode: ModeId | null;
-  onClearMode: () => void;
-  onSetMode: (m: ModeId) => void;
-  model: ModelId;
-  modelDisplay?: { color: string; label: string };
-  attach: string[];
-  onRemoveAttach: (i: number) => void;
-  onAttach?: (name: string) => void;
-  value: string;
-  onChange: (v: string) => void;
-  onPlus: (e: MouseEvent) => void;
-  plusOpen: boolean;
-  onModelClick: (e: MouseEvent) => void;
-  modelOpen: boolean;
-  disabled?: boolean;
-  placeholder?: string;
-  onSend?: () => void;
-  onStop?: () => void;
-  streaming?: boolean;
-}
-
-function Composer({
-  mode,
-  onClearMode,
-  onSetMode,
-  model,
-  modelDisplay,
-  attach,
-  onRemoveAttach,
-  onAttach,
-  value,
-  onChange,
-  onPlus,
-  plusOpen,
-  onModelClick,
-  modelOpen,
-  disabled = false,
-  placeholder,
-  onSend,
-  onStop,
-  streaming = false,
-}: ComposerProps) {
-  const [slashMenu, setSlashMenu] = useState(false);
-  const fileRef = useRef<HTMLInputElement>(null);
-  const ph = placeholder ?? (mode ? `让 Taori ${MODES[mode].name}……` : '说点什么……  按 / 调用模式');
-
-  return (
-    <div
-      className="composer-shell"
-      onDragOver={(e) => { e.preventDefault(); e.stopPropagation(); }}
-      onDrop={(e) => {
-        e.preventDefault(); e.stopPropagation();
-        const files = Array.from(e.dataTransfer.files);
-        files.forEach(f => onAttach?.(f.name));
-      }}
-    >
-      <input ref={fileRef} type="file" style={{ display: 'none' }} multiple onChange={(e) => {
-        const files = Array.from(e.target.files ?? []);
-        files.forEach(f => onAttach?.(f.name));
-        e.target.value = '';
-      }} />
-      {attach.length > 0 && (
-        <div className="composer-attach-row">
-          {attach.map((a, i) => (
-            <span key={i} className="attach-chip">
-              <Icon name="doc" size={11} style={{ color: 'var(--text-muted)' }} />
-              {a}
-              <span className="x" onClick={() => onRemoveAttach(i)}>
-                <Icon name="x" size={11} />
-              </span>
-            </span>
-          ))}
-        </div>
-      )}
-      {mode && (
-        <div style={{ display: 'flex' }}>
-          <span className="composer-modechip">
-            <Icon name={MODES[mode].icon} size={11} />
-            {MODES[mode].name}：
-            <span className="x" onClick={onClearMode}>
-              <Icon name="x" size={10} />
-            </span>
-          </span>
-        </div>
-      )}
-
-      <div className="composer" style={{ position: 'relative' }}>
-        <button type="button" className={'composer-plus' + (plusOpen ? ' active' : '')} onClick={onPlus}>
-          <Icon name="plus" size={16} />
-        </button>
-        <textarea
-          className="composer-input"
-          rows={1}
-          placeholder={ph}
-          value={value}
-          onChange={(e) => {
-            const val = e.target.value;
-            onChange(val);
-            e.target.style.height = 'auto';
-            e.target.style.height = Math.min(e.target.scrollHeight, 200) + 'px';
-            setSlashMenu(val === '/');
-          }}
-          onKeyDown={(e) => {
-            if (e.key === 'Escape' && slashMenu) { setSlashMenu(false); e.preventDefault(); return; }
-            if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) {
-              e.preventDefault();
-              if (slashMenu) setSlashMenu(false);
-              onSend?.();
-            }
-          }}
-          disabled={disabled}
-        />
-        <button type="button" className="composer-model" onClick={onModelClick} data-open={modelOpen}>
-          <span className="dot" style={{ background: modelDisplay?.color ?? MODELS[model].color }} />
-          {modelDisplay?.label ?? MODELS[model].short}
-          <Icon name="chevron-down" size={11} />
-        </button>
-        <button
-          type="button"
-          className={'composer-send' + (streaming ? ' streaming' : (!value.trim() && !mode ? ' disabled' : ''))}
-          onClick={streaming ? (onStop ?? undefined) : onSend}
-          disabled={!streaming && (!value.trim() && !mode)}
-          title={streaming ? '停止生成' : '发送'}
-        >
-          <Icon name={streaming ? 'x' : 'arrow-up'} size={16} />
-        </button>
-
-        {slashMenu && (
-          <div className="mode-menu popup" style={{ position: 'absolute', bottom: '100%', left: 0, marginBottom: 4 }}>
-            {Object.entries(MODES).map(([key, m]) => (
-              <div key={key} className="mode-menu-item" onClick={() => {
-                if (key === 'file') {
-                  fileRef.current?.click();
-                } else {
-                  onSetMode(key as ModeId);
-                }
-                onChange('');
-                setSlashMenu(false);
-              }}>
-                <span className="ico"><Icon name={m.icon} size={13} /></span>
-                <span className="col">
-                  <span className="name">{m.name}</span>
-                  <span className="desc">{m.desc}</span>
-                </span>
-              </div>
-            ))}
-          </div>
-        )}
-      </div>
-
-      <div className="composer-meta">
-        <span>↵ 发送 · ⇧↵ 换行 · / 模式 · ⌘K 命令</span>
-        <span>{value ? `${value.length}/4000` : ''}</span>
-      </div>
-    </div>
-  );
-}
-
 // ── Welcome ──────────────────────────────────────────────────
 function Welcome({ onChip }: { onChip: (text: string) => void }) {
   const hour = new Date().getHours();
@@ -1033,7 +337,7 @@ export function App() {
   const [mode, setMode] = useState<ModeId | null>(null);
   const [model, setModel] = useState<ModelId>('sonnet');
   const [value, setValue] = useState('');
-  const [attach, setAttach] = useState<string[]>([]);
+  const [attach, setAttach] = useState<PendingAttachment[]>([]);
 
   const [plusOpen, setPlusOpen] = useState(false);
   const [modelPickerOpen, setModelPickerOpen] = useState(false);
@@ -1112,12 +416,12 @@ export function App() {
   // ── Live data hooks ──────────────────────────────────────────
   // Footer status pill + provider rows feed off the same poller.
   const footerHealth = useFooterHealth();
-  const realtimeCost = useRealtimeCost();
+  const [convId, setConvId] = useState<string | null>(null);
+  const realtimeCost = useRealtimeCost(5000, convId);
   const todayBreakdown = useTodayBreakdown(footPopup === 'today');
   const liveModels = useModels();
   const convList = useConversations();
   const isLive = convList.data !== null;
-  const [convId, setConvId] = useState<string | null>(null);
   const convMsgs = useMessages(convId);
 
   // Global keyboard shortcuts: ⌘N (new chat), ⌘K (command palette)
@@ -1212,32 +516,35 @@ export function App() {
     );
   }, [messages, isWelcome, isLive]);
 
+  const handleAttachFiles = async (files: File[]) => {
+    const prepared = (await Promise.all(files.map((file) => toPendingAttachment(file))))
+      .filter((item): item is PendingAttachment => item !== null);
+    if (prepared.length === 0) return;
+    setAttach((prev) => [...prev, ...prepared].slice(0, 8));
+  };
+
   // ── Retry last assistant message ────────────────────────────
-  const handleRetry = () => {
+  const handleRetry = async () => {
     if (isStreaming) return;
-    // Find the last user message content
-    let lastUserContent = '';
-    for (let i = liveMsgs.length - 1; i >= 0; i--) {
-      if (liveMsgs[i].role === 'user') {
-        lastUserContent = liveMsgs[i].content;
-        break;
-      }
-    }
-    if (!lastUserContent) return;
+    if (!convId || !liveModelId) return;
+    const lastAssistantIndex = [...liveMsgs].reverse().findIndex((msg) => msg.role === 'assistant');
+    if (lastAssistantIndex < 0) return;
+    const assistantIndex = liveMsgs.length - 1 - lastAssistantIndex;
+    const historyBeforeAssistant = liveMsgs.slice(0, assistantIndex);
+    const lastUser = [...historyBeforeAssistant].reverse().find((msg) => msg.role === 'user');
+    if (!lastUser?.content) return;
 
-    // Remove the last assistant message
-    const lastIdx = liveMsgs.length - 1;
-    if (lastIdx >= 0 && liveMsgs[lastIdx].role === 'assistant') {
-      setLiveMsgs((prev) => prev.slice(0, -1));
+    try {
+      await patchConversationMessage(convId, lastUser.id, { content: lastUser.content });
+    } catch {
+      return;
     }
 
-    // Re-send
-    const convIdToUse = convId ?? '';
     setIsStreaming(true);
 
     const assistantMsg: ConversationMessage = {
       id: crypto.randomUUID(),
-      conversation_id: convIdToUse,
+      conversation_id: convId,
       role: 'assistant',
       content: '',
       model_id: liveModelId ?? null,
@@ -1248,37 +555,51 @@ export function App() {
       image_attachments: [],
       annotations: [],
     };
-    setLiveMsgs((prev) => [...prev, assistantMsg]);
+    setLiveMsgs([...historyBeforeAssistant, assistantMsg]);
 
     let accumulated = '';
-    postChat(
-      { conversation_id: convIdToUse, message: lastUserContent, model_id: liveModelId ?? undefined },
-      (chunk) => {
-        accumulated += chunk;
-        const content = accumulated;
-        setLiveMsgs((prev) => {
-          const updated = [...prev];
-          updated[updated.length - 1] = { ...updated[updated.length - 1], content };
-          return updated;
-        });
-      },
-      () => {
-        setLiveMsgs((prev) => {
-          const updated = [...prev];
-          updated[updated.length - 1] = { ...updated[updated.length - 1], status: 'done' };
-          return updated;
-        });
-        setIsStreaming(false);
-      },
-      (err) => {
-        setLiveMsgs((prev) => {
-          const updated = [...prev];
-          updated[updated.length - 1] = { ...updated[updated.length - 1], status: 'error', error: err.message };
-          return updated;
-        });
-        setIsStreaming(false);
-      },
-    );
+    try {
+      const abort = await postChat(
+        {
+          conversation_id: convId,
+          model_id: liveModelId,
+          messages: historyBeforeAssistant.map((msg) => ({ role: msg.role, content: msg.content })),
+          skip_user_persist: true,
+        },
+        (chunk) => {
+          accumulated += chunk;
+          const content = accumulated;
+          setLiveMsgs((prev) => {
+            const updated = [...prev];
+            updated[updated.length - 1] = { ...updated[updated.length - 1], content };
+            return updated;
+          });
+        },
+        () => {
+          setLiveMsgs((prev) => {
+            const updated = [...prev];
+            updated[updated.length - 1] = { ...updated[updated.length - 1], status: 'done' };
+            return updated;
+          });
+          setIsStreaming(false);
+          convMsgs.refetch?.();
+        },
+        (err) => {
+          setLiveMsgs((prev) => {
+            const updated = [...prev];
+            updated[updated.length - 1] = { ...updated[updated.length - 1], status: 'error', error: err.message };
+            return updated;
+          });
+          setIsStreaming(false);
+        },
+        (items) => {
+          setLiveMsgs((prev) => applyStreamAnnotations(prev, items));
+        },
+      );
+      abortRef.current = abort;
+    } catch {
+      setIsStreaming(false);
+    }
   };
 
   // ── Determine if last live message is the last assistant ─────
@@ -1289,11 +610,13 @@ export function App() {
   // ── Send message ─────────────────────────────────────────────
   const handleSend = async () => {
     const text = value.trim();
-    if (!text || isStreaming) return;
+    if ((!text && attach.length === 0) || isStreaming || !liveModelId) return;
     const convIdToUse = convId ?? crypto.randomUUID();
     if (!convId) setConvId(convIdToUse);
     setValue('');
     setIsStreaming(true);
+    const outgoingAttachments = attach;
+    setAttach([]);
 
     const userMsg: ConversationMessage = {
       id: crypto.randomUUID(),
@@ -1304,7 +627,7 @@ export function App() {
       status: 'sent',
       error: null,
       created_at: Date.now() / 1000,
-      attachments_count: 0,
+      attachments_count: outgoingAttachments.length,
       image_attachments: [],
       annotations: [],
     };
@@ -1324,9 +647,20 @@ export function App() {
     setLiveMsgs((prev) => [...prev, userMsg, assistantMsg]);
 
     let accumulated = '';
+    const requestMessages = buildChatMessages(liveMsgs, text);
     try {
       const abort = await postChat(
-        { conversation_id: convIdToUse, message: text, model_id: liveModelId ?? undefined },
+        {
+          conversation_id: convIdToUse,
+          model_id: liveModelId,
+          messages: requestMessages,
+          attachments: outgoingAttachments.map(({ kind, mime, data_b64, name }) => ({
+            kind,
+            mime,
+            data_b64,
+            name,
+          })),
+        },
         (chunk) => {
           accumulated += chunk;
           const content = accumulated;
@@ -1345,6 +679,7 @@ export function App() {
           setIsStreaming(false);
           // Refetch conversation list so title / ordering updates
           convList.refetch?.();
+          convMsgs.refetch?.();
         },
         (err) => {
           setLiveMsgs((prev) => {
@@ -1353,11 +688,16 @@ export function App() {
             return updated;
           });
           setIsStreaming(false);
+          setAttach(outgoingAttachments);
+        },
+        (items) => {
+          setLiveMsgs((prev) => applyStreamAnnotations(prev, items));
         },
       );
       abortRef.current = abort;
     } catch {
       setIsStreaming(false);
+      setAttach(outgoingAttachments);
     }
   };
 
@@ -1497,7 +837,7 @@ export function App() {
           modelDisplay={composerModelDisplay}
           attach={attach}
           onRemoveAttach={(i) => setAttach(attach.filter((_, k) => k !== i))}
-          onAttach={(name) => setAttach(prev => [...prev, name])}
+          onAttach={(files) => { void handleAttachFiles(files); }}
           value={value}
           onChange={setValue}
           onPlus={(e) => {
@@ -1556,7 +896,7 @@ export function App() {
           <div onClick={(e) => e.stopPropagation()} style={popupOffsetStyle(12)}>
             <HealthPopup
               providers={footerHealth.data?.providers}
-              keyStatuses={footerHealth.data?.keyStatuses}
+              keyStatuses={footerHealth.data?.keyStatuses ?? undefined}
               onNavigate={() => { setFootPopup(null); setDrawer('settings'); }}
             />
           </div>

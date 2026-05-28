@@ -9,10 +9,18 @@ Taori Web UI — React 18 + TypeScript + Vite SPA，渲染聊天、侧边栏、�
 ```
 src/
   main.tsx             入口：cookie auth bootstrap + React 挂载
-  App.tsx              主壳：Sidebar / Header / Footer / Composer / Chat + 所有 overlay
+  App.tsx              主壳：会话状态、发送/重试流、Header / Footer / Chat 编排
+  Sidebar.tsx          会话列表、搜索、标签、右键菜单
+  Composer.tsx         输入框、附件 chip、slash 模式菜单、发送/停止按钮
   api.ts               Sidecar HTTP 客户端（REST + SSE streaming）
   sidecar.ts           Endpoint 解析 + authedFetch（Tauri / browser dev / cookie 三模式）
   useLiveData.ts       React hooks：useLive<T> 轮询基座 + useFooterHealth / useModels / useConversations 等
+  attachments.ts       Composer 附件类型识别与 base64 准备
+  chatStream.ts        Chat Data Stream annotation 合并与历史消息构造
+  markdown.tsx         聊天消息 Markdown 渲染与代码块复制
+  DrawerProviders.tsx  Provider 抽屉列表 / 新增 / 编辑 / 测试连接
+  DrawerModels.tsx     模型抽屉 live/mock 列表与启停
+  providerDisplay.ts   Provider 颜色等展示纯函数
   primitives.tsx       基础原子：MODELS 配色/价格、BrandMark SVG、Icon（35+ inline SVG）、ThreadNode
   scenarios.tsx        Mock 数据：MODES、Message discriminated union、6 个 SCENARIOS、SIDEBAR_GROUPS
   cards.tsx            消息卡片：UserMsg / AssistantMsg / RoundtableCard / ResearchInProgress / ResearchDone / CompareCard / ImageCard
@@ -25,6 +33,7 @@ src/
 ## 主要接口
 
 - `api.ts` → Sidecar REST（`/v1/providers`, `/v1/models`, `/v1/conversations`, `/v1/costs/*`, `/v1/chat` SSE）
+- Provider 连接测试复用 `POST /v1/providers/test`：对已保存 Provider 发送 `{ provider_id }`，由 Sidecar 读取本地 keystore 中的 key；错误 toast 直接展示 `classification + message`，不再把结构化错误吞成“未知错误”。
 - `sidecar.ts` → `getSidecarEndpoint()` 三模式解析（Tauri runtime → `VITE_SIDECAR_URL` → 同源 cookie）
 - `useLiveData.ts` → 轮询 hooks，每 5-60 秒刷新，`isSidecarConfigured()` 为 false 时静默
 
@@ -72,5 +81,6 @@ useModels()         ──→ model picker + drawer models tab
 
 - **Providers tab** → `useFooterHealth()` 真实 provider + key status，无数据时 fallback mock
 - **Models tab** → `useModels()` 真实模型列表（按 capability 分组），无数据时 fallback mock
-- **Tools / Templates tab** — 暂无 API，保持 mock
-- **Settings Drawer** — 暂无 API，保持 mock
+- **Tools tab** → 已接入工具启停、托管搜索与 MCP 管理；无 Sidecar 时退化为本地展示
+- **Templates / Persona** → 已接入 prompt templates / personas API；无 Sidecar 时退化为本地展示
+- **Settings Drawer** → 混合 live 与本地 UI 状态：预算、thinking、数据导入导出、自检/诊断等走 Sidecar；纯外观项保留前端状态

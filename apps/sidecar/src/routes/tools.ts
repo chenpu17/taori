@@ -16,11 +16,9 @@ import { z } from 'zod';
 import { ToolInvokeRequestSchema } from '@taori/shared';
 import type { CapabilityBus } from '../bus/index.js';
 import type { TestForceImageResult } from '../bus/builtins/image_generate.js';
+import type { SidecarTestHooksConfig } from '../config.js';
 import { CostsRepo, MemoriesRepo } from '../db/repos/index.js';
 
-const TEST_HOOKS_ENABLED =
-  process.env.NODE_ENV !== 'production' &&
-  process.env.TAORI_DISABLE_TEST_HOOKS !== '1';
 const FORCE_IMAGE_HEADER = 'x-test-force-image-result';
 const VALID_FORCED_IMAGE_RESULTS = new Set(['success', 'quota', 'content_filter', 'billed_4xx']);
 
@@ -37,6 +35,7 @@ export interface ToolsRouteDeps {
   bus: CapabilityBus;
   memories: MemoriesRepo;
   costs: CostsRepo;
+  testHooks: Pick<SidecarTestHooksConfig, 'forceImageResult'>;
 }
 
 export function registerToolsRoute(app: FastifyInstance, deps: ToolsRouteDeps): void {
@@ -175,7 +174,7 @@ export function registerToolsRoute(app: FastifyInstance, deps: ToolsRouteDeps): 
         },
       } as const;
     }
-    const testForce: TestForceImageResult = TEST_HOOKS_ENABLED
+    const testForce: TestForceImageResult = deps.testHooks.forceImageResult
       ? readForcedImageResult(req.headers[FORCE_IMAGE_HEADER])
       : null;
     const result = await deps.bus.invoke(name, input, {

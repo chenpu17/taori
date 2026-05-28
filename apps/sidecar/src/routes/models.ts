@@ -28,7 +28,6 @@ import {
   type ModelRecommendation,
   type ModelRecommendationTask,
 } from '@taori/shared';
-import { ProvidersRepo, ModelsRepo, CostsRepo, MemoriesRepo } from '../db/repos/index.js';
 import {
   classifyProviderError,
   isToolPayloadUnsupportedError,
@@ -164,10 +163,11 @@ export function registerModelsRoute(
   app: FastifyInstance,
   deps: BuildServerArgs,
 ): void {
-  const repo = new ModelsRepo(deps.db);
-  const providersRepo = new ProvidersRepo(deps.db);
-  const costsRepo = new CostsRepo(deps.db);
-  const memoriesRepo = new MemoriesRepo(deps.db);
+  const { repos } = deps;
+  const repo = repos.models;
+  const providersRepo = repos.providers;
+  const costsRepo = repos.costs;
+  const memoriesRepo = repos.memories;
 
   app.get('/v1/models', async () => {
     return { models: repo.list() };

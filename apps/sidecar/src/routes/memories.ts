@@ -15,7 +15,6 @@
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import type { BuildServerArgs } from '../server.js';
-import { MemoriesRepo, StructuredMemoriesRepo } from '../db/repos/index.js';
 import { LocalKvMemoryProvider } from '../memory/provider.js';
 
 const SCOPES = ['global', 'session', 'user'] as const;
@@ -55,8 +54,8 @@ const StructuredPatchBody = z.object({
 });
 
 export function registerMemoriesRoute(app: FastifyInstance, deps: BuildServerArgs): void {
-  const provider = deps.memoryProvider ?? new LocalKvMemoryProvider(new MemoriesRepo(deps.db));
-  const structuredRepo = new StructuredMemoriesRepo(deps.db);
+  const provider = deps.memoryProvider ?? new LocalKvMemoryProvider(deps.repos.memories);
+  const structuredRepo = deps.repos.structuredMemories;
 
   app.get('/v1/memories', async (req, reply) => {
     const parsed = GetQuery.safeParse(req.query);

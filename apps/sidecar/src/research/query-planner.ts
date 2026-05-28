@@ -19,7 +19,7 @@
  * loop somewhat without doing a full narrative stream).
  *
  * Safety rails:
- * - Hermetic env var short-circuits to deterministic output for tests.
+ * - Hermetic test hook config short-circuits to deterministic output for tests.
  * - Any LLM failure (no model, parse error, timeout) returns `ok: false`
  *   and the caller falls back to `buildSearchQueries` so we never break
  *   the search loop.
@@ -30,6 +30,7 @@ import type { ResearchSession } from '@taori/shared';
 import { createChatModel } from '../providers/chat-model.js';
 import type { MemoriesRepo, ModelsRepo, ProvidersRepo } from '../db/repos/index.js';
 import type { KeyStore } from '../keystore.js';
+import type { SidecarTestHooksConfig } from '../config.js';
 
 export type QueryIntent =
   | 'wide_recon'
@@ -60,6 +61,7 @@ export interface QueryPlannerDeps {
   providersRepo: ProvidersRepo;
   keystore?: KeyStore | null;
   memories?: MemoriesRepo | null;
+  testHooks?: Pick<SidecarTestHooksConfig, 'hermeticAiPlanner'>;
   log?: { warn?: (msg: unknown, extra?: unknown) => void; error?: (msg: unknown, extra?: unknown) => void };
 }
 
@@ -90,7 +92,7 @@ export async function generateLLMQueries(
   args: GenerateLLMQueriesArgs,
   deps: QueryPlannerDeps,
 ): Promise<QueryPlanResult> {
-  if (process.env.TAORI_HERMETIC_AI_PLANNER === '1' || process.env.TAORI_E2E_HERMETIC_WEB === '1') {
+  if (deps.testHooks?.hermeticAiPlanner) {
     return { ok: false, queries: [], annotated: [], strategy: '', notes: ['hermetic_skip'] };
   }
   const picked = await pickQueryModel(args.session, deps);

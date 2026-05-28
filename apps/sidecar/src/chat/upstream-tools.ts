@@ -40,6 +40,12 @@ export interface UpstreamToolBuildResult {
   flags: { image: boolean; web: boolean; mcp: boolean; file: boolean };
 }
 
+/** maxSteps for streamText when tools are active. Web tools need more rounds
+ *  (search → fetch → answer is already 3 steps; a second search pushs past
+ *  the old limit of 3). Non-web tool sets stay at 3. */
+export const MAX_STEPS_DEFAULT = 3;
+export const MAX_STEPS_WITH_WEB_TOOLS = 5;
+
 export interface UpstreamToolDefinition {
   aiName: string;
   busName: string;

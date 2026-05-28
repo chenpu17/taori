@@ -89,6 +89,15 @@ describe('sidecar smoke', () => {
     expect(res.json().code).toBe('validation_error');
   });
 
+  it('does not emit CORS allow-origin for non-standalone requests without Origin', async () => {
+    const res = await app.inject({
+      method: 'GET',
+      url: '/health',
+    });
+    expect(res.statusCode).toBe(200);
+    expect(res.headers['access-control-allow-origin']).toBeUndefined();
+  });
+
   it('standalone browser mode serves login HTML at / when password auth is enabled', async () => {
     const standaloneDbPath = path.join(os.tmpdir(), `taori-standalone-${Date.now()}.db`);
     const standaloneDb = openDb(standaloneDbPath);

@@ -427,105 +427,177 @@ WHERE id IN (
 CREATE UNIQUE INDEX IF NOT EXISTS memories_scope_key_uniq_v2
   ON memories(scope, COALESCE(scope_id, ''), key);
 `);
-  // Idempotent additive migrations for columns added after initial release.
-  // Older dev DBs created before §7.5.2 fault tracking lack `last_failure_at`.
-  const cols = sqlite
-    .prepare(`PRAGMA table_info(models)`)
-    .all() as Array<{ name: string }>;
-  if (!cols.some((c) => c.name === 'last_failure_at')) {
-    sqlite.exec(`ALTER TABLE models ADD COLUMN last_failure_at INTEGER`);
-  }
-  // M2.5 — additive columns for catalog sync, multi-modal pricing, and
-  // declared output modalities. ALTER guarded against existing dev DBs.
-  const additive: Array<[string, string]> = [
-    ['price_per_image', 'REAL'],
-    ['price_per_video_second', 'REAL'],
-    ['pricing_meta', 'TEXT'],
-    ['price_synced_at', 'INTEGER'],
-    ['modalities', 'TEXT'],
-    ['thinking_enabled', 'INTEGER'],
-  ];
-  for (const [name, type] of additive) {
-    if (!cols.some((c) => c.name === name)) {
-      sqlite.exec(`ALTER TABLE models ADD COLUMN ${name} ${type}`);
+  // ── Versioned migration system ──────────────────────────────────────
+  sqlite.exec(`
+    CREATE TABLE IF NOT EXISTS schema_migrations (
+      version INTEGER NOT NULL PRIMARY KEY,
+      applied_at INTEGER NOT NULL
+    );
+  `);
+
+  /** Add a column to a table, silently skipping if it already exists. */
+  function safeAddColumn(
+    db: Database.Database,
+    table: string,
+    column: string,
+    definition: string,
+  ): void {
+    try {
+      db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      if (/duplicate column name/i.test(msg)) return;
+      throw e;
     }
   }
-  // A4 — `origin_conversation_id` on roundtables (additive).
-  const rtCols = sqlite
-    .prepare(`PRAGMA table_info(roundtables)`)
-    .all() as Array<{ name: string }>;
-  if (!rtCols.some((c) => c.name === 'origin_conversation_id')) {
-    sqlite.exec(
-      `ALTER TABLE roundtables ADD COLUMN origin_conversation_id TEXT REFERENCES conversations(id) ON DELETE SET NULL`,
-    );
+
+  const migrations: Array<{
+    version: number;
+    up: (db: Database.Database) => void;
+  }> = [
+    {
+      version: 1,
+      up(db) {
+        safeAddColumn(db, 'models', 'last_failure_at', 'INTEGER');
+      },
+    },
+    {
+      version: 2,
+      up(db) {
+        for (const [name, type] of [
+          ['price_per_image', 'REAL'],
+          ['price_per_video_second', 'REAL'],
+          ['pricing_meta', 'TEXT'],
+          ['price_synced_at', 'INTEGER'],
+          ['modalities', 'TEXT'],
+          ['thinking_enabled', 'INTEGER'],
+        ] as [string, string][]) {
+          safeAddColumn(db, 'models', name, type);
+        }
+      },
+    },
+    {
+      version: 3,
+      up(db) {
+        safeAddColumn(
+          db,
+          'roundtables',
+          'origin_conversation_id',
+          'TEXT REFERENCES conversations(id) ON DELETE SET NULL',
+        );
+      },
+    },
+    {
+      version: 4,
+      up(db) {
+        safeAddColumn(
+          db,
+          'conversations',
+          'pinned',
+          'INTEGER NOT NULL DEFAULT 0',
+        );
+        safeAddColumn(db, 'conversations', 'tags', 'TEXT');
+      },
+    },
+    {
+      version: 5,
+      up(db) {
+        safeAddColumn(db, 'cost_records', 'classification', 'TEXT');
+        safeAddColumn(db, 'cost_records', 'first_token_ms', 'INTEGER');
+        safeAddColumn(db, 'cost_records', 'cache_input_tokens', 'INTEGER');
+      },
+    },
+    {
+      version: 6,
+      up(db) {
+        safeAddColumn(
+          db,
+          'quick_compare_outputs',
+          'tool_names',
+          "TEXT NOT NULL DEFAULT '[]'",
+        );
+      },
+    },
+    {
+      version: 7,
+      up(db) {
+        safeAddColumn(
+          db,
+          'research_sessions',
+          'preferred_model_id',
+          'TEXT',
+        );
+        safeAddColumn(
+          db,
+          'research_sessions',
+          'preferred_search_tool',
+          'TEXT',
+        );
+      },
+    },
+    {
+      version: 8,
+      up(db) {
+        safeAddColumn(
+          db,
+          'research_sessions',
+          'plan_messages_json',
+          'TEXT',
+        );
+        safeAddColumn(
+          db,
+          'research_sessions',
+          'plan_origin',
+          "TEXT NOT NULL DEFAULT 'pending'",
+        );
+      },
+    },
+    {
+      version: 9,
+      up(db) {
+        safeAddColumn(
+          db,
+          'research_sessions',
+          'synthesis_model_id',
+          'TEXT',
+        );
+      },
+    },
+    {
+      version: 10,
+      up(db) {
+        safeAddColumn(
+          db,
+          'research_claims',
+          'evidence_spans_json',
+          "TEXT NOT NULL DEFAULT '[]'",
+        );
+        safeAddColumn(db, 'research_claims', 'confidence', 'TEXT');
+        safeAddColumn(db, 'research_claims', 'verified_at', 'INTEGER');
+      },
+    },
+  ];
+
+  const applied = new Set(
+    (
+      sqlite
+        .prepare(`SELECT version FROM schema_migrations`)
+        .all() as Array<{ version: number }>
+    ).map((r) => r.version),
+  );
+  const apply = sqlite.transaction((m: (typeof migrations)[number]) => {
+    m.up(sqlite);
+    sqlite
+      .prepare(
+        `INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)`,
+      )
+      .run(m.version, Date.now());
+  });
+  for (const m of migrations) {
+    if (!applied.has(m.version)) {
+      apply(m);
+    }
   }
-  // C4 — pinned + tags on conversations (additive).
-  const convCols = sqlite
-    .prepare(`PRAGMA table_info(conversations)`)
-    .all() as Array<{ name: string }>;
-  if (!convCols.some((c) => c.name === 'pinned')) {
-    sqlite.exec(
-      `ALTER TABLE conversations ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0`,
-    );
-  }
-  if (!convCols.some((c) => c.name === 'tags')) {
-    sqlite.exec(`ALTER TABLE conversations ADD COLUMN tags TEXT`);
-  }
-  // E1 — additive observability columns on cost_records.
-  const costCols = sqlite
-    .prepare(`PRAGMA table_info(cost_records)`)
-    .all() as Array<{ name: string }>;
-  if (!costCols.some((c) => c.name === 'classification')) {
-    sqlite.exec(`ALTER TABLE cost_records ADD COLUMN classification TEXT`);
-  }
-  if (!costCols.some((c) => c.name === 'first_token_ms')) {
-    sqlite.exec(`ALTER TABLE cost_records ADD COLUMN first_token_ms INTEGER`);
-  }
-  if (!costCols.some((c) => c.name === 'cache_input_tokens')) {
-    sqlite.exec(`ALTER TABLE cost_records ADD COLUMN cache_input_tokens INTEGER`);
-  }
-  const qcOutputCols = sqlite
-    .prepare(`PRAGMA table_info(quick_compare_outputs)`)
-    .all() as Array<{ name: string }>;
-  if (!qcOutputCols.some((c) => c.name === 'tool_names')) {
-    sqlite.exec(`ALTER TABLE quick_compare_outputs ADD COLUMN tool_names TEXT NOT NULL DEFAULT '[]'`);
-  }
-  // R1 — preferred model and search tool columns on research_sessions (additive).
-  const resCols = sqlite
-    .prepare(`PRAGMA table_info(research_sessions)`)
-    .all() as Array<{ name: string }>;
-  if (!resCols.some((c) => c.name === 'preferred_model_id')) {
-    sqlite.exec(`ALTER TABLE research_sessions ADD COLUMN preferred_model_id TEXT`);
-  }
-  if (!resCols.some((c) => c.name === 'preferred_search_tool')) {
-    sqlite.exec(`ALTER TABLE research_sessions ADD COLUMN preferred_search_tool TEXT`);
-  }
-  // R2 — plan_messages_json column for AI planning conversation history.
-  if (!resCols.some((c) => c.name === 'plan_messages_json')) {
-    sqlite.exec(`ALTER TABLE research_sessions ADD COLUMN plan_messages_json TEXT`);
-  }
-  if (!resCols.some((c) => c.name === 'plan_origin')) {
-    sqlite.exec(`ALTER TABLE research_sessions ADD COLUMN plan_origin TEXT NOT NULL DEFAULT 'pending'`);
-  }
-  // R3 — synthesis_model_id lets users pick a dedicated model for the
-  // research-report synthesis pass independent of the default chat model.
-  if (!resCols.some((c) => c.name === 'synthesis_model_id')) {
-    sqlite.exec(`ALTER TABLE research_sessions ADD COLUMN synthesis_model_id TEXT`);
-  }
-  // R3 — research_claims gains evidence_spans / confidence / verified_at so the
-  // CitationAgent pass can record per-source span-level grounding instead of
-  // template summaries.
-  const claimCols = sqlite
-    .prepare(`PRAGMA table_info(research_claims)`)
-    .all() as Array<{ name: string }>;
-  if (!claimCols.some((c) => c.name === 'evidence_spans_json')) {
-    sqlite.exec(`ALTER TABLE research_claims ADD COLUMN evidence_spans_json TEXT NOT NULL DEFAULT '[]'`);
-  }
-  if (!claimCols.some((c) => c.name === 'confidence')) {
-    sqlite.exec(`ALTER TABLE research_claims ADD COLUMN confidence TEXT`);
-  }
-  if (!claimCols.some((c) => c.name === 'verified_at')) {
-    sqlite.exec(`ALTER TABLE research_claims ADD COLUMN verified_at INTEGER`);
-  }
+  // ── End versioned migrations ────────────────────────────────────────
   return drizzle(sqlite, { schema });
 }

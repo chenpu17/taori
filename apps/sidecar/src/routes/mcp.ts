@@ -16,7 +16,7 @@ export interface McpRouteDeps extends BuildServerArgs {
 }
 
 export function registerMcpRoute(app: FastifyInstance, deps: McpRouteDeps): void {
-  const repo = new McpServersRepo(deps.db);
+  const repo = deps.repos.mcpServers;
 
   app.get('/v1/mcp/servers', async () => {
     return { ok: true, servers: repo.list() };
@@ -184,11 +184,9 @@ export function registerMcpRoute(app: FastifyInstance, deps: McpRouteDeps): void
 }
 
 export async function restoreMcpToolsAtStartup(
-  deps: Pick<McpRouteDeps, 'db' | 'bus' | 'config'> & {
-    log?: { warn: (...a: unknown[]) => void };
-  },
+  deps: { repos: McpServersRepo; bus: CapabilityBus; config: McpRouteDeps['config']; log?: { warn: (...a: unknown[]) => void } },
 ): Promise<void> {
-  const repo = new McpServersRepo(deps.db);
+  const repo = deps.repos;
   for (const server of repo.list().filter((item) => item.enabled)) {
     try {
       const tools = await refreshMcpServerTools(deps.bus, server);

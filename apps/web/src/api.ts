@@ -3,17 +3,19 @@
  * Everything else is added on demand. Never throws on network failure;
  * callers decide whether to fall back to mock data.
  */
-import type { Model, Provider } from '@taori/shared';
+import type { ChatAttachment, Model, Provider } from '@taori/shared';
 import { authedFetch } from './sidecar';
 
 export class ApiError extends Error {
   readonly code?: string;
   readonly status?: number;
-  constructor(message: string, code?: string, status?: number) {
+  readonly details?: Record<string, unknown>;
+  constructor(message: string, code?: string, status?: number, details?: Record<string, unknown>) {
     super(message);
     this.name = 'ApiError';
     this.code = code;
     this.status = status;
+    this.details = details;
   }
 }
 
@@ -21,8 +23,12 @@ async function json<T>(res: Response): Promise<T> {
   if (!res.ok) {
     let body: unknown;
     try { body = await res.json(); } catch { /* ignore */ }
-    const obj = (body && typeof body === 'object' ? body : {}) as { message?: string; code?: string };
-    throw new ApiError(obj.message ?? `${res.status} ${res.statusText}`, obj.code, res.status);
+    const obj = (body && typeof body === 'object' ? body : {}) as {
+      message?: string;
+      code?: string;
+      details?: Record<string, unknown>;
+    };
+    throw new ApiError(obj.message ?? `${res.status} ${res.statusText}`, obj.code, res.status, obj.details);
   }
   if (res.status === 204) return undefined as T;
   return (await res.json()) as T;
@@ -52,10 +58,32 @@ export interface ProviderKeyStatus {
   key_available: boolean;
 }
 
+export interface ProviderTestResponse {
+  ok: boolean;
+  sample_count?: number;
+  error?: {
+    classification: string;
+    message: string;
+  };
+}
+
 export async function getProviderKeyStatus(opts?: { confirmKeychain?: boolean }): Promise<ProviderKeyStatus[]> {
   const qs = opts?.confirmKeychain ? '?confirm_keychain=1' : '';
   const res = await json<{ statuses: ProviderKeyStatus[] }>(await authedFetch('/v1/providers/key-status' + qs));
   return res.statuses;
+}
+
+export async function testProviderConnection(input:
+  | { provider_id: string }
+  | { type: string; base_url: string; api_key?: string },
+): Promise<ProviderTestResponse> {
+  return json<ProviderTestResponse>(
+    await authedFetch('/v1/providers/test', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(input),
+    }),
+  );
 }
 
 // ── Models ───────────────────────────────────────────────────
@@ -169,9 +197,63 @@ export async function getMessages(
 
 // ── Chat (SSE streaming) ─────────────────────────────────────
 export interface ChatRequest {
+  conversation_id?: string;
+  model_id: string;
+  messages: Array<{
+    role: 'user' | 'assistant' | 'system';
+    content: string;
+  }>;
+  attachments?: ChatAttachment[];
+  skip_user_persist?: boolean;
+  confirmed_cost?: boolean;
+  persona_id?: string;
+}
+
+export interface ChatStreamMeta {
+  type: 'meta';
   conversation_id: string;
-  message: string;
-  model_id?: string;
+  message_id: string | null;
+  model_id: string | null;
+  run_id: string;
+}
+
+export interface ChatStreamCost {
+  type: 'cost';
+  message_id: string;
+  input_tokens?: number | null;
+  cache_input_tokens?: number | null;
+  output_tokens?: number | null;
+  actual_usd?: number | null;
+  first_token_ms?: number | null;
+  duration_ms?: number | null;
+}
+
+export interface ChatStreamFailureDecision {
+  type: 'failure_decision';
+  classification: string;
+  current_model_id?: string | null;
+  recommended_model_id?: string | null;
+  auto_fallback_enabled?: boolean;
+  can_compact_context?: boolean;
+  can_skip_tool?: boolean;
+  tool_name?: string | null;
+  tool_label?: string | null;
+  detail?: string;
+}
+
+export type ChatStreamAnnotation =
+  | ChatStreamMeta
+  | ChatStreamCost
+  | ChatStreamFailureDecision
+  | Record<string, unknown>;
+
+function normalizeProviderError(payload: string): string {
+  try {
+    const parsed = JSON.parse(payload) as string;
+    return typeof parsed === 'string' ? parsed : payload;
+  } catch {
+    return payload;
+  }
 }
 
 export async function postChat(
@@ -179,6 +261,7 @@ export async function postChat(
   onChunk: (text: string) => void,
   onDone: () => void,
   onError: (err: Error) => void,
+  onAnnotations?: (items: ChatStreamAnnotation[]) => void,
 ): Promise<() => void> {
   const ep = await import('./sidecar').then((m) => m.getSidecarEndpoint());
   const controller = new AbortController();
@@ -202,6 +285,8 @@ export async function postChat(
   const reader = res.body!.getReader();
   const decoder = new TextDecoder();
   let buf = '';
+  let finalized = false;
+  let providerError: string | null = null;
   (async () => {
     try {
       for (;;) {
@@ -211,17 +296,43 @@ export async function postChat(
         const lines = buf.split('\n');
         buf = lines.pop() ?? '';
         for (const line of lines) {
-          if (line.startsWith('data: ')) {
-            const payload = line.slice(6);
-            if (payload === '[DONE]') { onDone(); return; }
-            try {
-              const parsed = JSON.parse(payload) as { content?: string; [k: string]: unknown };
-              if (parsed.content) onChunk(parsed.content);
-            } catch { /* skip malformed */ }
+          if (line.length < 3 || line[1] !== ':') continue;
+          const prefix = line[0];
+          const payload = line.slice(2);
+          switch (prefix) {
+            case '0': {
+              const text = JSON.parse(payload) as string;
+              if (typeof text === 'string' && text.length > 0) onChunk(text);
+              break;
+            }
+            case '3': {
+              providerError = normalizeProviderError(payload);
+              break;
+            }
+            case '8': {
+              const items = JSON.parse(payload) as ChatStreamAnnotation[];
+              if (Array.isArray(items) && items.length > 0) onAnnotations?.(items);
+              break;
+            }
+            case 'd': {
+              finalized = true;
+              const finish = JSON.parse(payload) as { finishReason?: string };
+              if (finish.finishReason === 'error') {
+                onError(new Error(providerError ?? 'Chat stream failed'));
+              } else {
+                onDone();
+              }
+              return;
+            }
+            default:
+              break;
           }
         }
       }
-      onDone();
+      if (!finalized) {
+        if (providerError) onError(new Error(providerError));
+        else onDone();
+      }
     } catch (e) {
       if ((e as Error).name !== 'AbortError') onError(e as Error);
     }
@@ -248,6 +359,10 @@ export async function createProvider(body: { name: string; type: string; base_ur
 
 export async function patchConversation(id: string, patch: { title?: string; archived?: boolean; pinned?: boolean; tags?: string[] | null }): Promise<Conversation> {
   return json<Conversation>(await authedFetch(`/v1/conversations/${id}`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(patch) }));
+}
+
+export async function patchConversationMessage(id: string, msgId: string, patch: { content: string }): Promise<{ message: { id: string; role: string; content: string; created_at: number } }> {
+  return json(await authedFetch(`/v1/conversations/${id}/messages/${msgId}`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(patch) }));
 }
 
 export async function deleteConversation(id: string): Promise<void> {

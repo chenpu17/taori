@@ -210,6 +210,7 @@ function validateVisionSupport(args: {
 
 async function parsePdfAttachments(attachments: ChatAttachment[]): Promise<void> {
   const pdfTextCap = 200_000;
+  const PDF_PARSE_TIMEOUT_MS = 5_000;
   for (let i = 0; i < attachments.length; i++) {
     const attachment = attachments[i]!;
     if (attachment.kind !== 'pdf') continue;
@@ -221,16 +222,26 @@ async function parsePdfAttachments(attachments: ChatAttachment[]): Promise<void>
       const mod = (await import('pdf-parse/lib/pdf-parse.js')) as unknown as {
         default: (b: Buffer) => Promise<{ text: string }>;
       };
-      const result = await mod.default(buf);
+      const parsePromise = mod.default(buf);
+      const result = await Promise.race([
+        parsePromise,
+        new Promise<never>((_, reject) =>
+          setTimeout(() => reject(new Error('PDF 解析超时（超过 5 秒），文件可能过大。')), PDF_PARSE_TIMEOUT_MS),
+        ),
+      ]);
       parsed = (result.text ?? '').trim();
     } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      const isTimeout = msg.includes('超时') || msg.includes('timeout');
       throw new TaoriError({
         code: 'validation_error',
-        message: `PDF 解析失败：${attachment.name ?? 'document.pdf'} — 文件可能损坏或为扫描件。`,
+        message: isTimeout
+          ? `PDF 解析超时：${attachment.name ?? 'document.pdf'} — 文件页数过多，请精简后重试，或将内容以文本附件方式上传。`
+          : `PDF 解析失败：${attachment.name ?? 'document.pdf'} — 文件可能损坏或为扫描件。`,
         details: {
           kind: 'pdf',
           name: attachment.name ?? null,
-          err: e instanceof Error ? e.message : String(e),
+          err: msg,
         },
       });
     }

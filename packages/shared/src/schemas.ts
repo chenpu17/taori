@@ -21,6 +21,8 @@ export const ModalitySchema = z.enum(MODALITIES);
 export const MessageStatusSchema = z.enum(MESSAGE_STATUSES);
 export const ErrorCodeSchema = z.enum(ERROR_CODES);
 export const ErrorClassificationSchema = z.enum(ERROR_CLASSIFICATIONS);
+export const CHAT_MESSAGE_MAX_COUNT = 200;
+export const CHAT_MESSAGE_CONTENT_MAX_LENGTH = 200_000;
 
 export const HealthResponseSchema = z.object({
   ok: z.literal(true),
@@ -59,11 +61,16 @@ export const ProviderUpdateSchema = z.object({
 });
 export type ProviderUpdate = z.infer<typeof ProviderUpdateSchema>;
 
-export const ProviderTestRequestSchema = z.object({
-  type: ProviderTypeSchema,
-  base_url: z.string().url(),
-  api_key: z.string().min(1).max(2048).optional(),
-});
+export const ProviderTestRequestSchema = z.union([
+  z.object({
+    provider_id: z.string().min(1),
+  }),
+  z.object({
+    type: ProviderTypeSchema,
+    base_url: z.string().url(),
+    api_key: z.string().min(1).max(2048).optional(),
+  }),
+]);
 export type ProviderTestRequest = z.infer<typeof ProviderTestRequestSchema>;
 
 export const ProviderTestResponseSchema = z.object({
@@ -1075,7 +1082,7 @@ export type BackupExportResponse = z.infer<typeof BackupExportResponseSchema>;
 
 export const ChatMessageSchema = z.object({
   role: z.enum(['user', 'assistant', 'system']),
-  content: z.string(),
+  content: z.string().max(CHAT_MESSAGE_CONTENT_MAX_LENGTH, '单条消息不能超过 200KB'),
 });
 
 export const ChatAttachmentSchema = z.object({
@@ -1097,7 +1104,7 @@ export const ChatRequestSchema = z.object({
   conversation_id: z.string().optional(),
   model_id: z.string(),
   persona_id: z.string().optional(),
-  messages: z.array(ChatMessageSchema).min(1),
+  messages: z.array(ChatMessageSchema).min(1).max(CHAT_MESSAGE_MAX_COUNT, '单次请求最多包含 200 条消息'),
   attachments: z.array(ChatAttachmentSchema).max(8, '最多同时上传 8 个附件').optional(),
   /**
    * C1 — when set, /v1/chat must NOT insert a new user-message row before

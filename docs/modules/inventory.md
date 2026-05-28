@@ -17,9 +17,8 @@ Scope: Taori 全系统
 |---|---|---|---|---|---|---|---|---|
 | `apps/desktop` | Tauri 外壳，承担 OS 能力与 Sidecar 进程托管 | entry | 是（最终安装包入口） | Tauri 命令（`sidecar_endpoint` / `import_clipboard`）；托盘 / 全局快捷键；监听 OS 事件 | `apps/sidecar`（spawn）；OS Keychain；OS 文件系统；系统剪贴板 | Sidecar 进程句柄；Bearer Token（内存）；窗口状态；托盘与快捷键注册；剪贴板导入事件 | `apps/sidecar`（启动/守护）；`apps/web`（命令通道） | `apps/desktop/MODULE.md` |
 | `apps/web` | React Renderer，UI 与流式渲染 | entry | 否（嵌在 Tauri 中） | 用户交互；通过 `invoke` 取 Sidecar endpoint | `apps/desktop`（Tauri 命令）；`apps/sidecar`（HTTP+SSE）；`@taori/shared` | UI 状态（Zustand）；会话临时缓存 | `apps/desktop`；`apps/sidecar` | `apps/web/MODULE.md` |
-| `apps/sidecar` | 业务编排进程，LLM 调用 / 圆桌 / 数据持久化 | orchestrator | 是（独立 Node 进程，崩可重启） | HTTP REST + SSE on 可配置 `host:port`（desktop 默认 `127.0.0.1`；standalone npm 可显式设 `0.0.0.0`，详见架构 03 与提案 31） | LLM Providers（远程）；SQLite（本地文件）；`@taori/shared`；`@taori/prompts` | 全部业务状态：会话、消息、圆桌实例、成本记录、记忆、模型异常计数 | `apps/web`（HTTP 服务方）；`apps/desktop`（被托管） | `apps/sidecar/MODULE.md` |
+| `apps/sidecar` | 业务编排进程，LLM 调用 / 圆桌 / 数据持久化 | orchestrator | 是（独立 Node 进程，崩可重启） | HTTP REST + SSE on 可配置 `host:port`（desktop 默认 `127.0.0.1`；standalone npm 可显式设 `0.0.0.0`，详见架构 03 与提案 31） | LLM Providers（远程）；SQLite（本地文件）；`@taori/shared` | 全部业务状态：会话、消息、圆桌实例、成本记录、记忆、模型异常计数 | `apps/web`（HTTP 服务方）；`apps/desktop`（被托管） | `apps/sidecar/MODULE.md` |
 | `packages/shared` | 前后端共享类型与 Zod schema | infra | 否（library） | 导出类型、schema、常量 | 无运行时依赖 | 无 | `apps/web`；`apps/sidecar` | `packages/shared/MODULE.md` |
-| `packages/prompts` | 元 Prompt 模板（圆桌角色/总结/意图识别） | infra | 否（library） | 导出 prompt 函数 | 无运行时依赖 | 无 | `apps/sidecar` | `packages/prompts/MODULE.md`（M3 建立） |
 | `apps/sidecar/capability-bus` 🔮 | Sidecar 内子模块：工具注册/调度/计费/兜底，承接 Builtin 与 MCP；M2 引入 | orchestrator-internal | 否（Sidecar 内） | `register/list/getToolsFor/invoke` | Vercel AI SDK；MCP SDK（M3） | 工具注册表；MCP 子进程句柄；健康状态 | `apps/sidecar`（宿主）；`packages/shared`（Tool schema） | M2 建立合同（设计见 [架构 09](../architecture/09-agent-and-tools.md)） |
 
 ## 3. 关键协作关系
@@ -38,10 +37,25 @@ Scope: Taori 全系统
 |---|---|
 | `apps/sidecar` | 拥有几乎全部业务状态；任何合同变化都会扩散到 web/desktop。公共 API、数据归属或运行语义变化必须同步更新 `apps/sidecar/MODULE.md` 与本清单 |
 | `apps/desktop` | Sidecar 生命周期管理、Keychain 操作、CSP 配置；安全攻击面集中在此 |
-| `packages/prompts` | 元 Prompt 改动直接影响圆桌质量与成本；变更应有版本记录 |
+| `apps/sidecar` prompt 相关子模块 | 元 Prompt 改动直接影响圆桌、研究、记忆抽取质量与成本；变更应有版本记录 |
 
 ## 5. 最近变化
 
+- 2026-05-27 [模块合同收敛 / Web 主壳拆分]：
+  - `docs/modules` / `docs/architecture`：移除当前不存在的 `packages/prompts` 活动模块记录，改为未来可拆分包说明；Sidecar 当前仅依赖 `@taori/shared`
+  - `apps/web`：从 `App.tsx` 拆出 `Sidebar.tsx`、`Composer.tsx`、`attachments.ts`、`chatStream.ts`、`markdown.tsx`，并从 `surfaces.tsx` 拆出 `DrawerProviders.tsx`、`DrawerModels.tsx`、`providerDisplay.ts`，降低主壳与 Drawer 聚合文件职责密度；公共 HTTP/SSE 合同不变
+  - `apps/sidecar`：从 `db/repos/index.ts` 抽出 Provider/Model mapper 到 `db/repos/mappers.ts`，从 deep research runner 抽出 lifecycle helper 到 `research/lifecycle.ts`；数据库、HTTP 与研究状态机合同不变
+  - `apps/web/MODULE.md`：更新真实 Drawer 能力描述，Tools、Templates / Persona、Settings 不再标为“暂无 API”
+- 2026-05-27 [审核修复批次]：
+  - `apps/sidecar`：`RunEventsRepo.appendSafe` 统一 chat / roundtable run event FK 降级写入；`server.ts` 收敛请求体大小常量、Standalone cookie 解码容错与 Bearer/Cookie 授权分支；`ModelsRepo.update/patchPricing` 用 `pickDefined` 降低重复更新样板
+  - `apps/sidecar`：新增 `chat/protocol.ts` 集中 Data Stream Protocol 写帧，新增 `standalone/login-page.ts` 抽离浏览器登录 HTML，并把测试控制位集中到 `config.testHooks`，减少业务路由直接读取测试环境变量
+  - `packages/shared`：`ChatRequestSchema.messages` 增加 200 条消息与单条 200KB 上限，避免异常请求在 Sidecar 预算估算和上游消息组装阶段放大内存
+  - `apps/sidecar/test`：补充聊天请求消息数量与单条长度超限回归用例
+- 2026-05-23 [Provider 连接测试修复]：
+  - `packages/shared`：`ProviderTestRequestSchema` 扩展为 union，允许 Renderer 用 `{ provider_id }` 直接测试已保存 Provider，也保留 `{ type, base_url, api_key? }` 的临时测试合同
+  - `apps/sidecar`：`POST /v1/providers/test` 新增 `provider_id` 路径，会读取本地 provider 配置和 keystore 中的 key，再返回结构化 `classification + message`
+  - `apps/web`：Provider 详情页“测试连接”改走 typed helper，并把失败 toast 从“未知错误”改为展示真实分类与消息
+  - `apps/sidecar/test`：补充 saved provider 直测回归用例
 - 2026-05-11 [聊天成本 / ModelCenter / 深度研究]：
   - `apps/sidecar`：聊天成本链路新增 `cache_input_tokens`，`cost_records`、`cost.recorded` 与 `/v1/costs/calls` 可透出输入 / cache / 输出 token 明细
   - `apps/web`：聊天消息把 token 指标直接显示在 `$` 附近；ModelCenter 模型矩阵操作区做紧凑化整理，缩短高频按钮文案并收敛编辑/删除为 icon button；Control Center 新增“深度研究”工作台入口
@@ -130,7 +144,7 @@ Scope: Taori 全系统
 
 - [x] 核心模块 `MODULE.md` 已建立：`apps/desktop` / `apps/web` / `apps/sidecar` / `packages/shared`
 - [ ] `apps/sidecar` 详细的内部子模块（providers / orchestration / cost / db / memory / capability-bus / mcp / roundtable）—— 按任务需要灰盒下钻
-- [ ] `packages/prompts` 合同（当 prompt 模板或圆桌 prompt 作为独立包落地时建立）
+- [ ] Prompt 模板若未来从 `apps/sidecar` 拆成独立 `packages/prompts`，再补建包、合同与本清单条目；当前 workspace 不存在该包
 - [ ] 部署语义（自动更新机制激活后再补）
 
 ## 7. M2 完工记录

@@ -82,17 +82,28 @@ export interface FooterHealth {
   statusText: string;
   health: HealthSnapshot | null;
   providers: Provider[];
-  keyStatuses: ProviderKeyStatus[];
+  keyStatuses: ProviderKeyStatus[] | null;
 }
 
 export function useFooterHealth(intervalMs = 15000): LiveResult<FooterHealth> {
   return useLive(
     async () => {
-      const [health, providers, keyStatuses] = await Promise.all([
+      const [health, providers, keyStatusResult] = await Promise.all([
         getHealth().catch(() => null),
         listProviders().catch(() => [] as Provider[]),
-        getProviderKeyStatus().catch(() => [] as ProviderKeyStatus[]),
+        getProviderKeyStatus()
+          .then((statuses) => ({ statuses, unknown: false }))
+          .catch((err: unknown) => {
+            if (
+              err instanceof ApiError
+              && err.details?.requires_keychain_confirmation === true
+            ) {
+              return { statuses: null, unknown: true };
+            }
+            return { statuses: [] as ProviderKeyStatus[], unknown: false };
+          }),
       ]);
+      const keyStatuses = keyStatusResult.statuses;
 
       let status: FooterStatus;
       let statusText: string;
@@ -105,22 +116,27 @@ export function useFooterHealth(intervalMs = 15000): LiveResult<FooterHealth> {
         statusText = '未配置';
       } else {
         const enabled = providers.filter((p) => p.enabled);
-        const missing = enabled.filter((p) => {
-          const k = keyStatuses.find((s) => s.provider_id === p.id);
-          return !k || !k.key_available;
-        });
         if (enabled.length === 0) {
           status = 'off';
           statusText = '未配置';
-        } else if (missing.length === enabled.length) {
-          status = 'off';
-          statusText = '未配置';
-        } else if (missing.length > 0) {
-          status = 'warn';
-          statusText = '部分降级';
-        } else {
+        } else if (keyStatusResult.unknown || keyStatuses === null) {
           status = 'ok';
           statusText = '在线';
+        } else {
+          const missing = enabled.filter((p) => {
+            const k = keyStatuses.find((s) => s.provider_id === p.id);
+            return !k || !k.key_available;
+          });
+          if (missing.length === enabled.length) {
+            status = 'off';
+            statusText = '未配置';
+          } else if (missing.length > 0) {
+            status = 'warn';
+            statusText = '部分降级';
+          } else {
+            status = 'ok';
+            statusText = '在线';
+          }
         }
       }
 

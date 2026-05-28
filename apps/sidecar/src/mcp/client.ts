@@ -320,6 +320,9 @@ class McpStdioSession {
     if (!child) return;
     for (const [, pending] of this.pending) clearTimeout(pending.timer);
     this.pending.clear();
+    // Detach listeners before kill so late stderr flushes don't flood logs.
+    child.stdout.removeAllListeners();
+    child.stderr.removeAllListeners();
     if (!child.stdin.destroyed) child.stdin.end();
     child.kill();
   }

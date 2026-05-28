@@ -27,10 +27,13 @@ function isEligibleChatModel(model: Model, now: number): boolean {
 }
 
 function unitPrice(model: Model): number {
-  return model.price_per_call
-    ?? model.price_input_per_1m
-    ?? model.price_output_per_1m
-    ?? Number.POSITIVE_INFINITY;
+  // Normalize to comparable $/1M-input-tokens basis.
+  // Token-priced models compared directly; per-call models estimated at
+  // ~1000 input tokens/call so a $0.001/call model ≈ $1/1M tokens.
+  if (model.price_input_per_1m != null) return model.price_input_per_1m;
+  if (model.price_output_per_1m != null) return model.price_output_per_1m;
+  if (model.price_per_call != null) return model.price_per_call * 1000;
+  return Number.POSITIVE_INFINITY;
 }
 
 function qualityScore(model: Model): number {

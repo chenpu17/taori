@@ -14,16 +14,6 @@
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { ConversationExportQuerySchema, TaoriError } from '@taori/shared';
-import {
-  ConversationsRepo,
-  MessagesRepo,
-  FilesRepo,
-  CostsRepo,
-  ModelsRepo,
-  MemoriesRepo,
-  PersonasRepo,
-  RunEventsRepo,
-} from '../db/repos/index.js';
 import type { BuildServerArgs } from '../server.js';
 import fs from 'node:fs/promises';
 import { readSessionToolEnabled } from './tools.js';
@@ -54,14 +44,15 @@ export function registerConversationsRoute(
   app: FastifyInstance,
   deps: BuildServerArgs,
 ): void {
-  const convRepo = new ConversationsRepo(deps.db);
-  const msgRepo = new MessagesRepo(deps.db);
-  const filesRepo = new FilesRepo(deps.db);
-  const costsRepo = new CostsRepo(deps.db);
-  const modelsRepo = new ModelsRepo(deps.db);
-  const memoriesRepo = new MemoriesRepo(deps.db);
-  const personasRepo = new PersonasRepo(deps.db);
-  const runEventsRepo = new RunEventsRepo(deps.db);
+  const { repos } = deps;
+  const convRepo = repos.conversations;
+  const msgRepo = repos.messages;
+  const filesRepo = repos.files;
+  const costsRepo = repos.costs;
+  const modelsRepo = repos.models;
+  const memoriesRepo = repos.memories;
+  const personasRepo = repos.personas;
+  const runEventsRepo = repos.runEvents;
 
   app.get<{ Querystring: { q?: string } }>('/v1/conversations', async (req) => {
     return { conversations: convRepo.list({ q: req.query.q }) };
