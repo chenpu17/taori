@@ -1,21 +1,25 @@
 import { useState, type ReactNode } from 'react';
 
-function CodeBlockWithCopy({ code, lang }: { code: string; lang?: string }) {
+function CodeBlockWithCopy({ code, lang }: { code: string; lang?: string }): JSX.Element {
   const [copied, setCopied] = useState(false);
-  const handleCopy = () => {
-    navigator.clipboard.writeText(code);
+
+  const handleCopy = (): void => {
+    void navigator.clipboard.writeText(code);
     setCopied(true);
-    setTimeout(() => setCopied(false), 1500);
+    window.setTimeout(() => setCopied(false), 1500);
   };
+
   return (
     <div className="md-codeblock">
       <div className="md-codeblock-head">
-        <span>{lang || ''}</span>
+        <span>{lang || 'code'}</span>
         <button type="button" className="md-codeblock-copy" onClick={handleCopy}>
           {copied ? '已复制' : '复制'}
         </button>
       </div>
-      <pre><code>{code}</code></pre>
+      <pre>
+        <code>{code}</code>
+      </pre>
     </div>
   );
 }
@@ -33,82 +37,94 @@ function renderMarkdownInner(raw: string): ReactNode[] {
   const lines = raw.split('\n');
   let i = 0;
   let key = 0;
-  const nk = () => `md${key++}`;
+  const nk = (): string => `md${key++}`;
 
   while (i < lines.length) {
-    const line = lines[i];
+    const line = lines[i] ?? '';
 
     const fenceMatch = line.match(/^(`{3,})(\w*)/);
     if (fenceMatch) {
-      const fence = fenceMatch[1];
+      const fence = fenceMatch[1]!;
       const lang = fenceMatch[2];
       const codeLines: string[] = [];
-      i++;
-      while (i < lines.length && !lines[i].startsWith(fence)) {
-        codeLines.push(lines[i]);
-        i++;
+      i += 1;
+      while (i < lines.length && !(lines[i] ?? '').startsWith(fence)) {
+        codeLines.push(lines[i] ?? '');
+        i += 1;
       }
-      i++;
+      i += 1;
       nodes.push(<CodeBlockWithCopy key={nk()} code={codeLines.join('\n')} lang={lang} />);
       continue;
     }
 
     const hdrMatch = line.match(/^(#{1,4})\s+(.+)/);
     if (hdrMatch) {
-      const level = Math.min(hdrMatch[1].length + 1, 4);
+      const level = Math.min(hdrMatch[1]!.length + 1, 4);
       const Tag = `h${level}` as keyof JSX.IntrinsicElements;
-      nodes.push(<Tag key={nk()}>{parseInline(hdrMatch[2], nk)}</Tag>);
-      i++;
+      nodes.push(<Tag key={nk()}>{parseInline(hdrMatch[2]!, nk)}</Tag>);
+      i += 1;
       continue;
     }
 
     if (line.startsWith('> ')) {
       const quoteLines: string[] = [];
-      while (i < lines.length && (lines[i].startsWith('> ') || lines[i] === '>')) {
-        quoteLines.push(lines[i].replace(/^> ?/, ''));
-        i++;
+      while (i < lines.length && ((lines[i] ?? '').startsWith('> ') || lines[i] === '>')) {
+        quoteLines.push((lines[i] ?? '').replace(/^> ?/, ''));
+        i += 1;
       }
       nodes.push(<blockquote key={nk()}>{renderMarkdown(quoteLines.join('\n'))}</blockquote>);
       continue;
     }
 
-    if (line.match(/^\s*[-*]\s+/)) {
+    if (/^\s*[-*]\s+/.test(line)) {
       const items: string[] = [];
-      while (i < lines.length && lines[i].match(/^\s*[-*]\s+/)) {
-        items.push(lines[i].replace(/^\s*[-*]\s+/, ''));
-        i++;
+      while (i < lines.length && /^\s*[-*]\s+/.test(lines[i] ?? '')) {
+        items.push((lines[i] ?? '').replace(/^\s*[-*]\s+/, ''));
+        i += 1;
       }
-      nodes.push(<ul key={nk()}>{items.map((item, idx) => <li key={idx}>{parseInline(item, nk)}</li>)}</ul>);
+      nodes.push(
+        <ul key={nk()}>
+          {items.map((item, idx) => (
+            <li key={idx}>{parseInline(item, nk)}</li>
+          ))}
+        </ul>,
+      );
       continue;
     }
 
-    if (line.match(/^\s*\d+\.\s+/)) {
+    if (/^\s*\d+\.\s+/.test(line)) {
       const items: string[] = [];
-      while (i < lines.length && lines[i].match(/^\s*\d+\.\s+/)) {
-        items.push(lines[i].replace(/^\s*\d+\.\s+/, ''));
-        i++;
+      while (i < lines.length && /^\s*\d+\.\s+/.test(lines[i] ?? '')) {
+        items.push((lines[i] ?? '').replace(/^\s*\d+\.\s+/, ''));
+        i += 1;
       }
-      nodes.push(<ol key={nk()}>{items.map((item, idx) => <li key={idx}>{parseInline(item, nk)}</li>)}</ol>);
+      nodes.push(
+        <ol key={nk()}>
+          {items.map((item, idx) => (
+            <li key={idx}>{parseInline(item, nk)}</li>
+          ))}
+        </ol>,
+      );
       continue;
     }
 
     if (line.trim() === '') {
-      i++;
+      i += 1;
       continue;
     }
 
     const paraLines: string[] = [];
     while (
       i < lines.length &&
-      lines[i].trim() !== '' &&
-      !lines[i].match(/^(`{3,})/) &&
-      !lines[i].match(/^#{1,4}\s/) &&
-      !lines[i].startsWith('> ') &&
-      !lines[i].match(/^\s*[-*]\s+/) &&
-      !lines[i].match(/^\s*\d+\.\s+/)
+      (lines[i] ?? '').trim() !== '' &&
+      !/^(`{3,})/.test(lines[i] ?? '') &&
+      !/^#{1,4}\s/.test(lines[i] ?? '') &&
+      !(lines[i] ?? '').startsWith('> ') &&
+      !/^\s*[-*]\s+/.test(lines[i] ?? '') &&
+      !/^\s*\d+\.\s+/.test(lines[i] ?? '')
     ) {
-      paraLines.push(lines[i]);
-      i++;
+      paraLines.push(lines[i] ?? '');
+      i += 1;
     }
     nodes.push(<p key={nk()}>{parseInline(paraLines.join('\n'), nk)}</p>);
   }
@@ -124,8 +140,7 @@ function parseInline(text: string, nk: () => string): ReactNode[] {
 
   while ((match = regex.exec(text)) !== null) {
     if (match.index > lastIndex) {
-      const plain = text.slice(lastIndex, match.index);
-      nodes.push(...handleLineBreaks(plain));
+      nodes.push(...handleLineBreaks(text.slice(lastIndex, match.index), nk));
     }
 
     const full = match[0];
@@ -152,19 +167,18 @@ function parseInline(text: string, nk: () => string): ReactNode[] {
   }
 
   if (lastIndex < text.length) {
-    nodes.push(...handleLineBreaks(text.slice(lastIndex)));
+    nodes.push(...handleLineBreaks(text.slice(lastIndex), nk));
   }
 
   return nodes;
 }
 
-function handleLineBreaks(text: string): ReactNode[] {
+function handleLineBreaks(text: string, nk: () => string): ReactNode[] {
   const parts = text.split('\n');
   const result: ReactNode[] = [];
-  let k = 0;
-  for (let j = 0; j < parts.length; j++) {
-    if (parts[j]) result.push(parts[j]);
-    if (j < parts.length - 1) result.push(<br key={`br${k++}`} />);
+  for (let i = 0; i < parts.length; i += 1) {
+    if (parts[i]) result.push(parts[i]);
+    if (i < parts.length - 1) result.push(<br key={nk()} />);
   }
   return result;
 }

@@ -13,6 +13,7 @@ import {
   type Model,
   type Provider,
   type QuickCompareAnnotation,
+  type QuickComparePreviewReason,
 } from '@taori/shared';
 import type { BuildServerArgs } from '../server.js';
 import type { QuickCompareRepo, CostsRepo, ModelsRepo, MemoriesRepo, RunEventsRepo } from '../db/repos/index.js';
@@ -37,6 +38,7 @@ import { executeDeepSeekToolLoop } from '../chat/deepseek-tools-loop.js';
 import { pickQuickCompareModels } from '../quick-compare/model-picker.js';
 import type { CapabilityBus } from '../bus/index.js';
 import { createChatModel, resolveThinkingConfig } from '../providers/chat-model.js';
+import { assertProviderRunnableForModel } from '../models/eligibility.js';
 
 function writeAnnotation(stream: PassThrough, annotations: QuickCompareAnnotation[]): void {
   writeAnnotationPart(stream, annotations);
@@ -141,6 +143,7 @@ async function runCompareParticipant(args: {
   model: Model;
   provider: Provider | null;
   apiKey: string | null;
+  previewReason: QuickComparePreviewReason | null;
   messages: Array<{ role: 'user' | 'assistant' | 'system'; content: string }>;
   sourceUserMessageId: string | null;
   bus: CapabilityBus | null | undefined;
@@ -179,6 +182,9 @@ async function runCompareParticipant(args: {
     output_id: args.outputId,
     index: args.index,
     model_id: args.model.id,
+    provider_id: args.provider?.id ?? args.model.provider_id ?? null,
+    execution_mode: args.provider && args.apiKey ? 'live' : 'local_preview',
+    preview_reason: args.provider && args.apiKey ? null : args.previewReason,
     tool_names: args.toolNames,
   }]);
 
@@ -309,6 +315,8 @@ async function runCompareParticipant(args: {
           cost_record_id: cost.id,
           first_token_ms: firstTokenMs,
           duration_ms: Date.now() - startedAt,
+          execution_mode: 'live',
+          preview_reason: null,
         }]);
         return { outputId: args.outputId, ok: true };
       }
@@ -437,6 +445,8 @@ async function runCompareParticipant(args: {
         cost_record_id: cost.id,
         first_token_ms: firstTokenMs,
         duration_ms: Date.now() - startedAt,
+        execution_mode: 'live',
+        preview_reason: null,
       }]);
       return { outputId: args.outputId, ok: true };
     }
@@ -464,6 +474,8 @@ async function runCompareParticipant(args: {
       cost_record_id: null,
       first_token_ms: 0,
       duration_ms: Date.now() - startedAt,
+      execution_mode: 'local_preview',
+      preview_reason: args.previewReason,
     }]);
     return { outputId: args.outputId, ok: true };
   } catch (e) {
@@ -549,6 +561,7 @@ export function registerQuickCompareRoute(app: FastifyInstance, deps: BuildServe
     });
     const selected = pickQuickCompareModels({
       models: modelsRepo.list(),
+      providers: providersRepo.list(),
       currentModelId: body.participant_configs?.[0]?.model_id ?? body.model_ids?.[0] ?? null,
       requestedModelIds: body.participant_configs?.map((item) => item.model_id) ?? body.model_ids,
     });
@@ -653,15 +666,20 @@ export function registerQuickCompareRoute(app: FastifyInstance, deps: BuildServe
       const providers = selectedModels.map((model) =>
         model.provider_id ? providersRepo.get(model.provider_id) : null,
       );
-      const apiKeys = await Promise.all(providers.map(async (provider) => {
-        if (!provider) return null;
-        if (provider.type === 'ollama') return 'ollama-local';
-        if (!provider.api_key_ref) return null;
+      const keyResults = await Promise.all(providers.map(async (provider): Promise<{
+        apiKey: string | null;
+        previewReason: QuickComparePreviewReason | null;
+      }> => {
+        if (!provider) return { apiKey: null, previewReason: 'provider_missing' };
+        if (!provider.enabled) return { apiKey: null, previewReason: 'provider_missing' };
+        if (provider.type === 'ollama') return { apiKey: 'ollama-local', previewReason: null };
+        if (!provider.api_key_ref) return { apiKey: null, previewReason: 'api_key_missing' };
         try {
-          return await deps.keystore.read(provider.api_key_ref);
+          const apiKey = await deps.keystore.read(provider.api_key_ref);
+          return { apiKey, previewReason: apiKey ? null : 'api_key_missing' };
         } catch (e) {
           req.log.warn({ err: e, provider_id: provider.id }, 'quick_compare.keystore_read_failed');
-          return null;
+          return { apiKey: null, previewReason: 'keystore_read_failed' };
         }
       }));
       const results = await Promise.all(outputs.map((output, index) =>
@@ -675,7 +693,8 @@ export function registerQuickCompareRoute(app: FastifyInstance, deps: BuildServe
           index,
           model: selectedModels[index]!,
           provider: providers[index] ?? null,
-          apiKey: apiKeys[index] ?? null,
+          apiKey: keyResults[index]?.apiKey ?? null,
+          previewReason: keyResults[index]?.previewReason ?? null,
           messages,
           sourceUserMessageId: sourceUserMessage.id,
           bus: deps.bus,
@@ -833,6 +852,12 @@ export function registerQuickCompareRoute(app: FastifyInstance, deps: BuildServe
     }
     const model = modelsRepo.get(target.model_id);
     if (!model) throw new TaoriError({ code: 'not_found', message: '模型不存在，无法重试。' });
+    const provider = model.provider_id ? providersRepo.get(model.provider_id) : null;
+    assertProviderRunnableForModel({
+      model,
+      provider,
+      actionLabel: 'Quick Compare 重试',
+    });
     const source = compare.source_user_message_id ? msgRepo.get(compare.source_user_message_id) : null;
     const prompt = source?.content ?? '请重新生成这个候选回答。';
     const estimatedCostUsd = estimateCompareCostUsd([model], prompt);
@@ -868,16 +893,20 @@ export function registerQuickCompareRoute(app: FastifyInstance, deps: BuildServe
       run_id: compare.run_id,
       model_ids: compare.model_ids,
     }]);
-    const provider = model.provider_id ? providersRepo.get(model.provider_id) : null;
     let apiKey: string | null = null;
+    let previewReason: QuickComparePreviewReason | null = provider ? null : 'provider_missing';
     if (provider?.type === 'ollama') {
       apiKey = 'ollama-local';
     } else if (provider?.api_key_ref) {
       try {
         apiKey = await deps.keystore.read(provider.api_key_ref);
+        previewReason = apiKey ? null : 'api_key_missing';
       } catch (e) {
         req.log.warn({ err: e, provider_id: provider.id }, 'quick_compare.retry_keystore_read_failed');
+        previewReason = 'keystore_read_failed';
       }
+    } else if (provider) {
+      previewReason = 'api_key_missing';
     }
     void (async () => {
       const result = await runCompareParticipant({
@@ -891,6 +920,7 @@ export function registerQuickCompareRoute(app: FastifyInstance, deps: BuildServe
         model,
         provider,
         apiKey,
+        previewReason,
         messages: [{ role: 'user', content: prompt }],
         sourceUserMessageId: compare.source_user_message_id,
         bus: deps.bus,

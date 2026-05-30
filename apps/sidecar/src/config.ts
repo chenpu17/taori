@@ -52,6 +52,10 @@ export interface SidecarTestHooksConfig {
   hermeticAiPlanner: boolean;
   forceClassification: boolean;
   forceImageResult: boolean;
+  /** True only under the automated test runner (vitest). Used to suppress
+   *  best-effort background LLM calls (e.g. auto-title) that would otherwise
+   *  fire extra requests against the test mock server. Dev + production = false. */
+  automatedTest: boolean;
 }
 
 export function defaultTestHooksConfig(): SidecarTestHooksConfig {
@@ -60,6 +64,7 @@ export function defaultTestHooksConfig(): SidecarTestHooksConfig {
     hermeticAiPlanner: false,
     forceClassification: false,
     forceImageResult: false,
+    automatedTest: false,
   };
 }
 
@@ -95,6 +100,9 @@ export function normalizeSidecarConfig(config: SidecarConfigInput): SidecarConfi
     testHooks: {
       ...defaultTestHooksConfig(),
       ...(config.testHooks ?? {}),
+      // Derived signal — every config (dev / prod / test) flows through here.
+      // vitest sets NODE_ENV=test + VITEST; dev and production never do.
+      automatedTest: process.env.NODE_ENV === 'test' || process.env.VITEST != null,
     },
   };
 }

@@ -9,6 +9,7 @@
 - `src/schemas.ts`：Provider、Model、MCP Server、Backup 等 REST 合同。
 - `src/tools.ts`：Capability Bus 工具合同。
 - `src/roundtable.ts`：圆桌数据模型与 SSE annotation。
+- `src/quick-compare.ts`：Quick Compare 数据模型与 Data Stream annotation。
 - `src/ids.ts`：跨模块 ID 前缀。
 
 ## 拥有状态
@@ -34,3 +35,4 @@
 - `ResearchSessionSchema` 新增 `plan_origin: 'pending' | 'ai' | 'fallback'`；当前版本正常只会写入 `pending / ai`，`fallback` 仅用于读取历史会话，避免旧数据被误判成 AI 生成计划。
 - `ProviderTestRequestSchema` 扩展为 union：既支持临时连通性测试 `{ type, base_url, api_key? }`，也支持对已保存 Provider 的直接测试 `{ provider_id }`。
 - `ChatRequestSchema.messages` 新增上限：单次请求最多 200 条消息，单条 `content` 最多 200KB，防止超长历史在 Sidecar 预算估算和上游组装阶段造成不必要的内存放大。
+- `QuickCompareAnnotationSchema` 的 `qc.participant_start` / `qc.participant_done` 新增可选 `execution_mode`（`live` / `local_preview`）与 `preview_reason`，用于把“未联网的本地预览”明确暴露给 Renderer，避免 fallback 被误认为真实 Provider 调用。

@@ -5,6 +5,7 @@ import {
 } from '@taori/shared';
 import type { CapabilityBus } from '../bus/index.js';
 import {
+  type ConversationsRepo,
   type CostsRepo,
   type FilesRepo,
   type MemoriesRepo,
@@ -18,6 +19,7 @@ import {
 } from '../db/repos/index.js';
 import type { KeyStore } from '../keystore.js';
 import { scheduleMemoryExtraction } from '../memory/extraction.js';
+import { scheduleAutoTitle } from './auto-title.js';
 import { applyContextWindow, type ContextWindowStats } from './context-window.js';
 import { getVisibleToolNames } from './upstream-tools.js';
 import type { StreamObserver } from './protocol.js';
@@ -300,6 +302,8 @@ export function finalizeOnEnd(
   memoriesRepo?: MemoriesRepo,
   structuredMemoriesRepo?: StructuredMemoriesRepo,
   keystore?: KeyStore,
+  convRepo?: ConversationsRepo,
+  autoTitleHermetic?: boolean,
 ): { finalize: () => void; observer: StreamObserver } {
   let collected = '';
   let usage: {
@@ -484,6 +488,29 @@ export function finalizeOnEnd(
         keystore,
         log: ctx.log,
         runId: ctx.runId,
+      });
+    }
+    if (
+      status === 'complete' &&
+      convRepo &&
+      providersRepo &&
+      memoriesRepo &&
+      keystore
+    ) {
+      // Optional LLM title upgrade. The synchronous truncation remains the
+      // default title; runAutoTitle requires auto_title_llm_enabled === 'true'
+      // so hidden background provider calls stay off by default.
+      scheduleAutoTitle({
+        conversationId: ctx.conversationId,
+        userText: ctx.userText,
+        assistantText: persistedContent,
+        convRepo,
+        modelsRepo,
+        providersRepo,
+        memoriesRepo,
+        keystore,
+        hermetic: autoTitleHermetic ?? false,
+        log: ctx.log,
       });
     }
   };

@@ -50,6 +50,7 @@ import { throwIfBudgetBlockedOrNeedsConfirmation } from '../cost/budget-guard.js
 import { continueRun } from '../services/chat/continue-run.js';
 import { recoverRun } from '../services/chat/recover-run.js';
 import { handleCapabilityRoute } from '../services/chat/handle-capability-route.js';
+import { assertProviderRunnableForModel } from '../models/eligibility.js';
 
 const FORCE_CLASSIFICATION_HEADER = 'x-test-force-classification';
 const VALID_FORCED_CLASSIFICATIONS = new Set([
@@ -101,6 +102,13 @@ export function registerChatRoute(
     const body = parsed.data;
     const model = modelsRepo.get(body.model_id);
     const provider = model?.provider_id ? providersRepo.get(model.provider_id) : null;
+    if (model) {
+      assertProviderRunnableForModel({
+        model,
+        provider,
+        actionLabel: '聊天调用',
+      });
+    }
     const {
       conversation,
       attachments,
@@ -206,6 +214,8 @@ export function registerChatRoute(
         providersRepo,
         memoriesRepo,
         structuredMemoriesRepo,
+        convRepo,
+        hermetic: deps.config.testHooks.hermeticWeb || deps.config.testHooks.automatedTest,
         setForceFinalize: dataStream.setForceFinalize,
         keyReadFailedLogName: 'chat.keystore_read_failed',
         unhandledLogName: 'chat.upstream_unhandled',
@@ -268,6 +278,7 @@ export function registerChatRoute(
     const messageStatus = normalizeResumeMessageStatus(assistant?.status ?? null);
     const modelId = findRunModelId(events) ?? assistant?.model_id ?? null;
     const model = modelId ? modelsRepo.get(modelId) : null;
+    const provider = model?.provider_id ? providersRepo.get(model.provider_id) : null;
 
     let canContinue = false;
     let recommendedAction: 'continue' | 'retry' | 'switch_model' | 'none' = 'none';
@@ -282,6 +293,9 @@ export function registerChatRoute(
       } else if (!model.enabled || (model.disabled_until != null && model.disabled_until > Date.now())) {
         recommendedAction = 'switch_model';
         reason = 'model_disabled';
+      } else if (!provider?.enabled) {
+        recommendedAction = 'switch_model';
+        reason = 'provider_disabled';
       } else {
         canContinue = true;
         recommendedAction = 'continue';
@@ -289,8 +303,19 @@ export function registerChatRoute(
     } else if (messageStatus === 'streaming') {
       reason = 'still_streaming';
     } else if (messageStatus === 'failed') {
-      recommendedAction = model ? 'retry' : 'switch_model';
-      reason = 'message_failed';
+      if (!model) {
+        recommendedAction = 'switch_model';
+        reason = 'model_unavailable';
+      } else if (!model.enabled || (model.disabled_until != null && model.disabled_until > Date.now())) {
+        recommendedAction = 'switch_model';
+        reason = 'model_disabled';
+      } else if (!provider?.enabled) {
+        recommendedAction = 'switch_model';
+        reason = 'provider_disabled';
+      } else {
+        recommendedAction = 'retry';
+        reason = 'message_failed';
+      }
     } else {
       reason = 'not_incomplete';
     }

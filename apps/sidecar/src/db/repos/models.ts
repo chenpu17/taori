@@ -387,6 +387,22 @@ export class ModelsRepo {
       .run();
   }
 
+  resetHealth(modelId: string): Model | null {
+    const next = this.db
+      .update(models)
+      .set({
+        failure_count_24h: 0,
+        last_failure_at: null,
+        demoted: false,
+        disabled_until: null,
+        updated_at: Date.now(),
+      })
+      .where(eq(models.id, modelId))
+      .returning()
+      .get();
+    return next ? toModel(next) : null;
+  }
+
   /**
    * Promote a model to be THE default for a capability. Demotes any other
    * model currently flagged as default for that same capability. Idempotent.

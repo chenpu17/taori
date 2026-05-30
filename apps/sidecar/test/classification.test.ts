@@ -150,6 +150,28 @@ describe('ModelsRepo demote/disable (spec §7.5.2)', () => {
     expect(m.demoted).toBe(true);
   });
 
+  it('resetHealth clears strikes, demotion and temporary disable', () => {
+    const resetModel = models.create({
+      provider_id: provider.id,
+      model_name: 'm/reset',
+      capability: 'embedding',
+      display_name: 'Reset',
+    });
+    models.recordFailure(resetModel.id, 'quota');
+    models.recordFailure(resetModel.id, 'quota');
+    models.recordFailure(resetModel.id, 'quota');
+    models.recordFailure(resetModel.id, 'quota');
+    models.recordFailure(resetModel.id, 'quota');
+    let m = models.get(resetModel.id)!;
+    expect(m.demoted).toBe(true);
+    expect(m.disabled_until).toBeGreaterThan(Date.now());
+
+    m = models.resetHealth(resetModel.id)!;
+    expect(m.failure_count_24h).toBe(0);
+    expect(m.demoted).toBe(false);
+    expect(m.disabled_until).toBeNull();
+  });
+
   it('defaultFor skips demoted models', () => {
     models.update(model.id, { is_default_for: 'chat' });
     expect(models.defaultFor('chat')).toBeNull();

@@ -91,6 +91,7 @@ Desktop 侧存在两个本地 HTTP 服务，不属于普通业务 API：
 | `POST` | `/v1/models` | 创建模型 |
 | `PATCH` | `/v1/models/:id` | 更新模型配置、价格、能力、thinking 等 |
 | `POST` | `/v1/models/:id/default` | 设置某能力的默认模型 |
+| `POST` | `/v1/models/:id/reset-health` | 清除自动降级、失败计数与临时停用；不改变手动启停 |
 | `DELETE` | `/v1/models/:id` | 删除模型 |
 | `POST` | `/v1/models/reorder` | 重排某能力的 fallback 顺序 |
 | `POST` | `/v1/models/:id/test` | 对单模型执行可用性探测 |
@@ -100,7 +101,7 @@ Desktop 侧存在两个本地 HTTP 服务，不属于普通业务 API：
 
 | Method | Path | 说明 |
 |---|---|---|
-| `GET` | `/v1/conversations` | 列出会话；支持 `q` 搜索 |
+| `GET` | `/v1/conversations` | 列出会话；支持 `q` 搜索；默认隐藏 0-message 孤儿会话，`include_empty=1` 可显式包含 |
 | `GET` | `/v1/conversations/:id/profile` | 会话上下文画像：当前模型、Persona、工具、附件、成本 |
 | `GET` | `/v1/conversations/:id/messages` | 列出消息；返回附件元信息和历史 cost annotations，不返回原始 base64 |
 | `GET` | `/v1/conversations/:id/run-events` | 查询会话 run event 时间线 |

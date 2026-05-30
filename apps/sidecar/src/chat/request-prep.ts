@@ -14,6 +14,7 @@ import { MessagesRepo as TxMessagesRepo } from '../db/repos/index.js';
 import { detectImageCommand, detectImageIntent } from '../intent.js';
 import type { BoundPersona } from './run-actions.js';
 import { persistSearchableAttachments } from './attachment-persistence.js';
+import { computeAutoTitle } from './auto-title.js';
 
 type ChatAttachment = NonNullable<ChatRequest['attachments']>[number];
 type ChatMessage = ChatRequest['messages'][number];
@@ -191,8 +192,7 @@ function applyAutoTitle(
   lastUserMsg: ChatMessage | undefined,
 ): void {
   if (conversation.title || !lastUserMsg?.content) return;
-  const raw = lastUserMsg.content.replace(/\s+/g, ' ').trim();
-  const title = raw.length > 30 ? raw.slice(0, 30) + '…' : raw;
+  const title = computeAutoTitle(lastUserMsg.content);
   if (title) convRepo.rename(conversation.id, title);
 }
 

@@ -1,4 +1,4 @@
-import type { Model } from '@taori/shared';
+import type { Model, Provider } from '@taori/shared';
 import { TaoriError } from '@taori/shared';
 
 export type QuickCompareCandidateRole = 'current' | 'cheap' | 'quality' | 'fallback';
@@ -11,17 +11,25 @@ export interface QuickCompareModelCandidate {
 
 export interface PickQuickCompareModelsArgs {
   models: Model[];
+  providers?: Provider[];
   currentModelId?: string | null;
   requestedModelIds?: string[];
   now?: number;
 }
 
-function isEligibleChatModel(model: Model, now: number): boolean {
+function isEligibleChatModel(
+  model: Model,
+  providerById: Map<string, Provider>,
+  enforceProviderState: boolean,
+  now: number,
+): boolean {
+  const provider = model.provider_id ? providerById.get(model.provider_id) : null;
   return (
     (model.capability === 'chat' || model.capability === 'multimodal') &&
     model.enabled &&
     !model.demoted &&
     Boolean(model.provider_id) &&
+    (!enforceProviderState || provider?.enabled === true) &&
     (model.disabled_until == null || model.disabled_until < now)
   );
 }
@@ -66,23 +74,39 @@ function modelLabel(model: Model | undefined, fallbackId: string): string {
   return model?.alias ?? model?.display_name ?? model?.model_name ?? fallbackId;
 }
 
-function ineligibleModelMessage(model: Model | undefined, id: string, currentModelId?: string | null): string {
-  if (id === currentModelId) {
-    return '当前会话模型暂不可用于 Quick Compare。请切换到启用中的聊天或多模态模型后重试。';
-  }
+function ineligibleModelMessage(
+  model: Model | undefined,
+  id: string,
+  providerById: Map<string, Provider>,
+  enforceProviderState: boolean,
+  currentModelId?: string | null,
+): string {
   if (!model) {
     return '所选模型当前不可用于 Quick Compare。请重新选择启用中的聊天或多模态模型。';
+  }
+  const provider = model.provider_id ? providerById.get(model.provider_id) : null;
+  if (enforceProviderState && !provider) {
+    return `模型「${modelLabel(model, id)}」所属服务商不存在，当前不可用于 Quick Compare。`;
+  }
+  if (provider && !provider.enabled) {
+    return `模型「${modelLabel(model, id)}」所属服务商「${provider.name}」已停用，当前不可用于 Quick Compare。`;
+  }
+  if (id === currentModelId) {
+    return '当前会话模型暂不可用于 Quick Compare。请切换到启用中的聊天或多模态模型后重试。';
   }
   return `模型「${modelLabel(model, id)}」当前不可用于 Quick Compare。请确认它已启用、未降级且未被临时停用。`;
 }
 
 export function pickQuickCompareModels({
   models,
+  providers,
   currentModelId,
   requestedModelIds,
   now = Date.now(),
 }: PickQuickCompareModelsArgs): QuickCompareModelCandidate[] {
-  const eligible = models.filter((model) => isEligibleChatModel(model, now));
+  const providerById = new Map((providers ?? []).map((provider) => [provider.id, provider]));
+  const enforceProviderState = providers != null;
+  const eligible = models.filter((model) => isEligibleChatModel(model, providerById, enforceProviderState, now));
   const byId = new Map(eligible.map((model) => [model.id, model]));
   const allById = new Map(models.map((model) => [model.id, model]));
 
@@ -94,7 +118,7 @@ export function pickQuickCompareModels({
     return ids.map((id, index) => {
       const model = byId.get(id);
       if (!model) {
-        throw validationError(ineligibleModelMessage(allById.get(id), id, currentModelId));
+        throw validationError(ineligibleModelMessage(allById.get(id), id, providerById, enforceProviderState, currentModelId));
       }
       return {
         model,

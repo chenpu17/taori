@@ -7,6 +7,7 @@
  *   PATCH  /v1/models/:id              → Model
  *   DELETE /v1/models/:id              → 204
  *   POST   /v1/models/:id/default      → Model    (promote to default for capability)
+ *   POST   /v1/models/:id/reset-health → Model    (clear auto demote/temporary disable)
  *
  * The "default" endpoint is split out so the Renderer can flip the chat /
  * vision default without having to know the implementation detail
@@ -333,6 +334,20 @@ export function registerModelsRoute(
         });
       }
       const updated = repo.setDefaultFor(model.id, body.data.capability);
+      return updated;
+    },
+  );
+
+  app.post<{ Params: { id: string } }>(
+    '/v1/models/:id/reset-health',
+    async (req) => {
+      const updated = repo.resetHealth(req.params.id);
+      if (!updated) {
+        throw new TaoriError({
+          code: 'not_found',
+          message: `Model ${req.params.id} not found`,
+        });
+      }
       return updated;
     },
   );

@@ -310,6 +310,12 @@
 }
 ```
 
+### `POST /v1/models/:id/reset-health`
+
+清除模型自动健康保护状态：`failure_count_24h=0`、`demoted=false`、`disabled_until=null`，并清空内部最近失败时间。该端点用于用户确认配置或额度问题已修复后手动恢复候选资格；不改变 `enabled` 手动开关。
+
+**Response 200:** 返回更新后的 Model 裸对象（同 M1 `/v1/models` 实际返回风格），不额外暴露内部 `last_failure_at` 字段。
+
 ---
 
 ## 5. `/v1/conversations`

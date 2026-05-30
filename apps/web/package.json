@@ -11,10 +11,8 @@
     "test:e2e": "playwright test"
   },
   "dependencies": {
-    "@ai-sdk/react": "1.0.7",
     "@taori/shared": "workspace:*",
     "@tauri-apps/api": "2.1.1",
-    "ai": "4.0.27",
     "dompurify": "^3.4.1",
     "katex": "^0.16.45",
     "marked": "^18.0.2",

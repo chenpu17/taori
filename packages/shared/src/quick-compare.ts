@@ -23,6 +23,19 @@ export const QuickCompareOutputStatusSchema = z.enum([
 ]);
 export type QuickCompareOutputStatus = z.infer<typeof QuickCompareOutputStatusSchema>;
 
+export const QuickCompareExecutionModeSchema = z.enum([
+  'live',
+  'local_preview',
+]);
+export type QuickCompareExecutionMode = z.infer<typeof QuickCompareExecutionModeSchema>;
+
+export const QuickComparePreviewReasonSchema = z.enum([
+  'provider_missing',
+  'api_key_missing',
+  'keystore_read_failed',
+]);
+export type QuickComparePreviewReason = z.infer<typeof QuickComparePreviewReasonSchema>;
+
 export const QuickCompareRequestSchema = z.object({
   conversation_id: z.string().optional(),
   messages: z.array(ChatMessageSchema).min(1),
@@ -84,6 +97,9 @@ export const QuickCompareAnnotationSchema = z.discriminatedUnion('type', [
     output_id: z.string(),
     index: z.number().int().nonnegative(),
     model_id: z.string(),
+    provider_id: z.string().nullable().optional(),
+    execution_mode: QuickCompareExecutionModeSchema.optional(),
+    preview_reason: QuickComparePreviewReasonSchema.nullable().optional(),
     tool_names: z.array(z.string()).optional(),
   }),
   z.object({
@@ -102,6 +118,8 @@ export const QuickCompareAnnotationSchema = z.discriminatedUnion('type', [
     cost_record_id: z.string().nullable(),
     first_token_ms: z.number().int().nonnegative().nullable().optional(),
     duration_ms: z.number().int().nonnegative().nullable().optional(),
+    execution_mode: QuickCompareExecutionModeSchema.optional(),
+    preview_reason: QuickComparePreviewReasonSchema.nullable().optional(),
   }),
   z.object({
     type: z.literal('qc.participant_failed'),

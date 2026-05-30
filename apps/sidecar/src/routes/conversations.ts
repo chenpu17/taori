@@ -54,8 +54,13 @@ export function registerConversationsRoute(
   const personasRepo = repos.personas;
   const runEventsRepo = repos.runEvents;
 
-  app.get<{ Querystring: { q?: string } }>('/v1/conversations', async (req) => {
-    return { conversations: convRepo.list({ q: req.query.q }) };
+  app.get<{ Querystring: { q?: string; include_empty?: string } }>('/v1/conversations', async (req) => {
+    return {
+      conversations: convRepo.list({
+        q: req.query.q,
+        includeEmpty: req.query.include_empty === '1',
+      }),
+    };
   });
 
   app.get<{ Params: { id: string } }>(
@@ -177,6 +182,8 @@ export function registerConversationsRoute(
               cache_input_tokens: costRecord.cache_input_tokens ?? null,
               output_tokens: costRecord.output_tokens ?? null,
               actual_usd: costRecord.actual_cost_usd ?? null,
+              first_token_ms: costRecord.first_token_ms ?? null,
+              duration_ms: costRecord.duration_ms ?? null,
             }]
           : [];
         return {

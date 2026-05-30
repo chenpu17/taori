@@ -66,10 +66,13 @@ describe('C4 — sidebar pin / tag / search', () => {
 
   it('PATCH conversations supports pinned and tags; pinned floats to top', async () => {
     const a = convRepo.create({ title: 'alpha' });
+    msgRepo.insert({ conversation_id: a.id, role: 'user', content: 'a', model_id: null, attachments: null });
     await sleep(2);
     const b = convRepo.create({ title: 'beta' });
+    msgRepo.insert({ conversation_id: b.id, role: 'user', content: 'b', model_id: null, attachments: null });
     await sleep(2);
     const c = convRepo.create({ title: 'gamma' });
+    msgRepo.insert({ conversation_id: c.id, role: 'user', content: 'c', model_id: null, attachments: null });
 
     // Pin the OLDEST one.
     const r = await app.inject({
@@ -106,6 +109,7 @@ describe('C4 — sidebar pin / tag / search', () => {
 
   it('GET /v1/conversations?q= matches title and message content', async () => {
     const a = convRepo.create({ title: 'Tokyo trip plan' });
+    msgRepo.insert({ conversation_id: a.id, role: 'user', content: 'pack light', model_id: null, attachments: null });
     await sleep(2);
     const b = convRepo.create({ title: 'random' });
     msgRepo.insert({
@@ -145,5 +149,40 @@ describe('C4 — sidebar pin / tag / search', () => {
 
     // c is unused but we want to ensure unrelated conv exists for ranking.
     expect(c.id).toBeTruthy();
+  });
+
+  it('hides empty (0-message) conversations from the list and search', async () => {
+    const withMsg = convRepo.create({ title: 'has message' });
+    msgRepo.insert({ conversation_id: withMsg.id, role: 'user', content: 'hello there', model_id: null, attachments: null });
+    const empty = convRepo.create({ title: 'empty orphan' });
+
+    const list = await app.inject({ method: 'GET', url: '/v1/conversations', headers: auth });
+    const ids = (JSON.parse(list.payload).conversations as Array<{ id: string }>).map((x) => x.id);
+    expect(ids).toContain(withMsg.id);
+    expect(ids).not.toContain(empty.id);
+
+    // A title-only match on an empty orphan is also hidden.
+    const search = await app.inject({ method: 'GET', url: '/v1/conversations?q=orphan', headers: auth });
+    const searchIds = (JSON.parse(search.payload).conversations as Array<{ id: string }>).map((x) => x.id);
+    expect(searchIds).not.toContain(empty.id);
+  });
+
+  it('can explicitly include empty conversations for diagnostics', async () => {
+    const withMsg = convRepo.create({ title: 'has message' });
+    msgRepo.insert({ conversation_id: withMsg.id, role: 'user', content: 'hello there', model_id: null, attachments: null });
+    const empty = convRepo.create({ title: 'empty orphan' });
+
+    const list = await app.inject({ method: 'GET', url: '/v1/conversations?include_empty=1', headers: auth });
+    const ids = (JSON.parse(list.payload).conversations as Array<{ id: string }>).map((x) => x.id);
+    expect(ids).toContain(withMsg.id);
+    expect(ids).toContain(empty.id);
+
+    const search = await app.inject({
+      method: 'GET',
+      url: '/v1/conversations?q=orphan&include_empty=1',
+      headers: auth,
+    });
+    const searchIds = (JSON.parse(search.payload).conversations as Array<{ id: string }>).map((x) => x.id);
+    expect(searchIds).toContain(empty.id);
   });
 });

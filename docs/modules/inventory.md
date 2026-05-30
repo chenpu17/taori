@@ -16,7 +16,7 @@ Scope: Taori 全系统
 | 模块 | 一句话定位 | 层级 | 是否独立部署 | 主要接口 | 主要依赖 | 拥有状态 | 邻接模块 | 合同文档 |
 |---|---|---|---|---|---|---|---|---|
 | `apps/desktop` | Tauri 外壳，承担 OS 能力与 Sidecar 进程托管 | entry | 是（最终安装包入口） | Tauri 命令（`sidecar_endpoint` / `import_clipboard`）；托盘 / 全局快捷键；监听 OS 事件 | `apps/sidecar`（spawn）；OS Keychain；OS 文件系统；系统剪贴板 | Sidecar 进程句柄；Bearer Token（内存）；窗口状态；托盘与快捷键注册；剪贴板导入事件 | `apps/sidecar`（启动/守护）；`apps/web`（命令通道） | `apps/desktop/MODULE.md` |
-| `apps/web` | React Renderer，UI 与流式渲染 | entry | 否（嵌在 Tauri 中） | 用户交互；通过 `invoke` 取 Sidecar endpoint | `apps/desktop`（Tauri 命令）；`apps/sidecar`（HTTP+SSE）；`@taori/shared` | UI 状态（Zustand）；会话临时缓存 | `apps/desktop`；`apps/sidecar` | `apps/web/MODULE.md` |
+| `apps/web` | Renderer 工作台，承载多模型对话、成本透明、模型/工具/研究管理 UI | entry | 否（嵌在 Tauri 中） | Sidecar HTTP REST + Data Stream Protocol；Tauri `sidecar_endpoint` | `apps/desktop`（Tauri 命令）、`apps/sidecar`（HTTP+SSE）、`@taori/shared` | UI 临时状态：当前视图、选中会话、流式缓冲、表单草稿、只读列表缓存 | `apps/desktop`；`apps/sidecar` | `apps/web/MODULE.md` |
 | `apps/sidecar` | 业务编排进程，LLM 调用 / 圆桌 / 数据持久化 | orchestrator | 是（独立 Node 进程，崩可重启） | HTTP REST + SSE on 可配置 `host:port`（desktop 默认 `127.0.0.1`；standalone npm 可显式设 `0.0.0.0`，详见架构 03 与提案 31） | LLM Providers（远程）；SQLite（本地文件）；`@taori/shared` | 全部业务状态：会话、消息、圆桌实例、成本记录、记忆、模型异常计数 | `apps/web`（HTTP 服务方）；`apps/desktop`（被托管） | `apps/sidecar/MODULE.md` |
 | `packages/shared` | 前后端共享类型与 Zod schema | infra | 否（library） | 导出类型、schema、常量 | 无运行时依赖 | 无 | `apps/web`；`apps/sidecar` | `packages/shared/MODULE.md` |
 | `apps/sidecar/capability-bus` 🔮 | Sidecar 内子模块：工具注册/调度/计费/兜底，承接 Builtin 与 MCP；M2 引入 | orchestrator-internal | 否（Sidecar 内） | `register/list/getToolsFor/invoke` | Vercel AI SDK；MCP SDK（M3） | 工具注册表；MCP 子进程句柄；健康状态 | `apps/sidecar`（宿主）；`packages/shared`（Tool schema） | M2 建立合同（设计见 [架构 09](../architecture/09-agent-and-tools.md)） |
@@ -41,6 +41,66 @@ Scope: Taori 全系统
 
 ## 5. 最近变化
 
+- 2026-05-30 [Sidecar · 服务商停用后端门禁与自动标题成本收敛]：
+  - `apps/sidecar`：Provider `enabled=false` 成为真实模型调用后端硬门禁，覆盖 `/v1/chat`、continue/recover、Quick Compare 自动选择 / 显式选择 / 重试；停用服务商下的模型不会再被旧前端状态、恢复路径或直接 API 调用绕过。
+  - `apps/sidecar`：LLM 自动标题默认关闭，首轮标题默认保持本地截断；只有 `memories` 有效值 `auto_title_llm_enabled === 'true'` 时才会尝试 best-effort LLM 标题升级，且跳过已停用服务商。
+  - `apps/sidecar`：`GET /v1/conversations` 继续默认隐藏 0-message 孤儿会话以保持侧栏清爽，但新增 `include_empty=1` 用于诊断 / 管理；`ConversationsRepo.list()` 恢复默认返回真实非归档会话，避免 UI 过滤策略污染内部仓储语义。
+  - `apps/web` / `apps/desktop` / `packages/shared`：无共享 schema、依赖方向或部署语义变化；本次为 Sidecar 后端运行语义收紧。
+- 2026-05-29 [模型管理 · 健康状态恢复与设置快入口]：
+  - `apps/sidecar`：新增 `POST /v1/models/:id/reset-health`，只清除模型自动健康保护字段（失败计数、最近失败时间、降级、临时停用），不改变用户手动 `enabled` 开关。
+  - `apps/web`：设置 · 模型行补充可用 / 停用 / 降级 / 临时停用 / 连续失败状态 chip，并在模型菜单提供「恢复可用状态」；侧栏左下角设置入口从单图标增强为带文字快速按钮。
+  - `apps/desktop` / `packages/shared`：无部署语义、依赖方向或共享 schema 变化；本次为 Sidecar REST additive contract + Renderer 消费。
+- 2026-05-29 [聊天流式感知与性能元信息]：
+  - `apps/web`：ChatView 在 assistant 生成中显示“等待首字 / 正在流式输出”，完成后在消息元信息展示 TTFT、总耗时与 TPOT；`chatStream` 保留 cost annotation 的计时字段，`chat-flow.spec.ts` 覆盖实时流和历史恢复后的展示。
+  - `apps/sidecar`：`GET /v1/conversations/:id/messages` 的历史消息 cost annotation 补齐 `first_token_ms` / `duration_ms`，与 `/v1/chat` 实时流字段保持一致；复用已有 `cost_records` 字段，不改变数据库结构。
+  - `apps/desktop` / `packages/shared`：无部署语义、状态归属或共享 schema 变化。
+- 2026-05-29 [Quick Compare · 本地预览透明化]：
+  - `packages/shared`：Quick Compare 流式 annotation 扩展可选 `execution_mode` 与 `preview_reason`，用于区分真实上游调用和未联网本地预览。
+  - `apps/sidecar`：Quick Compare 在缺少 Provider、缺少 API Key 或 Keychain 读取失败时继续保留本地预览 fallback，但会把原因写入流事件；真实调用写入 `execution_mode='live'`。数据库结构与 REST 路由不变。
+  - `apps/web`：能力中心快速对比从模型 checkbox 墙改为“问题输入 + 选择模型弹窗（搜索 / 最多 3 个 / 快捷组合）+ 2-3 个模型槽位 + 联网/工具开关 + 结果摘要”；结果卡显示“本地预览 / 未联网调用模型”及原因，避免用户把 fallback 当作华为云等 Provider 的真实联网输出。
+- 2026-05-29 [Web UI · Composer 模型切换收敛]：
+  - `apps/web`：Composer / 空状态顶部的模型按钮从“跳转设置页”改为轻量模型选择器，支持搜索模型或服务商、显示 Provider 来源，选择后只影响下一条消息使用的模型；设置页继续负责模型管理、默认值和服务商配置。
+  - `apps/web/e2e`：`chat-flow.spec.ts` 增加回归，断言 Composer 模型选择器不会打开设置页，且发送 `/v1/chat` 时使用刚选择的 `model_id`。
+  - `apps/sidecar` / `apps/desktop` / `packages/shared`：无公共接口、部署语义、依赖方向或共享 schema 变化。
+- 2026-05-29 [Web UI · 模型 / 服务商管理体验收敛]：
+  - `apps/web`：设置中心模型管理从“先建 Provider 再加 Model”改为以「添加模型」为主路径，新增统一 `AddModelWizard`，支持已有服务商、预设服务商（OpenRouter、DeepSeek、火山方舟、通义、Kimi、华为云、本地 Ollama、LM Studio）与自定义 OpenAI 兼容端口；自动发现失败时退回手动 model_name。
+  - `apps/web`：Provider tab 重命名为「服务商」，服务商卡片瘦身为发现模型 / 测试连接 / 更多菜单；模型列表改为按服务商分组的卡片行，默认设置与探测保留直接入口，重命名 / 排序 / 启停 / 删除收纳进菜单；推荐模型入口合并为单一下拉。
+  - `apps/web/e2e`：更新 `model-management.spec.ts`、`settings-center.spec.ts`、`webui-smoke.spec.ts` 与视觉旅程选择器以匹配新 IA；定向验证覆盖 wizard happy path、Provider 编辑、Key 状态、主题 / 密度偏好。
+  - `apps/sidecar` / `apps/desktop` / `packages/shared`：无公共接口、部署语义、依赖方向或共享 schema 变化；本次只重组 Renderer 交互并继续消费既有 Provider / Model API。
+- 2026-05-28 [Web UI · P1 能力中心与多旅程 E2E]：
+  - `apps/web`：新增 `FeatureHub` 能力中心，并在 `Sidebar` / `App` 中接入 `features` 视图，恢复 Quick Compare、多模型圆桌、深度研究、文件 / 本地上下文、Tools / MCP 的前端入口。
+  - `apps/web`：`api.ts` 增加 P1 typed helper 与 data-stream helper，覆盖 `/v1/quick-compare*`、`/v1/roundtable*`、`/v1/research/sessions*`、`/v1/files*`、`/v1/tools*`、`/v1/mcp/servers*`；仅消费 Sidecar 既有接口合同。
+  - `apps/web/e2e`：新增 `p1-feature-hub.spec.ts`，覆盖 Quick Compare 对比 / 重试 / 采纳、圆桌创建 / 轮次 / 总结 / 回填 / 导出、研究生命周期、附件文件搜索、工具调用 / 会话覆盖、MCP 添加 / 运行时 / 刷新 / 删除，并生成能力中心桌面与移动端视觉截图。
+  - `apps/sidecar` / `apps/desktop` / `packages/shared`：无公共接口、部署语义、依赖方向或共享 schema 变化。
+- 2026-05-28 [Web UI · P0 后端能力补齐与 E2E]：
+  - `apps/web`：对照当前 Sidecar 接口补齐 P0 对话能力：会话重命名 / 置顶 / 归档 / 删除 / Markdown 导出，用户消息编辑截断并重跑，按消息分支，附件发送，run timeline / tool trace 展示，失败或中断 assistant 消息的 continue / retry / compact recovery。
+  - `apps/web`：设置中心补齐模型健康刷新、模型探测、默认 / 快速 / 低成本推荐、fallback 顺序调整、Provider Key 状态检查与撤销；中文 IME composition 期间 Enter 只提交候选字，不触发发送。
+  - `apps/web/e2e`：新增 `p0-backend-capabilities.spec.ts` 覆盖多轮对话、编辑重跑、分支、附件、导出、恢复按钮和设置中心 P0 操作；`visual-verify.spec.ts` 覆盖 capability route 与 tool trace 截图。
+  - `apps/sidecar`：修复消息编辑截断的内部仓储排序 bug，改用 SQLite `rowid` 判断目标消息之后的同会话记录，避免同毫秒插入时 assistant 漏删；HTTP 公共接口不变。
+  - `apps/desktop` / `packages/shared`：无代码变化；本次不改变部署语义、依赖方向或共享 schema。
+- 2026-05-28 [Web UI · 模型管理生产可用]：
+  - `apps/web`：模型管理升级到「生产可用」级 — empty state 在没有可用聊天模型时显示强调色 CTA pill，直达 Provider 设置；Settings · 模型 在没 Provider / chat 模型时换成左侧强调色 + 实心 action 按钮的 CTA banner（替换原来弱对比的 status banner）
+  - `apps/web`：Provider 设置面板新增智能默认（按 type 自动填 base_url + 推荐名称，不覆盖用户手改的值）、Provider 编辑 dialog（改名 / 改 base_url / 重写 Keychain Key 而不删除 Provider）、按 Provider 触发的「同步价格」（`POST /v1/catalog/sync` 单 Provider）
+  - `apps/web`：「发现模型」改为 modal 多选 dialog —— 列出全部 `DiscoveredModel`，标记 `recommended.chat`，按名称过滤 + 全选 / 清空，自动跳过已存在 model_name，批量 `POST /v1/models` 复制完整 pricing / context_length / supports_vision / supports_tools；保留「手动添加模型」表单给 self-host / Ollama 等 model_name 已知场景
+  - `apps/web`：Settings · 模型 表内支持别名重命名（`重命名` 按钮 + 内嵌 input + Enter 提交 / Esc 取消），价格 / 视觉 / 工具能力以 chip 直接展示在卡和表上
+  - `apps/web/e2e`：新增 `model-management.spec.ts` 跑完整 happy path（empty CTA → 添加 Ollama Provider → 手动添加模型 → 设为默认 → 别名重命名 → 删除清理）；`visual-verify.spec.ts` 扩到 13 张涵盖 CTA、modal dialog、暗色 / 密度切换的截图
+  - `apps/sidecar` / `apps/desktop` / `packages/shared`：无公共接口变更；新调用的合同（`POST /v1/catalog/sync` + `discoverProvider` 完整字段）原本就存在
+- 2026-05-28 [Web UI 重设计 · 栖 / taori-4 设计稿落地]：
+  - `apps/web`：以 `/Users/chenpu/Downloads/taori-4` 设计稿（暖纸感 / 衬线 / 单列对话）替换原深色多模型工作台。新结构：`Sidebar`（按时间分组的会话列表）+ 主区域（`EmptyState` / `ChatView` / `SettingsView`），不再有右侧 Intelligence Context 面板与多视图导轨
+  - `apps/web`：本次只接入「基础对话 + 模型设置」一条主线 — `streamChat`（`/v1/chat` SSE）、`listConversations` / `getMessages`、`listProviders` / `createProvider` / `patchProvider` / `deleteProvider` / `testProvider` / `discoverProvider`、`listModels` / `createModel` / `patchModel` / `deleteModel` / `setModelDefault`。Quick Compare、Roundtable、Deep Research、成本看板、工具 / MCP、Persona / Prompt 模板等功能本次不再暴露，待后续 UI 迭代逐步迁回
+  - `apps/web`：`api.ts` 收敛到上述能力相关合同；`App.tsx` 拆出 `Icon` / `Sidebar` / `Composer` / `EmptyState` / `ChatView` / `SettingsView` 组件；外观偏好（theme + density）落入 `localStorage`；`index.html` 改为加载 Noto Serif/Sans SC + Newsreader + JetBrains Mono
+  - `apps/web/e2e/webui-smoke.spec.ts`：覆盖「空状态渲染 → 进入设置 → Provider 表单 → 主题切换」骨架；不再要求多视图导航
+  - `apps/sidecar` / `apps/desktop` / `packages/shared`：无公共接口变更；本次只消费既有合同
+  - `apps/web/MODULE.md`：同步当前 UI 范围、已接入 API 清单与未接入功能的占位说明
+- 2026-05-28 [Web UI 重设计落地（旧版，已被同日重设计取代）]：
+  - `apps/web`：按 Stitch 设计参考重建深色多模型工作台，恢复 `index.html`、React 入口、Sidecar endpoint resolver、真实 API client、流式聊天与 Quick Compare 解析、核心样式和 Playwright smoke
+  - `apps/web`：接入当前后端真实接口清单覆盖的主要业务族：聊天、会话、Provider/Model、成本、工具/MCP、Persona/Prompt、Quick Compare、Roundtable、Deep Research
+  - `apps/sidecar` / `apps/desktop` / `packages/shared`：无公共接口变更；本次只消费既有合同
+  - `apps/web/MODULE.md`：从占位合同更新为当前 Renderer 合同与验收入口
+- 2026-05-28 [Web UI 重设计前清空]：
+  - `apps/web`：删除既有 `src/`、`e2e/`、`public/`、`dist/` 与 `index.html`，保留包配置、TypeScript / Vite / Playwright 配置，作为重新设计前的空脚手架
+  - `apps/sidecar` / `apps/desktop` / `packages/shared`：无代码变更；后续前端重建时应以 `docs/architecture/35-current-backend-api-inventory.md` 为后端接口索引
+  - `apps/web/MODULE.md`：改为占位合同，明确当前不可构建、不可运行是刻意清空状态
 - 2026-05-27 [模块合同收敛 / Web 主壳拆分]：
   - `docs/modules` / `docs/architecture`：移除当前不存在的 `packages/prompts` 活动模块记录，改为未来可拆分包说明；Sidecar 当前仅依赖 `@taori/shared`
   - `apps/web`：从 `App.tsx` 拆出 `Sidebar.tsx`、`Composer.tsx`、`attachments.ts`、`chatStream.ts`、`markdown.tsx`，并从 `surfaces.tsx` 拆出 `DrawerProviders.tsx`、`DrawerModels.tsx`、`providerDisplay.ts`，降低主壳与 Drawer 聚合文件职责密度；公共 HTTP/SSE 合同不变

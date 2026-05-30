@@ -62,6 +62,7 @@ describe('quick compare route', () => {
         controlBearer: null,
         isDev: false,
         version: '0.0.0-test',
+        testHooks: { hermeticWeb: true },
       },
       db,
       control: new ControlClient({ url: null, bearer: null }),
@@ -92,6 +93,8 @@ describe('quick compare route', () => {
     expect(res.statusCode).toBe(200);
     expect(res.body).toContain('"type":"qc.meta"');
     expect(res.body).toContain('"type":"qc.done"');
+    expect(res.body).toContain('"execution_mode":"local_preview"');
+    expect(res.body).toContain('"preview_reason":"api_key_missing"');
     const match = /"compare_id":"([^"]+)"/.exec(res.body);
     expect(match?.[1]).toBeTruthy();
     const outputs = qcRepo.listOutputs(match![1]!);
@@ -165,6 +168,23 @@ describe('quick compare route', () => {
     expect(qcRepo.getOutput(outputIds[2])?.tool_names).toEqual(['builtin.web_search', 'builtin.web_fetch']);
   });
 
+  it('rejects retry when the output model provider has been disabled', async () => {
+    const { compareId, outputIds } = await createCompare();
+    const providers = new ProvidersRepo(db);
+    const provider = providers.list()[0]!;
+    providers.update(provider.id, { enabled: false });
+
+    const retryRes = await app.inject({
+      method: 'POST',
+      url: `/v1/quick-compare/${compareId}/retry`,
+      headers: { ...auth, 'content-type': 'application/json' },
+      payload: { output_id: outputIds[0] },
+    });
+
+    expect(retryRes.statusCode).toBe(400);
+    expect(retryRes.json().message).toContain('已停用');
+  });
+
   it('returns user-facing validation errors for ineligible requested models', async () => {
     const provider = new ProvidersRepo(db).list()[0]!;
     const disabledModel = modelsRepo.create({
@@ -187,6 +207,60 @@ describe('quick compare route', () => {
     expect(res.statusCode).toBe(400);
     expect(res.json().message).toContain('Disabled Candidate');
     expect(res.json().message).not.toContain(disabledModel.id);
+  });
+
+  it('rejects requested models whose provider is disabled', async () => {
+    const providers = new ProvidersRepo(db);
+    const provider = providers.list()[0]!;
+    providers.update(provider.id, { enabled: false });
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/v1/quick-compare',
+      headers: { ...auth, 'content-type': 'application/json' },
+      payload: {
+        model_ids: [models[0], models[1]],
+        messages: [{ role: 'user', content: '比较两个方案' }],
+      },
+    });
+
+    expect(res.statusCode).toBe(400);
+    expect(res.json().message).toContain('服务商');
+    expect(res.json().message).toContain('已停用');
+  });
+
+  it('skips disabled providers during automatic quick compare model selection', async () => {
+    const providers = new ProvidersRepo(db);
+    const disabledProvider = providers.create({
+      name: 'Disabled Cheap Provider',
+      type: 'openai',
+      base_url: 'https://disabled-cheap.example.com/v1',
+    });
+    providers.update(disabledProvider.id, { enabled: false });
+    const disabledModel = modelsRepo.create({
+      provider_id: disabledProvider.id,
+      model_name: 'disabled-cheap',
+      display_name: 'Disabled Cheap',
+      capability: 'chat',
+      price_input_per_1m: 0.001,
+      price_output_per_1m: 0.001,
+    });
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/v1/quick-compare',
+      headers: { ...auth, 'content-type': 'application/json' },
+      payload: {
+        messages: [{ role: 'user', content: '自动选择模型比较' }],
+      },
+    });
+
+    expect(res.statusCode).toBe(200);
+    const match = /"compare_id":"([^"]+)"/.exec(res.body);
+    expect(match?.[1]).toBeTruthy();
+    const outputs = qcRepo.listOutputs(match![1]!);
+    expect(outputs).toHaveLength(3);
+    expect(outputs.map((output) => output.model_id)).not.toContain(disabledModel.id);
   });
 
   it('returns a current-model specific message when the first requested model is demoted', async () => {

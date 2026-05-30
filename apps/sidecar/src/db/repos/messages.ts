@@ -1,4 +1,4 @@
-import { eq, asc, sql } from 'drizzle-orm';
+import { eq, asc, sql, and } from 'drizzle-orm';
 import { type Db } from '../index.js';
 import { messages } from '../schema.js';
 import { makeId } from '@taori/shared';
@@ -24,7 +24,7 @@ export class MessagesRepo {
       .select()
       .from(messages)
       .where(eq(messages.conversation_id, conversationId))
-      .orderBy(asc(messages.created_at))
+      .orderBy(asc(messages.created_at), sql`rowid`)
       .all() as MessageRow[];
   }
 
@@ -112,7 +112,10 @@ export class MessagesRepo {
     this.db
       .delete(messages)
       .where(
-        sql`${messages.conversation_id} = ${target.conversation_id} AND ${messages.created_at} > ${target.created_at}`,
+        and(
+          eq(messages.conversation_id, target.conversation_id),
+          sql`rowid > (SELECT rowid FROM ${messages} WHERE ${messages.id} = ${target.id})`,
+        ),
       )
       .run();
     const updated = this.db
@@ -137,9 +140,12 @@ export class MessagesRepo {
       .select()
       .from(messages)
       .where(
-        sql`${messages.conversation_id} = ${target.conversation_id} AND ${messages.created_at} <= ${target.created_at}`,
+        and(
+          eq(messages.conversation_id, target.conversation_id),
+          sql`rowid <= (SELECT rowid FROM ${messages} WHERE ${messages.id} = ${target.id})`,
+        ),
       )
-      .orderBy(asc(messages.created_at))
+      .orderBy(asc(messages.created_at), sql`rowid`)
       .all() as MessageRow[];
     let count = 0;
     let now = Date.now();

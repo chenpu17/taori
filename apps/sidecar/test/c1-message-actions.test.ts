@@ -7,6 +7,7 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { buildServer } from '../src/server.js';
 import { openDb } from '../src/db/index.js';
+import { messages } from '../src/db/schema.js';
 import { ControlClient } from '../src/control/client.js';
 import { MemoryStore } from '../src/keystore.js';
 import {
@@ -14,6 +15,7 @@ import {
   MessagesRepo,
 } from '../src/db/repos/index.js';
 import type { FastifyInstance } from 'fastify';
+import { inArray } from 'drizzle-orm';
 import os from 'node:os';
 import path from 'node:path';
 import fs from 'node:fs';
@@ -93,6 +95,27 @@ describe('C1 — message edit + branch', () => {
       { role: 'user', content: 'hello' },
       { role: 'assistant', content: 'hi there' },
       { role: 'user', content: 'rewritten follow up' },
+    ]);
+  });
+
+  it('PATCH truncates messages inserted in the same millisecond after the edited user turn', async () => {
+    const conv = ctx.convs.create({ type: 'chat', title: 'same-ms' });
+    const now = Date.now();
+    const u1 = ctx.msgs.insert({ conversation_id: conv.id, role: 'user', content: 'same ms user', status: 'complete' });
+    const a1 = ctx.msgs.insert({ conversation_id: conv.id, role: 'assistant', content: 'same ms assistant', status: 'complete' });
+    ctx.db.update(messages).set({ created_at: now }).where(inArray(messages.id, [u1.id, a1.id])).run();
+
+    const res = await ctx.app.inject({
+      method: 'PATCH',
+      url: `/v1/conversations/${conv.id}/messages/${u1.id}`,
+      headers: { authorization: `Bearer ${bearer}`, 'content-type': 'application/json' },
+      payload: JSON.stringify({ content: 'same ms edited' }),
+    });
+
+    expect(res.statusCode).toBe(200);
+    const remaining = ctx.msgs.listByConversation(conv.id);
+    expect(remaining.map((m) => ({ role: m.role, content: m.content }))).toEqual([
+      { role: 'user', content: 'same ms edited' },
     ]);
   });
 

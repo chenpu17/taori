@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeAll, afterAll, vi, afterEach } from 'vitest';
 import { buildServer } from '../src/server.js';
 import { openDb } from '../src/db/index.js';
+import { ModelsRepo } from '../src/db/repos/index.js';
 import { ControlClient } from '../src/control/client.js';
 import { MemoryStore, type KeyStore } from '../src/keystore.js';
 import type { FastifyInstance } from 'fastify';
@@ -11,6 +12,7 @@ import fs from 'node:fs';
 describe('providers + models', () => {
   let app: FastifyInstance;
   let keystore: MemoryStore;
+  let modelsRepo: ModelsRepo;
   const dbPath = path.join(os.tmpdir(), `taori-providers-${Date.now()}.db`);
   const bearer = 'test_bearer_xyz';
   const auth = { authorization: `Bearer ${bearer}` };
@@ -18,6 +20,8 @@ describe('providers + models', () => {
 
   beforeAll(async () => {
     keystore = new MemoryStore();
+    const db = openDb(dbPath);
+    modelsRepo = new ModelsRepo(db);
     app = buildServer({
       config: {
         port: 0,
@@ -28,7 +32,7 @@ describe('providers + models', () => {
         isDev: false,
         version: '0.0.0-test',
       },
-      db: openDb(dbPath),
+      db,
       control: new ControlClient({ url: null, bearer: null }),
       keystore,
       startedAt: Date.now(),
@@ -1354,5 +1358,57 @@ describe('providers + models', () => {
     });
     expect(setDefault.statusCode).toBe(400);
     expect(setDefault.json().message).toMatch(/disabled models cannot be set as default/i);
+  });
+
+  it('POST /v1/models/:id/reset-health clears automatic demotion and suspension', async () => {
+    const pr = await app.inject({
+      method: 'POST',
+      url: '/v1/providers',
+      headers: authJson,
+      payload: {
+        name: 'reset-health-provider',
+        type: 'openai',
+        base_url: 'https://api.openai.com/v1',
+        api_key: 'sk-test-reset-health',
+      },
+    });
+    expect(pr.statusCode).toBe(201);
+    const provider = pr.json() as { id: string };
+
+    const mr = await app.inject({
+      method: 'POST',
+      url: '/v1/models',
+      headers: authJson,
+      payload: {
+        provider_id: provider.id,
+        model_name: 'reset-health-model',
+        capability: 'chat',
+        display_name: 'Reset health model',
+      },
+    });
+    expect(mr.statusCode).toBe(201);
+    const model = mr.json() as { id: string };
+
+    modelsRepo.recordFailure(model.id, 'quota');
+    modelsRepo.recordFailure(model.id, 'quota');
+    modelsRepo.recordFailure(model.id, 'quota');
+    modelsRepo.recordFailure(model.id, 'quota');
+    modelsRepo.recordFailure(model.id, 'quota');
+
+    const reset = await app.inject({
+      method: 'POST',
+      url: `/v1/models/${model.id}/reset-health`,
+      headers: authJson,
+      payload: {},
+    });
+    expect(reset.statusCode).toBe(200);
+    const body = reset.json() as {
+      failure_count_24h: number;
+      demoted: boolean;
+      disabled_until: number | null;
+    };
+    expect(body.failure_count_24h).toBe(0);
+    expect(body.demoted).toBe(false);
+    expect(body.disabled_until).toBeNull();
   });
 });

@@ -1,4 +1,4 @@
-import { eq, sql } from 'drizzle-orm';
+import { and, eq, sql } from 'drizzle-orm';
 import { type Db } from '../index.js';
 import { conversations } from '../schema.js';
 import { makeId } from '@taori/shared';
@@ -14,6 +14,19 @@ export interface ConversationRow {
   tags: string | null;
 }
 
+type ConversationDbRow = Omit<ConversationRow, 'archived' | 'pinned'> & {
+  archived: boolean | number;
+  pinned: boolean | number;
+};
+
+function toConversationRow(row: ConversationDbRow): ConversationRow {
+  return {
+    ...row,
+    archived: Boolean(row.archived),
+    pinned: Boolean(row.pinned),
+  };
+}
+
 export class ConversationsRepo {
   constructor(private db: Db) {}
 
@@ -23,30 +36,47 @@ export class ConversationsRepo {
       .from(conversations)
       .where(eq(conversations.id, id))
       .get();
-    return row ?? null;
+    return row ? toConversationRow(row as ConversationDbRow) : null;
   }
 
-  /** List non-archived chats. Pinned conversations float to the top, then
-   *  ordered by updated_at desc. Optional `q` filters by title (case-insensitive)
-   *  and message content (LIKE on the messages table — best-effort, indexed
-   *  on conversation_id only).
+  /** List non-archived conversations. Pinned float to the top, then ordered by
+   *  updated_at desc. Optional `q` filters by title (case-insensitive) and
+   *  message content (LIKE on the messages table). Callers that render the
+   *  history sidebar can pass includeEmpty=false to hide 0-message orphans left
+   *  by a failed first send / abandoned `新对话`.
    */
-  list(opts: { q?: string } = {}): ConversationRow[] {
+  list(opts: { q?: string; includeEmpty?: boolean } = {}): ConversationRow[] {
     const q = opts.q?.trim();
+    const includeEmpty = opts.includeEmpty ?? true;
     if (!q) {
-      return this.db
-        .select()
-        .from(conversations)
-        .where(eq(conversations.archived, false))
-        .orderBy(sql`pinned DESC, updated_at DESC`)
-        .all() as ConversationRow[];
+      if (includeEmpty) {
+        return this.db
+          .select()
+          .from(conversations)
+          .where(eq(conversations.archived, false))
+          .orderBy(sql`pinned DESC, updated_at DESC`)
+          .all()
+          .map((row) => toConversationRow(row as ConversationDbRow));
+      }
+      return this.db.all(
+        sql`SELECT c.* FROM conversations c
+            WHERE c.archived = 0
+              AND EXISTS (SELECT 1 FROM messages m WHERE m.conversation_id = c.id)
+            ORDER BY c.pinned DESC, c.updated_at DESC`,
+      ).map((row) => toConversationRow(row as ConversationDbRow));
     }
     // Two-stage: a) title LIKE; b) any message content LIKE → union by id.
+    // includeEmpty=false still requires ≥1 message so a title-only match on an
+    // empty orphan is hidden from sidebar search.
     const like = `%${q.replace(/[%_]/g, (m) => `\\${m}`)}%`;
+    const hasMessageGuard = includeEmpty
+      ? sql``
+      : sql`AND EXISTS (SELECT 1 FROM messages m WHERE m.conversation_id = c.id)`;
     const rows = this.db
       .all(
         sql`SELECT c.* FROM conversations c
             WHERE c.archived = 0
+              ${hasMessageGuard}
               AND (
                 COALESCE(c.title,'') LIKE ${like} ESCAPE '\\'
                 OR EXISTS (
@@ -56,8 +86,8 @@ export class ConversationsRepo {
                 )
               )
             ORDER BY c.pinned DESC, c.updated_at DESC`,
-      ) as ConversationRow[];
-    return rows;
+      );
+    return rows.map((row) => toConversationRow(row as ConversationDbRow));
   }
 
   setPinned(id: string, pinned: boolean): ConversationRow | null {
@@ -67,7 +97,7 @@ export class ConversationsRepo {
       .where(eq(conversations.id, id))
       .returning()
       .get();
-    return (row as ConversationRow | undefined) ?? null;
+    return row ? toConversationRow(row as ConversationDbRow) : null;
   }
 
   setTags(id: string, tags: string[]): ConversationRow | null {
@@ -82,7 +112,7 @@ export class ConversationsRepo {
       .where(eq(conversations.id, id))
       .returning()
       .get();
-    return (row as ConversationRow | undefined) ?? null;
+    return row ? toConversationRow(row as ConversationDbRow) : null;
   }
 
   /** Update title (used by both auto-title and rename). Returns updated row or null. */
@@ -93,7 +123,7 @@ export class ConversationsRepo {
       .where(eq(conversations.id, id))
       .returning()
       .get();
-    return (row as ConversationRow | undefined) ?? null;
+    return row ? toConversationRow(row as ConversationDbRow) : null;
   }
 
   setArchived(id: string, archived: boolean): ConversationRow | null {
@@ -103,7 +133,7 @@ export class ConversationsRepo {
       .where(eq(conversations.id, id))
       .returning()
       .get();
-    return (row as ConversationRow | undefined) ?? null;
+    return row ? toConversationRow(row as ConversationDbRow) : null;
   }
 
   /** Hard delete: drops messages + cost rows via FK cascades / app-level cleanup. */
@@ -128,7 +158,7 @@ export class ConversationsRepo {
       })
       .returning()
       .get();
-    return row;
+    return toConversationRow(row as ConversationDbRow);
   }
 
   /** Idempotent: if id exists, returns it; otherwise creates a fresh row. */

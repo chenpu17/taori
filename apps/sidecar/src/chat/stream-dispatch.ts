@@ -3,6 +3,7 @@ import { PassThrough } from 'node:stream';
 import type { Model, Provider } from '@taori/shared';
 import type { BuildServerArgs } from '../server.js';
 import type {
+  ConversationsRepo,
   CostsRepo,
   MemoriesRepo,
   MessagesRepo,
@@ -87,6 +88,10 @@ export async function dispatchChatProducer(args: {
   providersRepo?: ProvidersRepo;
   memoriesRepo: MemoriesRepo;
   structuredMemoriesRepo?: StructuredMemoriesRepo;
+  /** When set, the first-turn title is upgraded to an AI title (chat.ts only). */
+  convRepo?: ConversationsRepo;
+  /** Hermetic e2e: skip the live title-generation call. */
+  hermetic?: boolean;
   setForceFinalize: (fn: (() => void) | null) => void;
   onFinish?: () => void;
   keyReadFailedLogName: string;
@@ -103,6 +108,8 @@ export async function dispatchChatProducer(args: {
     args.memoriesRepo,
     args.structuredMemoriesRepo,
     args.keystore,
+    args.convRepo,
+    args.hermetic,
   );
   args.setForceFinalize(finalize);
   if (args.onFinish) args.stream.on('finish', args.onFinish);

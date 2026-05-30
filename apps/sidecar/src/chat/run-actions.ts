@@ -23,6 +23,7 @@ import {
   findRunModelId,
   findRunSourceUserMessageId,
 } from './recovery.js';
+import { assertProviderRunnableForModel } from '../models/eligibility.js';
 
 export type ChatMessageForUpstream = {
   role: 'user' | 'assistant' | 'system';
@@ -135,12 +136,19 @@ export function prepareContinueRunAction(input: ContinueRunActionInput): Continu
     content: '请从上一条助手消息被中断的位置继续写，不要重复已经写过的内容。',
   });
 
+  const provider = model.provider_id ? input.providersRepo.get(model.provider_id) : null;
+  assertProviderRunnableForModel({
+    model,
+    provider,
+    actionLabel: '续写',
+  });
+
   return {
     originalAssistant,
     sourceUserMessageId: findPreviousUserMessageId(rowsForContext, originalAssistant.id),
     conversationId: conversation.id,
     model,
-    provider: model.provider_id ? input.providersRepo.get(model.provider_id) : null,
+    provider,
     boundPersona: getBoundPersonaForConversation(input.memoriesRepo, input.personasRepo, conversation.id),
     upstreamMessages,
   };
@@ -270,6 +278,12 @@ export function prepareRecoverRunAction(input: RecoverRunActionInput): RecoverRu
       details: { capability: model.capability },
     });
   }
+  const provider = model.provider_id ? input.providersRepo.get(model.provider_id) : null;
+  assertProviderRunnableForModel({
+    model,
+    provider,
+    actionLabel: '恢复调用',
+  });
 
   const rows = input.msgRepo.listByConversation(conversation.id);
   const sourceIdx = rows.findIndex((row) => row.id === sourceUser.id);
@@ -301,7 +315,7 @@ export function prepareRecoverRunAction(input: RecoverRunActionInput): RecoverRu
     sourceUser,
     conversationId: conversation.id,
     model,
-    provider: model.provider_id ? input.providersRepo.get(model.provider_id) : null,
+    provider,
     boundPersona: getBoundPersonaForConversation(input.memoriesRepo, input.personasRepo, conversation.id),
     compacted,
     recoveryMessages,

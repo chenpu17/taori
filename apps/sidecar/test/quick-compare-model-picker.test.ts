@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import type { Model } from '@taori/shared';
+import type { Model, Provider } from '@taori/shared';
 import { TaoriError } from '@taori/shared';
 import { pickQuickCompareModels } from '../src/quick-compare/model-picker.js';
 
@@ -24,6 +24,7 @@ function model(patch: Partial<Model> & { id: string }): Model {
     supports_vision: false,
     supports_tools: false,
     supports_json: false,
+    thinking_enabled: null,
     is_default_for: null,
     enabled: true,
     fallback_order: 0,
@@ -31,6 +32,19 @@ function model(patch: Partial<Model> & { id: string }): Model {
     disabled_until: null,
     failure_count_24h: 0,
     ...patch,
+  };
+}
+
+function provider(patch: Partial<Provider> & { id: string }): Provider {
+  return {
+    id: patch.id,
+    name: patch.name ?? patch.id,
+    type: patch.type ?? 'openai',
+    base_url: patch.base_url ?? 'https://example.com/v1',
+    api_key_ref: patch.api_key_ref ?? null,
+    enabled: patch.enabled ?? true,
+    created_at: 0,
+    updated_at: 0,
   };
 }
 
@@ -146,5 +160,37 @@ describe('pickQuickCompareModels', () => {
         ],
       }),
     ).toThrow('所选模型当前不可用于 Quick Compare');
+  });
+
+  it('skips models whose provider is disabled when provider state is supplied', () => {
+    const selected = pickQuickCompareModels({
+      providers: [
+        provider({ id: 'prov_enabled' }),
+        provider({ id: 'prov_disabled', name: 'Disabled Provider', enabled: false }),
+      ],
+      models: [
+        model({ id: 'mdl_disabled', provider_id: 'prov_disabled', price_input_per_1m: 0.001 }),
+        model({ id: 'mdl_a', provider_id: 'prov_enabled', price_input_per_1m: 1 }),
+        model({ id: 'mdl_b', provider_id: 'prov_enabled', price_input_per_1m: 2 }),
+      ],
+    });
+
+    expect(selected.map((item) => item.model.id)).toEqual(['mdl_a', 'mdl_b']);
+  });
+
+  it('uses a provider-disabled message for explicit disabled-provider selections', () => {
+    expect(() =>
+      pickQuickCompareModels({
+        requestedModelIds: ['mdl_a', 'mdl_disabled'],
+        providers: [
+          provider({ id: 'prov_enabled' }),
+          provider({ id: 'prov_disabled', name: 'Disabled Provider', enabled: false }),
+        ],
+        models: [
+          model({ id: 'mdl_a', provider_id: 'prov_enabled' }),
+          model({ id: 'mdl_disabled', provider_id: 'prov_disabled', display_name: 'Disabled Model' }),
+        ],
+      }),
+    ).toThrow('服务商「Disabled Provider」已停用');
   });
 });

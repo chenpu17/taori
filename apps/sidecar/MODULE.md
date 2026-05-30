@@ -23,9 +23,16 @@ Taori 业务编排进程，负责 LLM 调用、工具调度、圆桌执行、SQL
 
 ## 当前合同变化
 
+- Provider `enabled=false` 现在是 Sidecar 真实模型调用的后端硬门禁：`/v1/chat` 会在创建会话/消息前拒绝停用服务商下的模型；`continue` / `recover` / Quick Compare 自动候选、显式选择和重试都会跳过或拒绝这类模型，避免前端过滤被旧本地状态、恢复路径或直接 API 绕过。
+- 首轮标题仍默认使用本地 30 字截断，不再默认发起后台 LLM 标题生成；`src/chat/auto-title.ts` 的 LLM 标题升级仅在 `memories` 有效值 `auto_title_llm_enabled === 'true'` 时运行，且会跳过已停用服务商。该实验路径仍是 best-effort，不写 `cost_records`，因此默认关闭。
+- 会话列表 `GET /v1/conversations`（含 `?q=` 搜索）默认只返回**至少有一条消息**的会话：首条消息失败 / 放弃的 `新对话` 留下的 0 消息孤儿会话不再出现在历史（活动会话由 Renderer 本地状态显示、不依赖列表，故无首条消息持久化竞态）。诊断 / 管理场景可传 `include_empty=1` 显式包含 0-message 会话；`ConversationsRepo.list()` 默认保留仓储真实语义，调用方用 `includeEmpty=false` 选择侧栏过滤。
+- 首轮对话标题的 LLM 概括仍保留为可选实验能力：截断标题即时生效并作为永久兜底，首条助手回复完成后 `src/chat/auto-title.ts` 可在显式开关开启时以 `setImmediate` best-effort 用最便宜的可用 chat 模型生成 4-12 字标题并 `convRepo.rename`；gate 为「标题仍等于截断」，故只升级一次、绝不覆盖手动改名；失败/无可用模型时静默保留截断。仅接入主 `/v1/chat` 路径（continue/recover 不触发）。新增 `SidecarTestHooksConfig.automatedTest`（`normalizeSidecarConfig` 由 `NODE_ENV==='test' || VITEST` 派生），与 `hermeticWeb` 一起在 vitest / hermetic e2e 下抑制该后台 LLM 调用。
 - MCP 管理从“仅本地 stdio server”扩展到“本地 stdio + 托管远程 bridge”：Sidecar 可把搏查远程 SSE 搜索解析为受控本地 proxy 进程，Renderer 只保存 API Key，不暴露底层 `mcp-remote` 命令细节。
+- 新增 `POST /v1/models/:id/reset-health`：清除模型自动健康保护状态（`failure_count_24h=0`、`last_failure_at=null`、`demoted=false`、`disabled_until=null`），用于用户确认配置已修复后手动恢复模型候选资格；不改变 `enabled` 手动开关。
 - 普通聊天链路会把会话有效且模型支持 tools 的 MCP 工具动态暴露给上游模型；MCP 工具调用复用长连接 stdio session，并把超时/崩溃归类为工具错误。
+- 普通聊天成本 annotation 和历史消息回填都会透出 `first_token_ms` / `duration_ms`；字段来自已有 `cost_records`，用于 Renderer 展示 TTFT、总耗时与 TPOT。
 - Sidecar 记忆新增 `default_search_tool` 约定键；普通聊天、Quick Compare 与 Roundtable 在暴露工具时会只保留一个首选搜索工具。若首选工具不可用，则自动回退到 `builtin.web_search` 或当前首个可用搜索工具。
+- Quick Compare 在缺少 Provider、缺少 API Key 或读取 Keychain 失败时仍保留本地预览 fallback，但会在 `qc.participant_start` / `qc.participant_done` annotation 写入 `execution_mode='local_preview'` 与 `preview_reason`；真实上游调用写入 `execution_mode='live'`。数据库结构不变。
 - 新增 `POST /v1/runs/:id/continue`：仅允许续写 `incomplete` 的助手消息，创建 `kind='continue'` 子 run，不插入新的 user message，并通过 `parent_run_id` / `continued_from_message_id` 保留恢复链路；高成本或超预算时会先返回 `cost_confirmation_required`，确认前不创建 assistant message、不启动上游调用。
 - 新增 `POST /v1/runs/:id/recover`：Sidecar 执行 `retry_same_model` / `switch_model` / `compact_context` / `skip_tool` 恢复动作，创建 `kind='retry'` 子 run，写入 `recovery.started` 与 `recovery.completed/failed`；`compact_context` 当前使用确定性摘要压缩较早历史，`skip_tool` 会基于原 run 的最后一个失败工具临时禁用该工具并继续，`continue` 仍走专用 continue API；高成本或超预算时同样要求 `confirmed_cost` 二次提交。
 - `run_events` 仍是运行生命周期 append-only 真相源；新增 `agent_runs` 物化 Header 表作为 `/v1/conversations/:id/runs` 查询索引，事件写入时同步更新，缺失时仍可从事件推导兜底。

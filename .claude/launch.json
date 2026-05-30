@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "taori-web",
+      "runtimeExecutable": "pnpm",
+      "runtimeArgs": ["--filter", "@taori/web", "exec", "vite", "--port", "5191"],
+      "port": 5191
+    }
+  ]
+}

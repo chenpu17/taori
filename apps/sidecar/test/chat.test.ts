@@ -16,7 +16,16 @@ function newApp() {
   const db = openDb(dbPath);
   const keystore = new MemoryStore();
   const app = buildServer({
-    config: { port: 0, bearer, dbPath, controlUrl: null, controlBearer: null, isDev: false, version: '0.0.0-test' },
+    config: {
+      port: 0,
+      bearer,
+      dbPath,
+      controlUrl: null,
+      controlBearer: null,
+      isDev: false,
+      version: '0.0.0-test',
+      testHooks: { hermeticWeb: true },
+    },
     db,
     control: new ControlClient({ url: null, bearer: null }),
     keystore,
@@ -274,6 +283,38 @@ describe('chat M1.2', () => {
     expect(asst.content).toBe('Hello world');
     expect(asst.status).toBe('complete');
     expect(asst.model_id).toBe(model.id);
+  });
+
+  it('rejects a model whose provider is disabled before creating chat messages', async () => {
+    const provRepo = new ProvidersRepo(db);
+    const modRepo = new ModelsRepo(db);
+    const provider = provRepo.create({
+      name: 'Disabled Provider',
+      type: 'openai',
+      base_url: 'https://disabled.example.com/v1',
+      api_key: 'sk-disabled',
+    });
+    await keystore.write(provider.api_key_ref!, 'sk-disabled');
+    provRepo.update(provider.id, { enabled: false });
+    const model = modRepo.create({
+      provider_id: provider.id,
+      model_name: 'disabled-provider-model',
+      capability: 'chat',
+      display_name: 'Disabled Provider Model',
+    });
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockRejectedValue(new Error('should not call provider'));
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/v1/chat',
+      headers: { authorization: `Bearer ${bearer}`, 'content-type': 'application/json' },
+      payload: { model_id: model.id, messages: [{ role: 'user', content: 'hi' }] },
+    });
+
+    expect(res.statusCode).toBe(400);
+    expect(JSON.parse(res.payload).message).toContain('服务商「Disabled Provider」已停用');
+    expect(fetchSpy).not.toHaveBeenCalled();
+    expect(new ConversationsRepo(db).list()).toHaveLength(0);
   });
 
   it('upstream-path: records context_window before streaming to the provider', async () => {
