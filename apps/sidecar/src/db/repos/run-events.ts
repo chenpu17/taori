@@ -1,6 +1,6 @@
 import { eq, asc, desc } from 'drizzle-orm';
 import { type Db } from '../index.js';
-import { run_events, agent_runs } from '../schema.js';
+import { run_events, agent_runs, conversations, messages } from '../schema.js';
 import type {
   AgentRun,
   RunEvent,
@@ -130,6 +130,41 @@ export interface RunEventInsert {
 export class RunEventsRepo {
   constructor(private db: Db) {}
 
+  private sanitizeParents(input: RunEventInsert): RunEventInsert {
+    let conversationId = input.conversation_id ?? null;
+    let messageId = input.message_id ?? null;
+
+    if (conversationId) {
+      const exists = this.db
+        .select({ id: conversations.id })
+        .from(conversations)
+        .where(eq(conversations.id, conversationId))
+        .get();
+      if (!exists) {
+        conversationId = null;
+        messageId = null;
+      }
+    }
+
+    if (messageId) {
+      const exists = this.db
+        .select({ id: messages.id })
+        .from(messages)
+        .where(eq(messages.id, messageId))
+        .get();
+      if (!exists) messageId = null;
+    }
+
+    if (conversationId === (input.conversation_id ?? null) && messageId === (input.message_id ?? null)) {
+      return input;
+    }
+    return {
+      ...input,
+      conversation_id: conversationId,
+      message_id: messageId,
+    };
+  }
+
   append(input: RunEventInsert): RunEvent {
     return this.db.transaction((tx) => {
       const row = tx
@@ -158,17 +193,18 @@ export class RunEventsRepo {
     input: RunEventInsert,
     log?: { warn: (...a: unknown[]) => void; error?: (...a: unknown[]) => void },
   ): RunEvent | null {
+    const sanitized = this.sanitizeParents(input);
     const attempts: Array<{ data: RunEventInsert; label: string }> = [
-      { data: input, label: 'original' },
-      { data: { ...input, message_id: null }, label: 'without_message_id' },
-      { data: { ...input, conversation_id: null, message_id: null }, label: 'without_ids' },
+      { data: sanitized, label: 'sanitized' },
+      { data: { ...sanitized, message_id: null }, label: 'without_message_id' },
+      { data: { ...sanitized, conversation_id: null, message_id: null }, label: 'without_ids' },
     ];
     for (const { data, label } of attempts) {
       try {
         return this.append(data);
       } catch (e) {
         if (isForeignKeyConstraintError(e)) {
-          log?.error?.(
+          log?.warn?.(
             { err: e, runId: input.run_id, kind: input.kind, attempt: label },
             'run_event.fk_fallback',
           );

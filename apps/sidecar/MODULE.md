@@ -23,6 +23,10 @@ Taori 业务编排进程，负责 LLM 调用、工具调度、圆桌执行、SQL
 
 ## 当前合同变化
 
+- 新增内部基础编排模块 `src/orchestration/context-router.ts`、`src/orchestration/web-context.ts` 与 annotation helper（架构提案：`docs/architecture/36-capability-orchestration-kernel-proposal.md`）：普通聊天、Quick Compare 主路径 / 重试、Roundtable 轮次会在组装上下文前生成结构化 `OrchestrationPlan`，统一判断是否需要外部信息、本地文件上下文、首选搜索工具、是否需要引用以及是否建议升级到深度研究。计划写入 `run_events(kind='orchestration.plan')`；普通聊天还会进入 `context.snapshot.context_sources[type='orchestration']`，并通过 `orchestration` Data Stream annotation 暴露给 Renderer；Quick Compare / Roundtable 分别通过 `qc.orchestration` / `rt.orchestration` 暴露同一决策摘要。
+- 普通聊天的联网上下文从关键词补丁升级为编排驱动：高时效 / 需要证据的问题会先按首选搜索工具预搜索，再在需要时读取前几个网页正文片段（`builtin.web_fetch`），随后把搜索结果与正文片段作为 system context 注入上游模型；不支持原生 tools 的聊天模型也能受益。预搜索 / 预读取均通过 `tool.*` run events 与 `tool_trace` 暴露。
+- Quick Compare 现在复用同一编排内核：高时效 / 需要证据的问题会在候选模型并发启动前、单候选重试前做共享预搜索 / 预读取，并把相同网页上下文注入候选，避免多模型对比结果取决于某个候选是否主动调用搜索工具；执行过程通过 `tool.*` run events 与 `qc.tool_trace` 暴露。
+- Roundtable 轮次现在复用同一编排内核：每轮发言开始前按圆桌 topic 做一次共享预搜索 / 预读取，并把网页上下文注入所有参与者 prompt；执行过程通过 `tool.*` run events 与 `rt.tool_trace` 暴露。
 - Provider `enabled=false` 现在是 Sidecar 真实模型调用的后端硬门禁：`/v1/chat` 会在创建会话/消息前拒绝停用服务商下的模型；`continue` / `recover` / Quick Compare 自动候选、显式选择和重试都会跳过或拒绝这类模型，避免前端过滤被旧本地状态、恢复路径或直接 API 绕过。
 - 首轮标题仍默认使用本地 30 字截断，不再默认发起后台 LLM 标题生成；`src/chat/auto-title.ts` 的 LLM 标题升级仅在 `memories` 有效值 `auto_title_llm_enabled === 'true'` 时运行，且会跳过已停用服务商。该实验路径仍是 best-effort，不写 `cost_records`，因此默认关闭。
 - 会话列表 `GET /v1/conversations`（含 `?q=` 搜索）默认只返回**至少有一条消息**的会话：首条消息失败 / 放弃的 `新对话` 留下的 0 消息孤儿会话不再出现在历史（活动会话由 Renderer 本地状态显示、不依赖列表，故无首条消息持久化竞态）。诊断 / 管理场景可传 `include_empty=1` 显式包含 0-message 会话；`ConversationsRepo.list()` 默认保留仓储真实语义，调用方用 `includeEmpty=false` 选择侧栏过滤。

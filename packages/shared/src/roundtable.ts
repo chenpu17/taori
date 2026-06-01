@@ -6,6 +6,7 @@
  */
 
 import { z } from 'zod';
+import type { OrchestrationAnnotation } from './agent.js';
 import { PromptTemplateSchema } from './schemas.js';
 
 export const RoundtableModeSchema = z.enum(['fast', 'deep', 'auto']);
@@ -226,6 +227,12 @@ export type RoundtableAnnotation =
       retry_index?: number;
     }
   | { type: 'rt.round_start'; round: number; participants_total: number }
+  | (Omit<OrchestrationAnnotation, 'type'> & {
+      type: 'rt.orchestration';
+      roundtable_id: string;
+      round: number;
+      retry?: boolean;
+    })
   | {
       type: 'rt.participant_delta';
       participant_index: number;

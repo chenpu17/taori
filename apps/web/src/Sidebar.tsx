@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { Icon } from './Icon';
 import type { Conversation } from './api';
 
@@ -6,6 +6,7 @@ type View = 'empty' | 'chat' | 'settings' | 'features';
 
 interface SidebarProps {
   view: View;
+  activeFeatureTab?: 'features' | 'tools' | 'cost';
   conversations: Conversation[];
   activeConversationId: string | null;
   collapsed: boolean;
@@ -16,7 +17,9 @@ interface SidebarProps {
   onTogglePin: (conversation: Conversation) => void;
   onArchiveConversation: (conversation: Conversation) => void;
   onDeleteConversation: (conversation: Conversation) => void;
+  onBulkDeleteConversations: (conversations: Conversation[]) => Promise<boolean>;
   onOpenFeatures: () => void;
+  onOpenTools: () => void;
   onOpenSettings: () => void;
   onOpenPalette: () => void;
   todayUsd?: number | null;
@@ -61,6 +64,10 @@ function groupByRecency(conversations: Conversation[]): Group[] {
 export function Sidebar(props: SidebarProps): JSX.Element {
   const [query, setQuery] = useState('');
   const [mobileHistoryOpen, setMobileHistoryOpen] = useState(false);
+  const [managingHistory, setManagingHistory] = useState(false);
+  const [selectedConversationIds, setSelectedConversationIds] = useState<Set<string>>(() => new Set());
+  const featuresActive = props.view === 'features' && props.activeFeatureTab !== 'tools';
+  const toolsActive = props.view === 'features' && props.activeFeatureTab === 'tools';
   const groups = useMemo(() => {
     const filtered = query.trim()
       ? props.conversations.filter((c) =>
@@ -71,6 +78,90 @@ export function Sidebar(props: SidebarProps): JSX.Element {
   }, [props.conversations, query]);
 
   const visibleGroups = groups.filter((g) => g.items.length > 0);
+  const visibleConversations = useMemo(() => visibleGroups.flatMap((group) => group.items), [visibleGroups]);
+  const selectedConversations = useMemo(
+    () => props.conversations.filter((conversation) => selectedConversationIds.has(conversation.id)),
+    [props.conversations, selectedConversationIds],
+  );
+  const allVisibleSelected =
+    visibleConversations.length > 0 &&
+    visibleConversations.every((conversation) => selectedConversationIds.has(conversation.id));
+
+  useEffect(() => {
+    setSelectedConversationIds((current) => {
+      const validIds = new Set(props.conversations.map((conversation) => conversation.id));
+      const next = new Set(Array.from(current).filter((id) => validIds.has(id)));
+      return next.size === current.size ? current : next;
+    });
+  }, [props.conversations]);
+
+  function toggleConversationSelection(id: string): void {
+    setSelectedConversationIds((current) => {
+      const next = new Set(current);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  }
+
+  function clearHistorySelection(): void {
+    setSelectedConversationIds(new Set());
+  }
+
+  function toggleAllVisible(): void {
+    setSelectedConversationIds((current) => {
+      const next = new Set(current);
+      if (allVisibleSelected) {
+        for (const conversation of visibleConversations) next.delete(conversation.id);
+      } else {
+        for (const conversation of visibleConversations) next.add(conversation.id);
+      }
+      return next;
+    });
+  }
+
+  function closeManageMode(): void {
+    setManagingHistory(false);
+    clearHistorySelection();
+  }
+
+  async function bulkDeleteSelected(): Promise<void> {
+    if (selectedConversations.length === 0) return;
+    const deleted = await props.onBulkDeleteConversations(selectedConversations);
+    if (deleted) closeManageMode();
+  }
+
+  const renderBulkToolbar = (): JSX.Element => (
+    <div className={`history-bulk-bar ${managingHistory ? 'active' : ''}`}>
+      {managingHistory ? (
+        <>
+          <span>已选 {selectedConversationIds.size} 个</span>
+          <button type="button" className="history-bulk-btn" onClick={toggleAllVisible} disabled={visibleConversations.length === 0} data-testid="history-select-all">
+            {allVisibleSelected ? '取消全选' : '全选'}
+          </button>
+          <button type="button" className="history-bulk-btn danger" onClick={() => void bulkDeleteSelected()} disabled={selectedConversations.length === 0} data-testid="history-bulk-delete">
+            删除
+          </button>
+          <button type="button" className="history-bulk-btn" onClick={closeManageMode}>
+            完成
+          </button>
+        </>
+      ) : (
+        <>
+          <span>{query.trim() ? `${visibleConversations.length} 个匹配` : '历史对话'}</span>
+          <button
+            type="button"
+            className="history-bulk-btn"
+            onClick={() => setManagingHistory(true)}
+            disabled={props.conversations.length === 0}
+            data-testid="history-manage"
+          >
+            管理
+          </button>
+        </>
+      )}
+    </div>
+  );
 
   const renderHistoryList = (mobile: boolean): JSX.Element => (
     <div className="history-scroll scroll">
@@ -90,14 +181,28 @@ export function Sidebar(props: SidebarProps): JSX.Element {
           {group.items.map((conversation) => (
             <div
               key={conversation.id}
-              className={`chat-row-wrap ${
+              className={`chat-row-wrap ${managingHistory ? 'selecting' : ''} ${
                 props.activeConversationId === conversation.id ? 'active' : ''
               }`}
             >
+              {managingHistory && (
+                <label className="history-select" aria-label={`选择 ${conversation.title || '未命名对话'}`}>
+                  <input
+                    type="checkbox"
+                    checked={selectedConversationIds.has(conversation.id)}
+                    onChange={() => toggleConversationSelection(conversation.id)}
+                    data-testid={`conversation-select-${conversation.id}`}
+                  />
+                </label>
+              )}
               <button
                 type="button"
                 className="chat-row"
                 onClick={() => {
+                  if (managingHistory) {
+                    toggleConversationSelection(conversation.id);
+                    return;
+                  }
                   props.onSelectConversation(conversation.id);
                   if (mobile) setMobileHistoryOpen(false);
                 }}
@@ -109,7 +214,8 @@ export function Sidebar(props: SidebarProps): JSX.Element {
                 )}
                 <span className="title">{conversation.title || '未命名对话'}</span>
               </button>
-              <div className="chat-row-actions">
+              {!managingHistory && (
+                <div className="chat-row-actions">
                 <button
                   type="button"
                   title="重命名"
@@ -142,7 +248,8 @@ export function Sidebar(props: SidebarProps): JSX.Element {
                 >
                   <Icon name="trash" size={12} />
                 </button>
-              </div>
+                </div>
+              )}
             </div>
           ))}
         </div>
@@ -160,7 +267,7 @@ export function Sidebar(props: SidebarProps): JSX.Element {
               <div className="brand-name">
                 织 <span className="brand-wordmark">Taori</span>
               </div>
-              <div className="brand-sub">Qī · 多模型本地 AI 助手</div>
+              <div className="brand-sub">多模型本地 AI 助手</div>
             </div>
           )}
         </div>
@@ -186,12 +293,21 @@ export function Sidebar(props: SidebarProps): JSX.Element {
           </button>
           <button
             type="button"
-            className={`icon-btn ${props.view === 'features' ? 'active' : ''}`}
+            className={`icon-btn ${featuresActive ? 'active' : ''}`}
             onClick={props.onOpenFeatures}
             title="能力中心"
             data-testid="sidebar-features"
           >
             <Icon name="bolt" />
+          </button>
+          <button
+            type="button"
+            className={`icon-btn ${toolsActive ? 'active' : ''}`}
+            onClick={props.onOpenTools}
+            title="工具管理"
+            data-testid="sidebar-tools"
+          >
+            <Icon name="panel" />
           </button>
           <button
             type="button"
@@ -221,12 +337,22 @@ export function Sidebar(props: SidebarProps): JSX.Element {
           </button>
           <button
             type="button"
-            className={`icon-btn ${props.view === 'features' ? 'active' : ''}`}
+            className={`icon-btn ${featuresActive ? 'active' : ''}`}
             onClick={props.onOpenFeatures}
             title="能力中心"
             aria-label="能力中心"
           >
             <Icon name="bolt" />
+          </button>
+          <button
+            type="button"
+            className={`icon-btn ${toolsActive ? 'active' : ''}`}
+            onClick={props.onOpenTools}
+            title="工具管理"
+            aria-label="工具管理"
+            data-testid="mobile-tools"
+          >
+            <Icon name="panel" />
           </button>
           <button
             type="button"
@@ -267,6 +393,7 @@ export function Sidebar(props: SidebarProps): JSX.Element {
                 onChange={(event) => setQuery(event.target.value)}
               />
             </div>
+            {renderBulkToolbar()}
             {renderHistoryList(true)}
           </div>
         </>
@@ -282,12 +409,21 @@ export function Sidebar(props: SidebarProps): JSX.Element {
             </button>
             <button
               type="button"
-              className={`feature-nav-btn ${props.view === 'features' ? 'active' : ''}`}
+              className={`feature-nav-btn ${featuresActive ? 'active' : ''}`}
               onClick={props.onOpenFeatures}
               data-testid="sidebar-features"
             >
               <Icon name="bolt" size={15} />
               <span>能力中心</span>
+            </button>
+            <button
+              type="button"
+              className={`feature-nav-btn ${toolsActive ? 'active' : ''}`}
+              onClick={props.onOpenTools}
+              data-testid="sidebar-tools"
+            >
+              <Icon name="panel" size={15} />
+              <span>工具管理</span>
             </button>
           </div>
 
@@ -310,6 +446,7 @@ export function Sidebar(props: SidebarProps): JSX.Element {
             </button>
           </div>
 
+          {renderBulkToolbar()}
           {renderHistoryList(false)}
         </>
       )}

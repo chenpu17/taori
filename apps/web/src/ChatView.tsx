@@ -1,9 +1,9 @@
-import { useEffect, useRef, useState } from 'react';
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { Model } from '@taori/shared';
 import { Composer } from './Composer';
 import { Icon } from './Icon';
 import { useToast } from './Toast';
-import type { ChatAttachment, ConversationMessage, MessageAnnotation } from './api';
+import { getConversationRunEvents, type ChatAttachment, type ConversationMessage, type MessageAnnotation, type RunEvent } from './api';
 import { renderMarkdown } from './markdown';
 
 interface ChatViewProps {
@@ -27,6 +27,7 @@ interface ChatViewProps {
   onExport: () => void;
   onEditUserMessage: (message: ConversationMessage) => void;
   onBranchFromMessage: (message: ConversationMessage) => void;
+  onStartDeepResearch: (objective: string) => void;
   onRecover: (
     message: ConversationMessage,
     action: 'continue' | 'retry_same_model' | 'compact_context',
@@ -107,6 +108,122 @@ function toolTraces(message: ConversationMessage): MessageAnnotation[] {
   return message.annotations.filter((annotation) => annotation.type === 'tool_trace');
 }
 
+function orchestrationAnnotation(message: ConversationMessage): MessageAnnotation | null {
+  return message.annotations.find((annotation) => annotation.type === 'orchestration') ?? null;
+}
+
+function orchestrationReasonText(reason: MessageAnnotation['reason']): string {
+  switch (reason) {
+    case 'explicit_search':
+      return '你明确要求搜索，已自动联网';
+    case 'freshness_required':
+      return '问题依赖最新信息，已自动联网';
+    case 'evidence_required':
+      return '问题需要来源依据，已自动联网';
+    case 'high_stakes_current':
+      return '涉及报名、政策或高风险时效信息，已自动联网';
+    case 'deep_research_candidate':
+      return '问题适合深度研究，已先补充网页上下文';
+    case 'local_context_available':
+      return '已优先考虑本地上下文';
+    default:
+      return '按当前对话自动选择能力';
+  }
+}
+
+function orchestrationDetailText(plan: MessageAnnotation): string {
+  const details: string[] = [];
+  if (plan.external_info === 'web_search_fetch') details.push('搜索并预读网页');
+  else if (plan.external_info === 'web_search') details.push('搜索网页');
+  else if (plan.external_info === 'deep_research_suggest') details.push('建议深度研究');
+  if (plan.search_tool_name) details.push(plan.search_tool_name);
+  if (plan.query_count != null && plan.query_count > 0) details.push(`${plan.query_count} 个查询`);
+  if (plan.fetch_top_k != null && plan.fetch_top_k > 0) details.push(`预读 ${plan.fetch_top_k} 条`);
+  if (plan.cite_required) details.push('要求引用来源');
+  return details.join(' · ');
+}
+
+function orchestrationPlanDetailText(payload: Record<string, unknown> | null): string {
+  if (!payload) return '';
+  const details: string[] = [];
+  const externalInfo = typeof payload.externalInfo === 'string' ? payload.externalInfo : null;
+  if (externalInfo === 'web_search_fetch') details.push('搜索并预读网页');
+  else if (externalInfo === 'web_search') details.push('搜索网页');
+  else if (externalInfo === 'deep_research_suggest') details.push('建议深度研究');
+  const localContext = typeof payload.localContext === 'string' ? payload.localContext : null;
+  if (localContext === 'file_search') details.push('检索本地文件');
+  const searchToolName = typeof payload.searchToolName === 'string' ? payload.searchToolName : null;
+  if (searchToolName) details.push(searchToolName);
+  const queries = Array.isArray(payload.queries) ? payload.queries.length : null;
+  if (queries != null && queries > 0) details.push(`${queries} 个查询`);
+  const fetchTopK = typeof payload.fetchTopK === 'number' ? payload.fetchTopK : null;
+  if (fetchTopK != null && fetchTopK > 0) details.push(`预读 ${fetchTopK} 条`);
+  if (payload.citeRequired === true) details.push('要求引用来源');
+  return details.join(' · ');
+}
+
+function runEventPayload(event: RunEvent): Record<string, unknown> | null {
+  return event.payload && typeof event.payload === 'object'
+    ? event.payload as Record<string, unknown>
+    : null;
+}
+
+function eventStatusText(status: string): string {
+  switch (status) {
+    case 'completed':
+    case 'complete':
+      return '完成';
+    case 'failed':
+      return '失败';
+    case 'started':
+      return '开始';
+    case 'cancelled':
+      return '取消';
+    case 'stopped':
+      return '停止';
+    case 'incomplete':
+      return '未完成';
+    default:
+      return status;
+  }
+}
+
+function eventSummaryText(event: RunEvent): string {
+  if (event.kind === 'orchestration.plan') {
+    const payload = runEventPayload(event);
+    const reason = typeof payload?.reason === 'string' ? payload.reason as MessageAnnotation['reason'] : undefined;
+    const reasonText = orchestrationReasonText(reason);
+    const detail = orchestrationPlanDetailText(payload);
+    return detail ? `${reasonText} · ${detail}` : reasonText;
+  }
+  return event.summary ?? '';
+}
+
+function groupRunEvents(events: RunEvent[]): Array<{ runId: string; events: RunEvent[] }> {
+  const groups = new Map<string, RunEvent[]>();
+  for (const event of events) {
+    const bucket = groups.get(event.run_id) ?? [];
+    bucket.push(event);
+    groups.set(event.run_id, bucket);
+  }
+  return Array.from(groups.entries()).map(([runId, groupEvents]) => ({
+    runId,
+    events: groupEvents.sort((a, b) => b.created_at - a.created_at),
+  }));
+}
+
+function sameMessageIdentity(prev: ConversationMessage, next: ConversationMessage): boolean {
+  return (
+    prev.id === next.id &&
+    prev.content === next.content &&
+    prev.status === next.status &&
+    prev.error === next.error &&
+    prev.model_id === next.model_id &&
+    prev.attachments_count === next.attachments_count &&
+    prev.annotations === next.annotations
+  );
+}
+
 function toolStatus(trace: MessageAnnotation): { label: string; className: string } {
   if (trace.event === 'finish') {
     return trace.ok === false
@@ -121,12 +238,62 @@ function truncateTraceValue(value: string | null | undefined): string {
   return value.length > 120 ? `${value.slice(0, 117)}...` : value;
 }
 
+function previousUserContent(messages: ConversationMessage[], messageId: string): string {
+  const index = messages.findIndex((message) => message.id === messageId);
+  if (index < 0) return '';
+  for (let i = index - 1; i >= 0; i -= 1) {
+    const candidate = messages[i];
+    if (candidate?.role === 'user' && candidate.content.trim()) return candidate.content.trim();
+  }
+  return '';
+}
+
 const NEAR_BOTTOM_PX = 120;
+const INITIAL_MESSAGE_WINDOW_SIZE = 80;
+const MESSAGE_WINDOW_STEP = 80;
 
 export function ChatView(props: ChatViewProps): JSX.Element {
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const atBottomRef = useRef(true);
+  const editMessageRef = useRef(props.onEditUserMessage);
+  const branchMessageRef = useRef(props.onBranchFromMessage);
+  const recoverMessageRef = useRef(props.onRecover);
+  const startDeepResearchRef = useRef(props.onStartDeepResearch);
   const [showJump, setShowJump] = useState(false);
+  const [visibleMessageCount, setVisibleMessageCount] = useState(INITIAL_MESSAGE_WINDOW_SIZE);
+  const [timelineOpen, setTimelineOpen] = useState(false);
+  const [timelineLoading, setTimelineLoading] = useState(false);
+  const [timelineError, setTimelineError] = useState<string | null>(null);
+  const [runEvents, setRunEvents] = useState<RunEvent[]>([]);
+  const visibleMessages = useMemo(
+    () => props.messages.slice(-visibleMessageCount),
+    [props.messages, visibleMessageCount],
+  );
+  const hiddenMessageCount = Math.max(0, props.messages.length - visibleMessages.length);
+  const runGroups = useMemo(() => groupRunEvents(runEvents), [runEvents]);
+
+  useEffect(() => {
+    editMessageRef.current = props.onEditUserMessage;
+    branchMessageRef.current = props.onBranchFromMessage;
+    recoverMessageRef.current = props.onRecover;
+    startDeepResearchRef.current = props.onStartDeepResearch;
+  }, [props.onBranchFromMessage, props.onEditUserMessage, props.onRecover, props.onStartDeepResearch]);
+
+  const handleEditUserMessage = useCallback((message: ConversationMessage) => {
+    editMessageRef.current(message);
+  }, []);
+  const handleBranchFromMessage = useCallback((message: ConversationMessage) => {
+    branchMessageRef.current(message);
+  }, []);
+  const handleRecover = useCallback((
+    message: ConversationMessage,
+    action: 'continue' | 'retry_same_model' | 'compact_context',
+  ) => {
+    recoverMessageRef.current(message, action);
+  }, []);
+  const handleStartDeepResearch = useCallback((objective: string) => {
+    startDeepResearchRef.current(objective);
+  }, []);
 
   function scrollToBottom(behavior: ScrollBehavior = 'auto'): void {
     const node = scrollRef.current;
@@ -138,6 +305,7 @@ export function ChatView(props: ChatViewProps): JSX.Element {
 
   // Jump to the latest turn whenever the conversation changes.
   useEffect(() => {
+    setVisibleMessageCount(INITIAL_MESSAGE_WINDOW_SIZE);
     atBottomRef.current = true;
     scrollToBottom('auto');
   }, [props.conversationId]);
@@ -163,6 +331,31 @@ export function ChatView(props: ChatViewProps): JSX.Element {
     setShowJump(!atBottom);
   }
 
+  function handleLoadEarlier(): void {
+    const node = scrollRef.current;
+    const previousHeight = node?.scrollHeight ?? 0;
+    setVisibleMessageCount((count) => Math.min(props.messages.length, count + MESSAGE_WINDOW_STEP));
+    window.requestAnimationFrame(() => {
+      if (!node) return;
+      node.scrollTop += node.scrollHeight - previousHeight;
+    });
+  }
+
+  async function openRunTimeline(): Promise<void> {
+    if (!props.conversationId) return;
+    setTimelineOpen(true);
+    setTimelineLoading(true);
+    setTimelineError(null);
+    try {
+      const events = await getConversationRunEvents(props.conversationId, 120);
+      setRunEvents(events);
+    } catch (error) {
+      setTimelineError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setTimelineLoading(false);
+    }
+  }
+
   return (
     <>
       <div className="topbar with-border">
@@ -176,6 +369,17 @@ export function ChatView(props: ChatViewProps): JSX.Element {
           </button>
           <button type="button" className="icon-btn" title="归档" onClick={props.onArchive}>
             <Icon name="archive" size={14} />
+          </button>
+          <button
+            type="button"
+            className="icon-btn"
+            title="运行记录"
+            onClick={() => {
+              void openRunTimeline();
+            }}
+            data-testid="open-run-timeline"
+          >
+            <Icon name="bolt" size={14} />
           </button>
           <button
             type="button"
@@ -194,16 +398,81 @@ export function ChatView(props: ChatViewProps): JSX.Element {
         </div>
       </div>
 
+      {timelineOpen && (
+        <div className="run-timeline-panel" data-testid="run-timeline-panel" role="dialog" aria-label="运行记录">
+          <div className="run-timeline-head">
+            <div>
+              <div className="run-timeline-kicker">运行记录</div>
+              <div className="run-timeline-heading">模型、工具与能力编排</div>
+            </div>
+            <button
+              type="button"
+              className="icon-btn"
+              title="关闭"
+              onClick={() => setTimelineOpen(false)}
+              data-testid="run-timeline-close"
+            >
+              <Icon name="close" size={14} />
+            </button>
+          </div>
+          <div className="run-timeline-body">
+            {timelineLoading && <div className="run-timeline-empty">正在读取运行记录…</div>}
+            {timelineError && <div className="run-timeline-empty is-error">{timelineError}</div>}
+            {!timelineLoading && !timelineError && runGroups.length === 0 && (
+              <div className="run-timeline-empty">当前会话还没有运行记录</div>
+            )}
+            {!timelineLoading && !timelineError && runGroups.map((group) => (
+              <div className="run-group" key={group.runId} data-testid="run-group">
+                <div className="run-group-title">
+                  <span>{group.runId}</span>
+                  <span>{group.events.length} 条事件</span>
+                </div>
+                <div className="run-events">
+                  {group.events.map((event) => {
+                    const summary = eventSummaryText(event);
+                    const isOrchestration = event.kind === 'orchestration.plan';
+                    return (
+                      <div
+                        className={`run-event ${isOrchestration ? 'is-orchestration' : ''}`}
+                        key={event.id ?? `${event.run_id}-${event.kind}-${event.created_at}`}
+                        data-testid="run-event"
+                        data-kind={event.kind}
+                      >
+                        <span className={`run-dot ${event.status}`} />
+                        <span className="run-event-kind">{event.label ?? event.kind}</span>
+                        <span className={`run-event-status ${event.status}`}>{eventStatusText(event.status)}</span>
+                        {summary && <span className="run-summary">{summary}</span>}
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
       <div className="convo scroll" ref={scrollRef} onScroll={handleScroll} data-testid="convo">
         <div className="convo-inner">
-          {props.messages.map((message) => (
-            <Message
+          {hiddenMessageCount > 0 && (
+            <div className="message-window-notice" data-testid="message-window-notice">
+              <button type="button" onClick={handleLoadEarlier} data-testid="message-load-earlier">
+                <Icon name="chevron" size={13} style={{ transform: 'rotate(-90deg)' }} />
+                <span>加载更早 {Math.min(hiddenMessageCount, MESSAGE_WINDOW_STEP)} 条</span>
+              </button>
+              <span>已收起 {hiddenMessageCount} 条历史，降低长对话占用</span>
+            </div>
+          )}
+          {visibleMessages.map((message) => (
+            <MemoizedMessage
               key={message.id}
               message={message}
               models={props.models}
-              onEditUserMessage={props.onEditUserMessage}
-              onBranchFromMessage={props.onBranchFromMessage}
-              onRecover={props.onRecover}
+              deepResearchObjective={previousUserContent(props.messages, message.id)}
+              onEditUserMessage={handleEditUserMessage}
+              onBranchFromMessage={handleBranchFromMessage}
+              onStartDeepResearch={handleStartDeepResearch}
+              onRecover={handleRecover}
             />
           ))}
         </div>
@@ -244,17 +513,31 @@ export function ChatView(props: ChatViewProps): JSX.Element {
   );
 }
 
+const MemoizedMessage = memo(Message, (prev, next) =>
+  sameMessageIdentity(prev.message, next.message) &&
+  prev.models === next.models &&
+  prev.deepResearchObjective === next.deepResearchObjective &&
+  prev.onEditUserMessage === next.onEditUserMessage &&
+  prev.onBranchFromMessage === next.onBranchFromMessage &&
+  prev.onStartDeepResearch === next.onStartDeepResearch &&
+  prev.onRecover === next.onRecover,
+);
+
 function Message({
   message,
   models,
+  deepResearchObjective,
   onEditUserMessage,
   onBranchFromMessage,
+  onStartDeepResearch,
   onRecover,
 }: {
   message: ConversationMessage;
   models: Model[];
+  deepResearchObjective: string;
   onEditUserMessage: (message: ConversationMessage) => void;
   onBranchFromMessage: (message: ConversationMessage) => void;
+  onStartDeepResearch: (objective: string) => void;
   onRecover: (
     message: ConversationMessage,
     action: 'continue' | 'retry_same_model' | 'compact_context',
@@ -262,6 +545,19 @@ function Message({
 }): JSX.Element {
   const toast = useToast();
   const [copied, setCopied] = useState(false);
+  const isStreaming = message.status === 'streaming';
+  const isPending = isStreaming && message.content.length === 0;
+  const isFailed = message.status === 'failed';
+  const isIncomplete = message.status === 'incomplete';
+  const lead = costLead(message, models);
+  const details = costDetails(message, models);
+  const liveMeta = streamingSummary(message);
+  const traces = toolTraces(message);
+  const orchestration = orchestrationAnnotation(message);
+  const renderedMarkdown = useMemo(
+    () => (message.role === 'assistant' && !isStreaming && !isPending ? renderMarkdown(message.content) : null),
+    [isPending, isStreaming, message.content, message.role],
+  );
 
   async function copyAssistantContent(): Promise<void> {
     try {
@@ -305,24 +601,17 @@ function Message({
       </div>
     );
   }
-  const isStreaming = message.status === 'streaming';
-  const isPending = isStreaming && message.content.length === 0;
-  const isFailed = message.status === 'failed';
-  const isIncomplete = message.status === 'incomplete';
-  const lead = costLead(message, models);
-  const details = costDetails(message, models);
-  const liveMeta = streamingSummary(message);
-  const traces = toolTraces(message);
-
   return (
     <div className="msg ai">
       <div className="avatar-mark">织</div>
       <div className="ai-body">
         {isPending ? (
           <p className="pending">正在思考…</p>
+        ) : isStreaming ? (
+          <pre className="streaming-plain cursor-blink">{message.content}</pre>
         ) : (
           <div className={isStreaming ? 'cursor-blink' : undefined}>
-            {renderMarkdown(message.content)}
+            {renderedMarkdown}
           </div>
         )}
         {(isFailed || isIncomplete) && (
@@ -371,6 +660,12 @@ function Message({
               </button>
             </div>
           </div>
+        )}
+        {orchestration && (
+          <OrchestrationNotice
+            plan={orchestration}
+            onStartDeepResearch={() => onStartDeepResearch(deepResearchObjective || message.content)}
+          />
         )}
         {traces.length > 0 && <ToolTraceList traces={traces} />}
         {liveMeta && <div className="msg-meta">{liveMeta}</div>}
@@ -436,6 +731,28 @@ function MessageCost({ lead, details }: { lead: string; details: string[] }): JS
             <span key={part}>{part}</span>
           ))}
         </div>
+      )}
+    </div>
+  );
+}
+
+function OrchestrationNotice({
+  plan,
+  onStartDeepResearch,
+}: {
+  plan: MessageAnnotation;
+  onStartDeepResearch?: () => void;
+}): JSX.Element {
+  const detail = orchestrationDetailText(plan);
+  return (
+    <div className="orchestration-notice" data-testid="orchestration-notice">
+      <Icon name="search" size={13} />
+      <span>{orchestrationReasonText(plan.reason)}</span>
+      {detail && <em>{detail}</em>}
+      {plan.external_info === 'deep_research_suggest' && onStartDeepResearch && (
+        <button type="button" className="orchestration-action" onClick={onStartDeepResearch}>
+          转为深度研究
+        </button>
       )}
     </div>
   );

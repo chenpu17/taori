@@ -32,6 +32,7 @@ import type {
   Tool,
   ToolCapability,
   ToolHealthRow,
+  OrchestrationAnnotation,
 } from '@taori/shared';
 import { authedFetch, getSidecarEndpoint } from './sidecar';
 
@@ -112,6 +113,14 @@ export interface MessageAnnotation {
   ok?: boolean | null;
   duration_ms?: number | null;
   run_id?: string;
+  reason?: OrchestrationAnnotation['reason'];
+  external_info?: OrchestrationAnnotation['external_info'];
+  local_context?: OrchestrationAnnotation['local_context'];
+  search_tool_name?: string | null;
+  query_count?: number | null;
+  fetch_top_k?: number | null;
+  cite_required?: boolean | null;
+  allow_model_tool_use?: boolean | null;
 }
 
 export interface ConversationMessage {
@@ -186,6 +195,7 @@ export type ChatStreamAnnotation =
       ok?: boolean | null;
       duration_ms?: number | null;
     }
+  | OrchestrationAnnotation
   | Record<string, unknown>;
 
 export async function health(): Promise<HealthResponse> {
@@ -577,7 +587,29 @@ async function consumeDataStream<TAnnotation>(
     if ((error as Error).name !== 'AbortError') {
       handlers.onError?.(error as Error);
     }
+  } finally {
+    buffer = '';
+    try {
+      reader.releaseLock();
+    } catch {
+      // The lock may already be released after cancellation.
+    }
   }
+}
+
+interface StreamOptions {
+  signal?: AbortSignal;
+}
+
+function bindAbortSignal(controller: AbortController, signal?: AbortSignal): () => void {
+  if (!signal) return () => undefined;
+  const abort = (): void => controller.abort();
+  if (signal.aborted) {
+    controller.abort();
+    return () => undefined;
+  }
+  signal.addEventListener('abort', abort, { once: true });
+  return () => signal.removeEventListener('abort', abort);
 }
 
 export async function streamChat(
@@ -588,9 +620,11 @@ export async function streamChat(
     onDone: () => void;
     onError: (error: Error) => void;
   },
+  options: StreamOptions = {},
 ): Promise<() => void> {
   const endpoint = await getSidecarEndpoint();
   const controller = new AbortController();
+  const unbindAbortSignal = bindAbortSignal(controller, options.signal);
   const response = await fetch(`${endpoint.url}/v1/chat`, {
     method: 'POST',
     credentials: 'include',
@@ -601,13 +635,18 @@ export async function streamChat(
     },
     body: JSON.stringify(request),
   }).catch((error: unknown) => {
-    handlers.onError(error as Error);
+    if ((error as Error).name !== 'AbortError') handlers.onError(error as Error);
     return null;
   });
   if (response) {
-    void consumeDataStream<ChatStreamAnnotation>(response, handlers);
+    void consumeDataStream<ChatStreamAnnotation>(response, handlers).finally(unbindAbortSignal);
+  } else {
+    unbindAbortSignal();
   }
-  return () => controller.abort();
+  return () => {
+    unbindAbortSignal();
+    controller.abort();
+  };
 }
 
 export async function streamRunContinue(
@@ -619,8 +658,9 @@ export async function streamRunContinue(
     onDone: () => void;
     onError: (error: Error) => void;
   },
+  options?: StreamOptions,
 ): Promise<() => void> {
-  return streamRunEndpoint(`/v1/runs/${runId}/continue`, request, handlers);
+  return streamRunEndpoint(`/v1/runs/${runId}/continue`, request, handlers, options);
 }
 
 export async function streamRunRecover(
@@ -637,8 +677,9 @@ export async function streamRunRecover(
     onDone: () => void;
     onError: (error: Error) => void;
   },
+  options?: StreamOptions,
 ): Promise<() => void> {
-  return streamRunEndpoint(`/v1/runs/${runId}/recover`, request, handlers);
+  return streamRunEndpoint(`/v1/runs/${runId}/recover`, request, handlers, options);
 }
 
 export interface QuickCompareState {
@@ -661,8 +702,9 @@ export async function streamQuickCompare(
     onDone: () => void;
     onError: (error: Error) => void;
   },
+  options?: StreamOptions,
 ): Promise<() => void> {
-  return streamEndpoint('/v1/quick-compare', request, handlers);
+  return streamEndpoint('/v1/quick-compare', request, handlers, options);
 }
 
 export async function getQuickCompare(id: string): Promise<QuickCompareState> {
@@ -707,8 +749,9 @@ export async function streamQuickCompareRetry(
     onDone: () => void;
     onError: (error: Error) => void;
   },
+  options?: StreamOptions,
 ): Promise<() => void> {
-  return streamEndpoint(`/v1/quick-compare/${compareId}/retry`, request, handlers);
+  return streamEndpoint(`/v1/quick-compare/${compareId}/retry`, request, handlers, options);
 }
 
 export interface RoundtableDetail {
@@ -761,8 +804,9 @@ export async function streamRoundtableRound(
     onDone: () => void;
     onError: (error: Error) => void;
   },
+  options?: StreamOptions,
 ): Promise<() => void> {
-  return streamEndpoint(`/v1/roundtable/${roundtableId}/round`, {}, handlers);
+  return streamEndpoint(`/v1/roundtable/${roundtableId}/round`, {}, handlers, options);
 }
 
 export async function streamRoundtableSummarize(
@@ -772,8 +816,9 @@ export async function streamRoundtableSummarize(
     onDone: () => void;
     onError: (error: Error) => void;
   },
+  options?: StreamOptions,
 ): Promise<() => void> {
-  return streamEndpoint(`/v1/roundtable/${roundtableId}/summarize`, {}, handlers);
+  return streamEndpoint(`/v1/roundtable/${roundtableId}/summarize`, {}, handlers, options);
 }
 
 export async function loopbackRoundtable(
@@ -1319,9 +1364,11 @@ async function streamRunEndpoint(
     onDone: () => void;
     onError: (error: Error) => void;
   },
+  options: StreamOptions = {},
 ): Promise<() => void> {
   const endpoint = await getSidecarEndpoint();
   const controller = new AbortController();
+  const unbindAbortSignal = bindAbortSignal(controller, options.signal);
   const response = await fetch(`${endpoint.url}${path}`, {
     method: 'POST',
     credentials: 'include',
@@ -1332,13 +1379,18 @@ async function streamRunEndpoint(
     },
     body: JSON.stringify(request),
   }).catch((error: unknown) => {
-    handlers.onError(error as Error);
+    if ((error as Error).name !== 'AbortError') handlers.onError(error as Error);
     return null;
   });
   if (response) {
-    void consumeDataStream<ChatStreamAnnotation>(response, handlers);
+    void consumeDataStream<ChatStreamAnnotation>(response, handlers).finally(unbindAbortSignal);
+  } else {
+    unbindAbortSignal();
   }
-  return () => controller.abort();
+  return () => {
+    unbindAbortSignal();
+    controller.abort();
+  };
 }
 
 async function streamEndpoint<TAnnotation>(
@@ -1349,9 +1401,11 @@ async function streamEndpoint<TAnnotation>(
     onDone: () => void;
     onError: (error: Error) => void;
   },
+  options: StreamOptions = {},
 ): Promise<() => void> {
   const endpoint = await getSidecarEndpoint();
   const controller = new AbortController();
+  const unbindAbortSignal = bindAbortSignal(controller, options.signal);
   const response = await fetch(`${endpoint.url}${path}`, {
     method: 'POST',
     credentials: 'include',
@@ -1362,7 +1416,7 @@ async function streamEndpoint<TAnnotation>(
     },
     body: JSON.stringify(request),
   }).catch((error: unknown) => {
-    handlers.onError(error as Error);
+    if ((error as Error).name !== 'AbortError') handlers.onError(error as Error);
     return null;
   });
   if (response) {
@@ -1370,7 +1424,12 @@ async function streamEndpoint<TAnnotation>(
       onAnnotation: handlers.onAnnotation,
       onDone: handlers.onDone,
       onError: handlers.onError,
-    });
+    }).finally(unbindAbortSignal);
+  } else {
+    unbindAbortSignal();
   }
-  return () => controller.abort();
+  return () => {
+    unbindAbortSignal();
+    controller.abort();
+  };
 }

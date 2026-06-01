@@ -143,6 +143,68 @@ test('visual: 织 design coverage', async ({ page }) => {
   await page.waitForTimeout(200);
   await page.screenshot({ path: path.join(SHOTS_DIR, '16-tool-trace.png'), fullPage: true });
 
+  // 10d. Orchestration notice + deep research handoff
+  await page.unroute('**/v1/chat');
+  await page.route('**/v1/conversations/conv_visual_orch/run-events?limit=120', async (route) => {
+    await route.fulfill({
+      status: 200,
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        ok: true,
+        data: {
+          events: [
+            {
+              id: 'evt_visual_orch',
+              run_id: 'run_visual_orch',
+              conversation_id: 'conv_visual_orch',
+              message_id: 'msg_visual_orch',
+              kind: 'orchestration.plan',
+              status: 'completed',
+              label: '能力编排计划',
+              summary: 'deep_research_candidate',
+              payload: {
+                reason: 'deep_research_candidate',
+                externalInfo: 'deep_research_suggest',
+                localContext: 'none',
+                searchToolName: 'builtin.web_search',
+                queries: ['桌面 AI 助手市场格局 2026'],
+                fetchTopK: 3,
+                citeRequired: true,
+              },
+              created_at: Date.now(),
+            },
+          ],
+        },
+      }),
+    });
+  });
+  await page.route('**/v1/chat', async (route) => {
+    const body = [
+      `8:[{"type":"meta","conversation_id":"conv_visual_orch","message_id":"msg_visual_orch","model_id":"${visualModelId}","run_id":"run_visual_orch"}]`,
+      `8:[{"type":"orchestration","message_id":"msg_visual_orch","conversation_id":"conv_visual_orch","run_id":"run_visual_orch","reason":"deep_research_candidate","external_info":"deep_research_suggest","local_context":"none","search_tool_name":"builtin.web_search","query_count":2,"fetch_top_k":3,"cite_required":true,"allow_model_tool_use":true}]`,
+      '0:"这类问题适合进入深度研究流程。"',
+      '8:[{"type":"cost","message_id":"msg_visual_orch","input_tokens":20,"output_tokens":8,"actual_usd":0.0001}]',
+      'd:{"finishReason":"stop","usage":{"promptTokens":20,"completionTokens":8}}',
+    ].join('\n');
+    await route.fulfill({
+      status: 200,
+      headers: { 'content-type': 'text/plain; charset=utf-8' },
+      body: `${body}\n`,
+    });
+  });
+  await page.getByRole('button', { name: /新对话/ }).first().click();
+  await page.getByTestId('composer-textarea').fill('系统研究 2026 年桌面 AI 助手市场格局、主要玩家、BYOK 用户需求和商业化机会。');
+  await page.getByTestId('composer-send').click();
+  await expect(page.getByTestId('orchestration-notice')).toContainText('问题适合深度研究', { timeout: 10_000 });
+  await page.waitForTimeout(200);
+  await page.screenshot({ path: path.join(SHOTS_DIR, '17-orchestration-research.png'), fullPage: true });
+  await page.getByTestId('open-run-timeline').click();
+  await expect(page.getByTestId('run-timeline-panel')).toContainText('能力编排计划');
+  await expect(page.getByTestId('run-timeline-panel')).toContainText('建议深度研究');
+  await page.waitForTimeout(200);
+  await page.screenshot({ path: path.join(SHOTS_DIR, '18-orchestration-timeline.png'), fullPage: true });
+  await page.getByTestId('run-timeline-close').click();
+
   // 11. Provider edit dialog
   await page.getByRole('button', { name: '设置' }).first().click();
   await page.getByRole('button', { name: '服务商', exact: true }).click();

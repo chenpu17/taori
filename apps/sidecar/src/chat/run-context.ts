@@ -17,6 +17,8 @@ import {
 } from './tool-policy.js';
 import { retrieveMemoryContext } from '../memory/retrieval.js';
 import { ensureFileIndexed } from '../files/indexer.js';
+import { buildChatOrchestrationPlan } from '../orchestration/context-router.js';
+import { buildWebSearchMessage, executeWebPreflight } from '../orchestration/web-context.js';
 
 type AttachmentForCtx = ProduceCtx['attachments'][number];
 
@@ -113,9 +115,13 @@ export async function buildProduceCtx(args: {
     used: FileSearchResult[];
     tokenEstimate: number;
   } = { message: null, used: [], tokenEstimate: 0 };
+  let webSearchContext: ProduceCtx['webSearchContext'] = null;
+  let webSearchMessage: { role: 'system'; content: string } | null = null;
+  let hasConversationFiles = false;
   if (args.fileChunksRepo && args.userText.trim()) {
     try {
       const files = args.filesRepo.listByConversation(args.conversationId);
+      hasConversationFiles = files.length > 0;
       for (const file of files) {
         await ensureFileIndexed(file, {
           filesRepo: args.filesRepo,
@@ -192,10 +198,46 @@ export async function buildProduceCtx(args: {
       });
     }
   }
+  const orchestrationPlan = buildChatOrchestrationPlan({
+    bus: args.deps.bus,
+    memoriesRepo: args.memoriesRepo,
+    conversationId: args.conversationId,
+    userText: args.userText,
+    hasConversationFiles,
+    skipToolName: args.skipToolName,
+  });
+  args.runEventsRepo.append({
+    run_id: args.runId,
+    conversation_id: args.conversationId,
+    message_id: args.messageId,
+    kind: 'orchestration.plan',
+    status: 'completed',
+    label: '能力编排计划',
+    summary: orchestrationPlan.reason,
+    payload: { ...orchestrationPlan },
+  });
+  webSearchContext = await executeWebPreflight({
+    bus: args.deps.bus,
+    runEventsRepo: args.runEventsRepo,
+    runId: args.runId,
+    conversationId: args.conversationId,
+    messageId: args.messageId,
+    sourceUserMessageId: args.sourceUserMessageId,
+    plan: orchestrationPlan,
+    canFetch: buildConversationToolPolicy(
+      args.deps.bus,
+      args.memoriesRepo,
+      args.conversationId,
+      { skipToolName: args.skipToolName },
+    )['builtin.web_fetch'] === true,
+    log: args.log,
+  });
+  webSearchMessage = buildWebSearchMessage(webSearchContext).message;
   const systemMessages = [
     ...(args.boundPersona ? [{ role: 'system' as const, content: args.boundPersona.prompt }] : []),
     ...(memoryContext.systemMessage ? [memoryContext.systemMessage] : []),
     ...(fileContext.message ? [fileContext.message] : []),
+    ...(webSearchMessage ? [webSearchMessage] : []),
   ];
   const defaultSearchToolName = args.memoriesRepo.getEffective(args.conversationId, 'default_search_tool');
   return {
@@ -232,5 +274,7 @@ export async function buildProduceCtx(args: {
     filesRepo: args.filesRepo,
     runEventsRepo: args.runEventsRepo,
     fileContextSnippets: fileContext.used,
+    webSearchContext,
+    orchestrationPlan,
   };
 }

@@ -143,6 +143,27 @@ export function applyChatAnnotations(
           },
         ],
       };
+    } else if (type === 'orchestration') {
+      const plan = annotation as Extract<ChatStreamAnnotation, { type: 'orchestration' }>;
+      target = {
+        ...target,
+        annotations: [
+          ...(target.annotations ?? []).filter((item) => item.type !== 'orchestration'),
+          {
+            type: 'orchestration',
+            message_id: plan.message_id ?? target.id,
+            run_id: plan.run_id ?? undefined,
+            reason: plan.reason,
+            external_info: plan.external_info,
+            local_context: plan.local_context,
+            search_tool_name: plan.search_tool_name,
+            query_count: plan.query_count,
+            fetch_top_k: plan.fetch_top_k,
+            cite_required: plan.cite_required,
+            allow_model_tool_use: plan.allow_model_tool_use,
+          },
+        ],
+      };
     }
   }
   nextMessages[targetIndex] = target;

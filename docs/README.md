@@ -38,6 +38,7 @@
 12. [P2 轻量 RAG 预备层变更提案](./architecture/21-p2-lightweight-rag-prep-proposal.md) — 文件 chunk、FTS/BM25、file_search 与 embedding 预留
 13. [Standalone Sidecar Daemon 模式提案](./architecture/31-standalone-daemon-mode-proposal.md) — npm standalone 常驻后台、status/stop 与远程 host 绑定
 14. [P7 工作流编排架构提案](./architecture/34-p7-workflow-orchestration-proposal.md) — workflow definition/run/node runtime、API、数据模型与验证门禁
+15. [基础能力编排内核提案](./architecture/36-capability-orchestration-kernel-proposal.md) — 请求内能力路由、联网预搜索、本地上下文与 run timeline 观测
 
 ### 我是模块作者
 - [模块清单](./modules/inventory.md) — 系统所有模块的灰盒一览

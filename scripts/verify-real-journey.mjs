@@ -106,6 +106,7 @@ function summarizeArtifact(dir) {
     'generated_image_to_vision_understanding',
     'web_fetch_tool_from_chat',
     'web_search_tool_from_chat',
+    'orchestration_plan_for_external_info',
     'mcp_tool_from_ordinary_chat',
     'real_context_window_and_compact_context_recover',
     'real_skip_tool_recovery',
@@ -735,6 +736,29 @@ async function latestRunEvents(env, conversationId) {
     `/v1/conversations/${encodeURIComponent(conversationId)}/run-events?limit=500`,
   );
   return body.data?.events ?? [];
+}
+
+async function assertExternalInfoOrchestration(env, conversationId, sourceText) {
+  const events = await latestRunEvents(env, conversationId);
+  const orchestrationEvents = events.filter((event) => event.kind === 'orchestration.plan');
+  const externalEvents = orchestrationEvents.filter((event) => {
+    const externalInfo = event.payload?.externalInfo;
+    return externalInfo === 'web_search' ||
+      externalInfo === 'web_search_fetch' ||
+      externalInfo === 'deep_research_suggest';
+  });
+  if (externalEvents.length === 0) {
+    fail('external-info journey completed but no orchestration.plan selected web context', {
+      conversation_id: conversationId,
+      source_text: sourceText,
+      orchestration_events: orchestrationEvents.map((event) => ({
+        run_id: event.run_id,
+        summary: event.summary,
+        payload: event.payload,
+      })),
+    });
+  }
+  return externalEvents[0];
 }
 
 async function summarizeToolAttempt(page, env, conversationId, toolName) {
@@ -1802,6 +1826,16 @@ async function runJourney({ env, caps }) {
       });
     }
     events.steps.push({ name: 'web_search_tool_from_chat', ok: true });
+    const externalInfoPlan = await assertExternalInfoOrchestration(env, conversationId, 'web_search_tool_from_chat');
+    events.steps.push({
+      name: 'orchestration_plan_for_external_info',
+      ok: true,
+      conversation_id: conversationId,
+      run_id: externalInfoPlan.run_id,
+      reason: externalInfoPlan.payload?.reason ?? externalInfoPlan.summary ?? null,
+      external_info: externalInfoPlan.payload?.externalInfo ?? null,
+      search_tool: externalInfoPlan.payload?.searchToolName ?? null,
+    });
 
     if (tempMcpServer) {
       const mcpToolName = `mcp.${tempMcpServer.id}.evidence`;

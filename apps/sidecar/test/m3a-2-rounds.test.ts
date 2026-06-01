@@ -62,6 +62,7 @@ async function makeCtx(): Promise<Ctx> {
       controlBearer: null,
       isDev: true,
       version: '0.0.0-test',
+      testHooks: { hermeticWeb: true },
     },
     db,
     control: new ControlClient({ url: null, bearer: null }),
@@ -125,6 +126,7 @@ async function seedFallbackRoundtable(
   ctx: Ctx,
   count = 3,
   mode: 'fast' | 'deep' = 'deep',
+  topic = 'should we use postgres',
 ): Promise<{ id: string; modelIds: string[] }> {
   const prov = ctx.providers.create({
     name: 'P',
@@ -162,7 +164,7 @@ async function seedFallbackRoundtable(
   }));
   const inserted = ctx.rt.insert({
     conversation_id: new ConversationsRepo(ctx.db).ensure(undefined, { type: 'roundtable' }).id,
-    topic: 'should we use postgres',
+    topic,
     mode,
     participants,
     summarizer_model_id: modelIds[0]!,
@@ -245,6 +247,70 @@ describe('M3.A.2 — POST /v1/roundtable/:id/round', () => {
       status: 'completed',
       conversation_id: rt.conversation_id,
     });
+  });
+
+  it('pre-searches current roundtable topics before participant calls', async () => {
+    const { id } = await seedFallbackRoundtable(
+      ctx,
+      2,
+      'deep',
+      '深圳初升高，模拟考试522分，家住坂田，如果要报名，什么建议？',
+    );
+    const rt = ctx.rt.get(id)!;
+    const providerBodies: Array<{ prompt?: string; messages?: Array<{ role?: string; content?: string }> }> = [];
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (url, init) => {
+      const asText = String(url);
+      const hostname = new URL(asText).hostname;
+      if (hostname === 'html.duckduckgo.com' || hostname === 'duckduckgo.com') {
+        return new Response(
+          `<!doctype html><html><body>
+            <a class="result__snippet">深圳圆桌初升高报名与分数线测试结果。</a>
+            <a class="result__a" href="https://example.com/rt-sz-admission">深圳圆桌升学报名建议</a>
+          </body></html>`,
+          { status: 200, headers: { 'content-type': 'text/html; charset=utf-8' } },
+        );
+      }
+      if (hostname === 'example.com') {
+        return new Response(
+          `<!doctype html><html><head><title>深圳圆桌升学报名建议</title></head><body>
+            <h1>深圳圆桌升学报名建议</h1>
+            <p>坂田、初升高、模拟考试 522 分与报名策略的 Roundtable 测试页面。</p>
+          </body></html>`,
+          { status: 200, headers: { 'content-type': 'text/html; charset=utf-8' } },
+        );
+      }
+      providerBodies.push(JSON.parse(String(init?.body ?? '{}')));
+      return new Response(makeSseStream(['Roundtable answer']), {
+        status: 200,
+        headers: { 'content-type': 'text/event-stream' },
+      });
+    });
+
+    const res = await ctx.app.inject({
+      method: 'POST',
+      url: `/v1/roundtable/${id}/round`,
+      headers: { authorization: `Bearer ${bearer}` },
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect(res.payload).toContain('"type":"rt.orchestration"');
+    expect(res.payload).toContain('"reason":"high_stakes_current"');
+    expect(res.payload).toContain('"external_info":"web_search_fetch"');
+    expect(res.payload).toContain('"rt.tool_trace"');
+    expect(res.payload).toContain('预搜索网页');
+    expect(providerBodies).toHaveLength(2);
+    expect(providerBodies.every((body) =>
+      String(body.prompt ?? body.messages?.map((message) => message.content).join('\n') ?? '')
+        .includes('系统已经按本轮编排计划完成联网预搜索') &&
+      String(body.prompt ?? body.messages?.map((message) => message.content).join('\n') ?? '')
+        .includes('web_page 1'),
+    )).toBe(true);
+    const events = ctx.runEvents.listByConversation(rt.conversation_id, 100);
+    expect(events.some((event) =>
+      event.kind === 'orchestration.plan' &&
+      event.payload?.run_kind === 'roundtable' &&
+      event.payload?.reason === 'high_stakes_current',
+    )).toBe(true);
   });
 
   it('majority failure → roundtable.status=failed', async () => {

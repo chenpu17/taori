@@ -31,7 +31,7 @@ import { Icon } from './Icon';
 import { ChatView } from './ChatView';
 import { CommandPalette } from './CommandPalette';
 import { EmptyState } from './EmptyState';
-import { FeatureHub } from './FeatureHub';
+import { FeatureHub, type FeatureTab } from './FeatureHub';
 import { Sidebar } from './Sidebar';
 import { SettingsView } from './SettingsView';
 import { useDialog } from './Dialog';
@@ -146,7 +146,8 @@ export function App(): JSX.Element {
   const [collapsed, setCollapsed] = useState(false);
   const [prefs, setPrefs] = useState<Prefs>(() => readPrefs());
   const [todayUsd, setTodayUsd] = useState<number | null>(null);
-  const [featuresTab, setFeaturesTab] = useState<'compare' | 'cost'>('compare');
+  const [featuresTab, setFeaturesTab] = useState<FeatureTab>('compare');
+  const [featureInitialPrompt, setFeatureInitialPrompt] = useState<string | null>(null);
 
   const [providers, setProviders] = useState<Provider[]>([]);
   const [models, setModels] = useState<Model[]>([]);
@@ -160,6 +161,7 @@ export function App(): JSX.Element {
   const [bootstrap, setBootstrap] = useState<'loading' | 'ready' | 'offline'>('loading');
   const [bootstrapError, setBootstrapError] = useState<string | null>(null);
   const stopStreamRef = useRef<(() => void) | null>(null);
+  const streamCleanupRef = useRef<(() => void) | null>(null);
   const streamTokenRef = useRef(0);
   const activeConversationIdRef = useRef<string | null>(null);
   const latestConversationIdRef = useRef<string | null>(null);
@@ -167,6 +169,61 @@ export function App(): JSX.Element {
 
   function isCurrentConversation(conversationId: string, streamToken: number): boolean {
     return streamTokenRef.current === streamToken && activeConversationIdRef.current === conversationId;
+  }
+
+  function appendAssistantText(
+    current: ConversationMessage[],
+    chunk: string,
+    targetMessageId?: string | null,
+  ): ConversationMessage[] {
+    const next = [...current];
+    const targetIndex = targetMessageId
+      ? next.findIndex((message) => message.id === targetMessageId)
+      : next.length - 1 - [...next].reverse().findIndex((message) => message.role === 'assistant');
+    const target = targetIndex >= 0 ? next[targetIndex] : null;
+    if (!target) return current;
+    next[targetIndex] = { ...target, content: `${target.content}${chunk}` };
+    return next;
+  }
+
+  function makeStreamTextBuffer(streamToken: number, getTargetMessageId?: () => string | null): {
+    enqueue: (chunk: string) => void;
+    flush: () => void;
+    cancel: () => void;
+  } {
+    let pending = '';
+    let frame: number | null = null;
+    const clear = (): void => {
+      if (frame != null) {
+        window.cancelAnimationFrame(frame);
+        frame = null;
+      }
+      pending = '';
+    };
+    const flush = (): void => {
+      if (frame != null) {
+        window.cancelAnimationFrame(frame);
+        frame = null;
+      }
+      const chunk = pending;
+      pending = '';
+      if (!chunk || streamTokenRef.current !== streamToken) return;
+      setMessages((current) => appendAssistantText(current, chunk, getTargetMessageId?.() ?? null));
+    };
+    return {
+      enqueue(chunk: string): void {
+        if (!chunk || streamTokenRef.current !== streamToken) return;
+        pending += chunk;
+        if (frame == null) frame = window.requestAnimationFrame(flush);
+      },
+      flush,
+      cancel: clear,
+    };
+  }
+
+  function cancelActiveStreamBuffer(): void {
+    streamCleanupRef.current?.();
+    streamCleanupRef.current = null;
   }
 
   useEffect(() => {
@@ -269,9 +326,17 @@ export function App(): JSX.Element {
     void bootstrapAll();
   }, [bootstrapAll]);
 
+  useEffect(() => () => {
+    streamTokenRef.current += 1;
+    stopStreamRef.current?.();
+    stopStreamRef.current = null;
+    cancelActiveStreamBuffer();
+  }, []);
+
   async function openConversation(id: string): Promise<void> {
     try {
       streamTokenRef.current += 1;
+      cancelActiveStreamBuffer();
       if (streaming) stopStreamRef.current?.();
       stopStreamRef.current = null;
       setStreaming(false);
@@ -299,6 +364,7 @@ export function App(): JSX.Element {
 
   function newChat(): void {
     streamTokenRef.current += 1;
+    cancelActiveStreamBuffer();
     if (streaming) stopStreamRef.current?.();
     stopStreamRef.current = null;
     setStreaming(false);
@@ -322,9 +388,16 @@ export function App(): JSX.Element {
     setModelPickerOpen(true);
   }
 
-  function openFeatures(tab: 'compare' | 'cost' = 'compare'): void {
+  function openFeatures(tab: FeatureTab = 'compare', prompt?: string): void {
     setFeaturesTab(tab);
+    setFeatureInitialPrompt(prompt?.trim() || null);
     setView('features');
+  }
+
+  function openDeepResearch(objective: string): void {
+    const trimmed = objective.trim();
+    openFeatures('research', trimmed || undefined);
+    if (trimmed) toast.info('已带入深度研究目标。');
   }
 
   async function selectDefaultModel(model: Model): Promise<void> {
@@ -373,6 +446,10 @@ export function App(): JSX.Element {
     setView('chat');
     const streamToken = streamTokenRef.current + 1;
     streamTokenRef.current = streamToken;
+    const textBuffer = makeStreamTextBuffer(streamToken);
+    streamCleanupRef.current = textBuffer.cancel;
+    const abortController = new AbortController();
+    stopStreamRef.current = () => abortController.abort();
 
     const stop = await streamChat(
       {
@@ -385,19 +462,11 @@ export function App(): JSX.Element {
       {
         onText: (chunk) => {
           if (streamTokenRef.current !== streamToken) return;
-          setMessages((current) => {
-            const next = [...current];
-            const reverse = [...next].reverse().findIndex((m) => m.role === 'assistant');
-            if (reverse < 0) return current;
-            const targetIndex = next.length - 1 - reverse;
-            const target = next[targetIndex];
-            if (!target) return current;
-            next[targetIndex] = { ...target, content: `${target.content}${chunk}` };
-            return next;
-          });
+          textBuffer.enqueue(chunk);
         },
         onAnnotation: (annotations: ChatStreamAnnotation[]) => {
           if (streamTokenRef.current !== streamToken) return;
+          textBuffer.flush();
           setMessages((current) => {
             const applied = applyChatAnnotations(current, annotations);
             if (applied.conversationId) {
@@ -412,7 +481,9 @@ export function App(): JSX.Element {
         },
         onDone: () => {
           if (streamTokenRef.current !== streamToken) return;
+          textBuffer.flush();
           stopStreamRef.current = null;
+          streamCleanupRef.current = null;
           setStreaming(false);
           setMessages((current) =>
             current.map((message) =>
@@ -435,7 +506,9 @@ export function App(): JSX.Element {
         },
         onError: (streamError) => {
           if (streamTokenRef.current !== streamToken) return;
+          textBuffer.flush();
           stopStreamRef.current = null;
+          streamCleanupRef.current = null;
           setStreaming(false);
           const detail = describeError(streamError);
           toast.error(detail);
@@ -448,8 +521,13 @@ export function App(): JSX.Element {
           );
         },
       },
+      { signal: abortController.signal },
     );
-    stopStreamRef.current = stop;
+    if (streamTokenRef.current === streamToken) {
+      stopStreamRef.current = stop;
+    } else {
+      stop();
+    }
   }
 
   async function updateConversation(id: string, patch: Parameters<typeof patchConversation>[1]): Promise<void> {
@@ -480,6 +558,31 @@ export function App(): JSX.Element {
       toast.success('已删除对话。');
     } catch (error) {
       toast.error(describeError(error));
+    }
+  }
+
+  async function removeConversationsBulk(targets: Conversation[]): Promise<boolean> {
+    const uniqueTargets = Array.from(new Map(targets.map((conversation) => [conversation.id, conversation])).values());
+    if (uniqueTargets.length === 0) return false;
+    const confirmed = await dialog.confirm({
+      title: `删除 ${uniqueTargets.length} 个对话？`,
+      description: '选中的对话、消息和工具调用记录会一并删除，且不可恢复。',
+      tone: 'danger',
+      okLabel: '删除',
+    });
+    if (!confirmed) return false;
+    try {
+      await Promise.all(uniqueTargets.map((conversation) => deleteConversation(conversation.id)));
+      if (activeConversationId && uniqueTargets.some((conversation) => conversation.id === activeConversationId)) {
+        newChat();
+      }
+      await refreshCore();
+      toast.success(`已删除 ${uniqueTargets.length} 个对话。`);
+      return true;
+    } catch (error) {
+      toast.error(describeError(error));
+      await refreshCore().catch(() => undefined);
+      return false;
     }
   }
 
@@ -544,18 +647,19 @@ export function App(): JSX.Element {
     streamTokenRef.current = streamToken;
     setMessages((current) => current.map((item) => (item.id === message.id ? assistantMessage : item)));
     setStreaming(true);
+    const textBuffer = makeStreamTextBuffer(streamToken, () => targetMessageId);
+    streamCleanupRef.current = textBuffer.cancel;
+    const abortController = new AbortController();
+    stopStreamRef.current = () => abortController.abort();
 
     const handlers = {
       onText: (chunk: string) => {
         if (streamTokenRef.current !== streamToken) return;
-        setMessages((current) =>
-          current.map((item) =>
-            item.id === targetMessageId ? { ...item, content: `${item.content}${chunk}` } : item,
-          ),
-        );
+        textBuffer.enqueue(chunk);
       },
       onAnnotation: (annotations: ChatStreamAnnotation[]) => {
         if (streamTokenRef.current !== streamToken) return;
+        textBuffer.flush();
         setMessages((current) => {
           const applied = applyChatAnnotations(current, annotations, targetMessageId);
           if (applied.targetMessageId) targetMessageId = applied.targetMessageId;
@@ -568,7 +672,9 @@ export function App(): JSX.Element {
       },
       onDone: () => {
         if (streamTokenRef.current !== streamToken) return;
+        textBuffer.flush();
         stopStreamRef.current = null;
+        streamCleanupRef.current = null;
         setStreaming(false);
         setMessages((current) =>
           current.map((item) => (item.id === targetMessageId ? { ...item, status: 'complete' } : item)),
@@ -580,7 +686,9 @@ export function App(): JSX.Element {
       },
       onError: (error: Error) => {
         if (streamTokenRef.current !== streamToken) return;
+        textBuffer.flush();
         stopStreamRef.current = null;
+        streamCleanupRef.current = null;
         setStreaming(false);
         const detail = describeError(error);
         setMessages((current) =>
@@ -593,13 +701,18 @@ export function App(): JSX.Element {
     };
 
     const stop = action === 'continue'
-      ? await streamRunContinue(runId, { confirmed_cost: true }, handlers)
+      ? await streamRunContinue(runId, { confirmed_cost: true }, handlers, { signal: abortController.signal })
       : await streamRunRecover(
           runId,
           { action, confirmed_cost: true },
           handlers,
+          { signal: abortController.signal },
         );
-    stopStreamRef.current = stop;
+    if (streamTokenRef.current === streamToken) {
+      stopStreamRef.current = stop;
+    } else {
+      stop();
+    }
   }
 
   async function attachFiles(files: FileList): Promise<void> {
@@ -631,6 +744,7 @@ export function App(): JSX.Element {
   function stopStreaming(): void {
     if (!streaming) return;
     streamTokenRef.current += 1;
+    cancelActiveStreamBuffer();
     stopStreamRef.current?.();
     stopStreamRef.current = null;
     setStreaming(false);
@@ -700,6 +814,7 @@ export function App(): JSX.Element {
       return (
         <FeatureHub
           initialTab={featuresTab}
+          initialPrompt={featureInitialPrompt}
           providers={providers}
           models={models}
           conversations={conversations}
@@ -769,6 +884,7 @@ export function App(): JSX.Element {
           onBranchFromMessage={(message) => {
             void branchFromMessage(message);
           }}
+          onStartDeepResearch={openDeepResearch}
           onRecover={(message, action) => {
             void recoverAssistantMessage(message, action);
           }}
@@ -813,6 +929,10 @@ export function App(): JSX.Element {
             const recent = conversations[0];
             if (recent) void openConversation(recent.id);
           }}
+          onOpenFeature={(tab, prompt) => {
+            setComposer('');
+            openFeatures(tab, prompt);
+          }}
         />
       </>
     );
@@ -822,6 +942,7 @@ export function App(): JSX.Element {
     <div className="app" data-sidebar={collapsed ? 'collapsed' : 'expanded'}>
       <Sidebar
         view={view}
+        activeFeatureTab={featuresTab === 'tools' ? 'tools' : featuresTab === 'cost' ? 'cost' : 'features'}
         conversations={conversations}
         activeConversationId={activeConversationId}
         collapsed={collapsed}
@@ -850,7 +971,9 @@ export function App(): JSX.Element {
         onDeleteConversation={(conversation) => {
           void removeConversation(conversation.id);
         }}
+        onBulkDeleteConversations={removeConversationsBulk}
         onOpenFeatures={() => openFeatures()}
+        onOpenTools={() => openFeatures('tools')}
         onOpenSettings={openSettings}
         onOpenPalette={() => setPaletteOpen(true)}
         todayUsd={todayUsd}

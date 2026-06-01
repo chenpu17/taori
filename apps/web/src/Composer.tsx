@@ -23,6 +23,16 @@ interface ComposerProps {
 export function Composer(props: ComposerProps): JSX.Element {
   const ref = useRef<HTMLTextAreaElement | null>(null);
   const composingRef = useRef(false);
+  const suppressNextEnterRef = useRef(false);
+  const suppressNextEnterTimerRef = useRef<number | null>(null);
+
+  useEffect(() => {
+    return () => {
+      if (suppressNextEnterTimerRef.current !== null) {
+        window.clearTimeout(suppressNextEnterTimerRef.current);
+      }
+    };
+  }, []);
 
   useEffect(() => {
     const node = ref.current;
@@ -32,12 +42,21 @@ export function Composer(props: ComposerProps): JSX.Element {
   }, [props.value]);
 
   const handleKeyDown = (event: React.KeyboardEvent<HTMLTextAreaElement>) => {
-    if (
+    const nativeEvent = event.nativeEvent as KeyboardEvent & { isComposing?: boolean };
+    const isImeEnter =
       event.key === 'Enter' &&
-      !event.shiftKey &&
-      !composingRef.current &&
-      !event.nativeEvent.isComposing
-    ) {
+      (composingRef.current ||
+        nativeEvent.isComposing ||
+        nativeEvent.keyCode === 229 ||
+        suppressNextEnterRef.current);
+
+    if (isImeEnter) {
+      event.preventDefault();
+      if (suppressNextEnterRef.current) suppressNextEnterRef.current = false;
+      return;
+    }
+
+    if (event.key === 'Enter' && !event.shiftKey) {
       event.preventDefault();
       if (!props.streaming && !props.disabled && props.value.trim().length > 0) {
         props.onSubmit();
@@ -84,9 +103,22 @@ export function Composer(props: ComposerProps): JSX.Element {
         onKeyDown={handleKeyDown}
         onCompositionStart={() => {
           composingRef.current = true;
+          suppressNextEnterRef.current = false;
+          if (suppressNextEnterTimerRef.current !== null) {
+            window.clearTimeout(suppressNextEnterTimerRef.current);
+            suppressNextEnterTimerRef.current = null;
+          }
         }}
         onCompositionEnd={() => {
           composingRef.current = false;
+          suppressNextEnterRef.current = true;
+          if (suppressNextEnterTimerRef.current !== null) {
+            window.clearTimeout(suppressNextEnterTimerRef.current);
+          }
+          suppressNextEnterTimerRef.current = window.setTimeout(() => {
+            suppressNextEnterRef.current = false;
+            suppressNextEnterTimerRef.current = null;
+          }, 120);
         }}
         style={props.large ? { minHeight: 56 } : undefined}
         data-testid="composer-textarea"

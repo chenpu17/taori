@@ -23,6 +23,8 @@
 
 ## 当前合同变化
 
+- `RunEventKindSchema` 新增 `orchestration.plan`，用于 Sidecar 在普通聊天和后续编排型任务中记录结构化能力编排计划；这是 additive run timeline 合同，旧事件读取不受影响。
+- 新增 `OrchestrationAnnotationSchema` / `OrchestrationAnnotation`，并把同一摘要挂到普通聊天 `orchestration`、Quick Compare `qc.orchestration`、Roundtable `rt.orchestration` 流事件中，用于 Renderer 展示“为什么自动联网 / 是否要求引用 / 使用哪个搜索工具”。字段全部 additive，旧客户端可忽略。
 - 新增 `PricingMetaSchema` 与 `Model.pricing_meta`。
 - 新增 `McpServer*` schema 与 `mcp_server` ID 前缀。
 - `RoundtableAnnotation` 新增 `rt.tool_trace`。

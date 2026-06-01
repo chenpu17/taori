@@ -154,6 +154,29 @@ function isModelUsable(model: Model, provider: Provider | undefined, now = Date.
   );
 }
 
+function modelAvailability(model: Model, provider: Provider | undefined, now = Date.now()): {
+  kind: 'available' | 'needs_action' | 'avoid' | 'off';
+  label: string;
+  detail: string;
+} {
+  if (!model.enabled) {
+    return { kind: 'off', label: '已停用', detail: '不会被聊天、对比或备援自动选中。' };
+  }
+  if (provider?.enabled !== true) {
+    return { kind: 'needs_action', label: '需要处理', detail: '服务商已停用，启用服务商后才能调用。' };
+  }
+  if (model.demoted) {
+    return { kind: 'avoid', label: '暂时避开', detail: '近期失败较多，Taori 会降低它的优先级。' };
+  }
+  if (isModelTemporarilyDisabled(model, now)) {
+    return { kind: 'avoid', label: '暂时避开', detail: `${formatDurationFromNow(model.disabled_until!)} 后自动恢复候选。` };
+  }
+  if (model.failure_count_24h > 0) {
+    return { kind: 'needs_action', label: '需要处理', detail: `最近连续失败 ${model.failure_count_24h} 次，建议探测或恢复可用。` };
+  }
+  return { kind: 'available', label: '可用', detail: '可用于聊天、对比和备援。' };
+}
+
 function closeMenuAfterAction(event: MouseEvent<HTMLElement>): void {
   const details = event.currentTarget.closest('details');
   if (details) details.open = false;
@@ -260,9 +283,14 @@ function ModelSettings(props: SettingsViewProps): JSX.Element {
   const currentDefaultProvider = currentDefaultModel
     ? currentDefaultModel.provider_id ? providerById.get(currentDefaultModel.provider_id) : undefined
     : null;
-  const unavailableModelCount = props.models.filter(
-    (model) => !isModelUsable(model, model.provider_id ? providerById.get(model.provider_id) : undefined),
-  ).length;
+  const availabilityCounts = useMemo(() => {
+    const counts = { available: 0, needs_action: 0, avoid: 0, off: 0 };
+    for (const model of props.models) {
+      const provider = model.provider_id ? providerById.get(model.provider_id) : undefined;
+      counts[modelAvailability(model, provider).kind] += 1;
+    }
+    return counts;
+  }, [props.models, providerById]);
   const filteredModels = useMemo(() => {
     const query = modelQuery.trim().toLowerCase();
     return props.models.filter((model) => {
@@ -462,8 +490,10 @@ function ModelSettings(props: SettingsViewProps): JSX.Element {
           </div>
           <div className="summary-stats">
             <span>{usableChatModels.length}/{chatModels.length} 个聊天模型可用</span>
-            <span>{props.models.length} 个总模型</span>
-            {unavailableModelCount > 0 && <span>{unavailableModelCount} 个需处理</span>}
+            <span>可用 {availabilityCounts.available} · 需处理 {availabilityCounts.needs_action}</span>
+            {(availabilityCounts.avoid > 0 || availabilityCounts.off > 0) && (
+              <span>暂时避开 {availabilityCounts.avoid} · 已停用 {availabilityCounts.off}</span>
+            )}
           </div>
         </section>
       )}
@@ -823,6 +853,7 @@ function ModelRow(props: ModelRowProps): JSX.Element {
   const disabledActive = isModelTemporarilyDisabled(model);
   const providerDisabled = !props.provider.enabled;
   const unavailable = !isModelUsable(model, props.provider);
+  const availability = modelAvailability(model, props.provider);
   const canResetHealth = model.demoted || disabledActive || model.failure_count_24h > 0;
   const canMakeDefault = isChat && !isDefault && !unavailable;
   const priceText = `输入 ${pricePerMillion(model.price_input_per_1m)}/1M · 输出 ${pricePerMillion(model.price_output_per_1m)}/1M`;
@@ -884,13 +915,12 @@ function ModelRow(props: ModelRowProps): JSX.Element {
         </div>
         <div className="model-state-chips" aria-label={`${modelLabel(model)} 状态`}>
           {isDefault && <span className="state-chip ok">默认 chat</span>}
-          {!model.enabled && <span className="state-chip off">已停用</span>}
+          <span className={`state-chip primary ${availability.kind}`}>
+            {availability.label}
+          </span>
           {providerDisabled && <span className="state-chip off">服务商停用</span>}
-          {model.demoted && <span className="state-chip warn">已降级</span>}
-          {disabledActive && <span className="state-chip warn">临时停用 {formatDurationFromNow(model.disabled_until!)}</span>}
-          {isModelUsable(model, props.provider) && (
-            <span className="state-chip ok">可用</span>
-          )}
+          {model.demoted && <span className="state-chip warn">已降低优先级</span>}
+          {disabledActive && <span className="state-chip warn">约 {formatDurationFromNow(model.disabled_until!)} 后恢复</span>}
           {model.failure_count_24h > 0 && (
             <span className="state-chip warn">连续失败 {model.failure_count_24h}</span>
           )}
@@ -902,6 +932,7 @@ function ModelRow(props: ModelRowProps): JSX.Element {
       </div>
       <div className="mr-health">
         <strong>{healthText}</strong>
+        <span>{availability.detail}</span>
         <span>{lastFailureText}</span>
         <span>{priceText}</span>
       </div>

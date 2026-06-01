@@ -12,8 +12,16 @@ async function expectNoHorizontalOverflow(page: import('@playwright/test').Page)
       document.body,
       ...Array.from(document.querySelectorAll('.sidebar, .main, .feature-shell, .feature-panel, .compare-grid, .round-grid, .tool-grid')),
     ];
-    return nodes.every((node) => node.scrollWidth <= node.clientWidth + 1);
-  })).toBe(true);
+    return nodes
+      .filter((node) => node.scrollWidth > node.clientWidth + 1)
+      .map((node) => ({
+        tag: node instanceof Element ? node.tagName.toLowerCase() : 'node',
+        className: node instanceof Element ? node.className : '',
+        testId: node instanceof Element ? node.getAttribute('data-testid') : null,
+        scrollWidth: node.scrollWidth,
+        clientWidth: node.clientWidth,
+      }));
+  })).toEqual([]);
 }
 
 async function expectMobileSidebarIsIconRail(page: Page): Promise<void> {
@@ -205,6 +213,71 @@ test('P1 UX: Quick Compare skips models from disabled providers', async ({ page 
   await expect(page.getByTestId('quick-compare-model-dialog')).not.toContainText('Provider Off B');
 });
 
+test('P1 stability: leaving Quick Compare aborts the active stream', async ({ page }) => {
+  await clearAllData();
+  await seedModels(['Abort A', 'Abort B']);
+  let markRouteStarted: (() => void) | null = null;
+  let releaseRoute: (() => void) | null = null;
+  const routeStarted = new Promise<void>((resolve) => {
+    markRouteStarted = resolve;
+  });
+  const routeReleased = new Promise<void>((resolve) => {
+    releaseRoute = resolve;
+  });
+  const requestFailed = page.waitForEvent('requestfailed', (request) =>
+    request.url().includes('/v1/quick-compare'),
+  );
+
+  await page.route('**/v1/quick-compare', async (route) => {
+    markRouteStarted?.();
+    await routeReleased;
+    await route.fulfill({
+      status: 200,
+      headers: { 'content-type': 'text/plain; charset=utf-8' },
+      body: 'd:{"finishReason":"stop"}\n',
+    }).catch(() => undefined);
+  });
+
+  await openFeatureHub(page);
+  await page.getByTestId('quick-compare-prompt').fill('这个请求应该在离开面板时取消');
+  await page.getByTestId('quick-compare-start').click();
+  await routeStarted;
+  await expect(page.getByTestId('quick-compare-start')).toContainText('对比中');
+  await page.getByTestId('feature-tab-research').click();
+
+  await expect(requestFailed).resolves.toBeTruthy();
+  releaseRoute?.();
+});
+
+test('P1 UX: Quick Compare shows orchestration reason before tool traces', async ({ page }) => {
+  await clearAllData();
+  await seedModels(['QC Orchestration A', 'QC Orchestration B']);
+
+  await page.route('**/v1/quick-compare', async (route) => {
+    await fulfillStream(route, [
+      '8:[{"type":"qc.meta","compare_id":"qc_orch","conversation_id":"conv_qc_orch","run_id":"run_qc_orch","model_ids":["mdl_a","mdl_b"]}]',
+      '8:[{"type":"qc.orchestration","compare_id":"qc_orch","message_id":"msg_qc_orch","conversation_id":"conv_qc_orch","run_id":"run_qc_orch","reason":"high_stakes_current","external_info":"web_search_fetch","local_context":"none","search_tool_name":"builtin.web_search","query_count":2,"fetch_top_k":2,"cite_required":true,"allow_model_tool_use":true}]',
+      '8:[{"type":"qc.participant_start","output_id":"qco_1","index":0,"model_id":"mdl_a","provider_id":null,"execution_mode":"live","tool_names":[]}]',
+      '8:[{"type":"qc.participant_done","output_id":"qco_1","index":0,"model_id":"mdl_a","content":"候选 A 已结合搜索。","cost_record_id":null,"execution_mode":"live"}]',
+      '8:[{"type":"qc.participant_start","output_id":"qco_2","index":1,"model_id":"mdl_b","provider_id":null,"execution_mode":"live","tool_names":[]}]',
+      '8:[{"type":"qc.participant_done","output_id":"qco_2","index":1,"model_id":"mdl_b","content":"候选 B 已结合搜索。","cost_record_id":null,"execution_mode":"live"}]',
+      '8:[{"type":"qc.tool_trace","output_id":"qco_1","index":0,"model_id":"mdl_a","call_id":"pre_search","tool":"builtin.web_search","label":"预搜索网页","event":"finish","input":"深圳初升高","output":"返回 8 条结果","ok":true}]',
+      '8:[{"type":"qc.done","compare_id":"qc_orch","completed_output_ids":["qco_1","qco_2"],"failed_output_ids":[]}]',
+      'd:{"finishReason":"stop"}',
+    ]);
+  });
+
+  await openFeatureHub(page);
+  await page.getByTestId('quick-compare-prompt').fill('深圳初升高，模拟考试522分，家住坂田，如果要报名，什么建议？');
+  await page.getByTestId('quick-compare-start').click();
+
+  await expect(page.getByTestId('feature-orchestration-notice')).toContainText('涉及报名、政策或高风险时效信息', { timeout: 10_000 });
+  await expect(page.getByTestId('feature-orchestration-notice')).toContainText('搜索并预读网页');
+  await expect(page.getByTestId('feature-orchestration-notice')).toContainText('要求引用来源');
+  await expect(page.getByTestId('quick-compare-tool-traces')).toContainText('预搜索网页');
+  await expect(page.getByTestId('quick-compare-output-0')).toContainText('候选 A 已结合搜索');
+});
+
 test('P1 journey: roundtable create, round stream, summarize, loopback, and export', async ({ page }) => {
   await clearAllData();
   await seedMockChatModel('P1 Roundtable Base');
@@ -366,8 +439,8 @@ test('P1 journey: files search plus tools and MCP management are usable', async 
   await expect(page.getByTestId('file-data-preview')).toContainText('text/plain', { timeout: 10_000 });
 
   await page.getByTestId('feature-tab-tools').click();
-  await page.getByTestId('tools-refresh').click();
   await expect(page.getByTestId('tool-row-builtin.file_search')).toContainText('enabled', { timeout: 10_000 });
+  await page.getByText('调试工具调用').click();
   await page.getByTestId('tool-invoke-input').fill('{"query":"hawthorn","limit":2}');
   await page.getByTestId('tool-invoke-builtin.file_search').click();
   await expect(page.getByTestId('tool-invoke-result')).toContainText('hawthorn', { timeout: 10_000 });
@@ -417,7 +490,6 @@ test('P1 visual: feature hub key states on desktop and mobile', async ({ page })
   await page.screenshot({ path: path.join(screenshotsDir, '18-p1-research.png'), fullPage: true });
 
   await page.getByTestId('feature-tab-tools').click();
-  await page.getByTestId('tools-refresh').click();
   await expect(page.getByTestId('tool-row-builtin.web_fetch')).toBeVisible({ timeout: 10_000 });
   await expectNoHorizontalOverflow(page);
   await page.screenshot({ path: path.join(screenshotsDir, '19-p1-tools.png'), fullPage: true });

@@ -173,3 +173,80 @@ export async function seedMockChatModel(displayName: string): Promise<{ provider
   });
   return { providerId: provider.id, modelId: model.id };
 }
+
+export async function seedLongConversation(args: {
+  conversationId?: string;
+  title?: string;
+  modelId: string;
+  messageCount: number;
+}): Promise<{ conversationId: string }> {
+  const now = Date.now();
+  const conversationId = args.conversationId ?? `conv_long_${now}`;
+  const title = args.title ?? '长对话稳定性';
+  const messages = Array.from({ length: args.messageCount }, (_, index) => {
+    const sequence = index + 1;
+    const role = index % 2 === 0 ? 'user' : 'assistant';
+    return {
+      id: `msg_long_${sequence}`,
+      conversation_id: conversationId,
+      role,
+      content: `长对话第 ${sequence} 条 ${role === 'user' ? '用户问题' : '助手回答'}`,
+      model_id: role === 'assistant' ? args.modelId : null,
+      parent_message_id: null,
+      attachments: null,
+      status: 'complete',
+      error: null,
+      created_at: now + sequence,
+    };
+  });
+
+  await sidecarJson('/v1/admin/import-data', {
+    method: 'POST',
+    body: JSON.stringify({
+      strategy: 'overwrite',
+      backup: {
+        format_version: 'taori-backup-v1',
+        exported_at: now,
+        app_version: 'e2e',
+        counts: {
+          providers: 0,
+          models: 0,
+          conversations: 1,
+          messages: messages.length,
+          files: 0,
+          memories: 0,
+          prompt_templates: 0,
+          personas: 0,
+          cost_records: 0,
+          roundtables: 0,
+          roundtable_messages: 0,
+        },
+        warnings: [],
+        data: {
+          providers: [],
+          models: [],
+          conversations: [{
+            id: conversationId,
+            type: 'chat',
+            title,
+            created_at: now,
+            updated_at: now + args.messageCount + 1,
+            archived: false,
+            pinned: false,
+            tags: null,
+          }],
+          messages,
+          files: [],
+          memories: [],
+          prompt_templates: [],
+          personas: [],
+          cost_records: [],
+          roundtables: [],
+          roundtable_messages: [],
+        },
+      },
+    }),
+  });
+
+  return { conversationId };
+}

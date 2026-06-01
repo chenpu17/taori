@@ -155,6 +155,7 @@ export async function produceUpstreamStream(
   ctx.contextWindowStats = upstream.stats;
 
   emitMetaAndContextSnapshot(stream, ctx);
+  emitPreflightWebSearchTrace(stream, ctx, observer);
 
   try {
     recordRunEvent(ctx, {
@@ -455,6 +456,7 @@ export async function produceKeyMissingStream(
 ): Promise<void> {
   captureContextWindowStats(ctx);
   emitMetaAndContextSnapshot(stream, ctx);
+  emitPreflightWebSearchTrace(stream, ctx, observer);
   recordRunEvent(ctx, {
     kind: 'model.started',
     status: 'started',
@@ -491,6 +493,7 @@ export async function produceMockStream(
   let firstTokenAt: number | null = null;
   captureContextWindowStats(ctx);
   emitMetaAndContextSnapshot(stream, ctx);
+  emitPreflightWebSearchTrace(stream, ctx, observer);
   recordRunEvent(ctx, {
     kind: 'model.started',
     status: 'started',
@@ -580,6 +583,41 @@ function mockReply(userText: string): string {
   if (!userText) return 'Hello from Taori M0 spike. The end-to-end stream works. ✅';
   return `[M0 mock] You said: "${userText.slice(0, 200)}". ` +
     `End-to-end Renderer→Sidecar streaming is working. ✅`;
+}
+
+function emitPreflightWebSearchTrace(
+  stream: PassThrough,
+  ctx: ProduceCtx,
+  observer?: StreamObserver,
+): void {
+  const search = ctx.webSearchContext;
+  if (!search?.results.length) return;
+  for (const [index, page] of (search.fetchedPages ?? []).entries()) {
+    writeAnnotationPart(stream, [{
+      type: 'tool_trace',
+      message_id: ctx.messageId,
+      event: 'finish',
+      call_id: `${ctx.messageId}:pre_web_fetch:${index}`,
+      tool: 'builtin.web_fetch',
+      label: '预读取网页',
+      input: page.url,
+      ok: true,
+      output: page.title,
+      duration_ms: null,
+    }], observer);
+  }
+  writeAnnotationPart(stream, [{
+    type: 'tool_trace',
+    message_id: ctx.messageId,
+    event: 'finish',
+    call_id: `${ctx.messageId}:pre_web_search`,
+    tool: search.toolName,
+    label: '预搜索网页',
+    input: search.query,
+    ok: true,
+    output: `返回 ${search.results.length} 条结果`,
+    duration_ms: null,
+  }], observer);
 }
 
 function* chunkText(s: string, size: number): Generator<string> {

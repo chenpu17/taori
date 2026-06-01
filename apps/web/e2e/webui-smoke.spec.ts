@@ -2,6 +2,12 @@ import { expect, test } from '@playwright/test';
 import { clearAllData } from './test-api';
 
 test('织 empty state and settings entry render', async ({ page }) => {
+  const runtimeErrors: string[] = [];
+  page.on('pageerror', (error) => runtimeErrors.push(error.message));
+  page.on('console', (message) => {
+    if (message.type() === 'error') runtimeErrors.push(message.text());
+  });
+
   // Isolate from other specs sharing the worker's sidecar: the empty-state and
   // provider-empty CTA assertions below require a clean database.
   await clearAllData();
@@ -35,4 +41,5 @@ test('织 empty state and settings entry render', async ({ page }) => {
   // Back to light to leave a clean state
   await page.getByTestId('theme-light').click();
   await expect(page.locator('html')).toHaveAttribute('data-theme', 'light');
+  expect(runtimeErrors.filter((message) => message.includes('Invalid hook call'))).toEqual([]);
 });

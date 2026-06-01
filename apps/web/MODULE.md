@@ -14,7 +14,8 @@ Taori Renderer / Web UI。负责桌面端与 standalone browser 的用户界面�
 - P0 对话能力：会话重命名 / 置顶 / 归档 / 删除 / Markdown 导出，用户消息编辑后截断并重跑，按消息创建分支，附件发送（image / pdf / text base64），Composer 内轻量切换下一条消息使用的模型，run timeline 与工具 trace 展示，失败 / 中断 assistant 消息可继续、重试或 compact recovery。
 - 模型管理（生产可用，2026-05-29 体验收敛）：以「模型」为中心组织，入口统一为 `AddModelWizard`（已有服务商 / 预设服务商 / 自定义 OpenAI 兼容端口 → 自动发现 → 手动 fallback）。服务商 tab 更名为「服务商」，卡片只保留发现模型 / 测试连接 / 更多菜单；模型列表按服务商分组，行内显示默认 / 可用 / 停用 / 降级 / 临时停用 / 连续失败等状态，重命名、排序、启停、恢复可用状态、删除收纳到菜单。
 - P0 设置中心补齐：模型健康刷新、模型探测、默认 / 快速 / 低成本 / 编码推荐（收纳到推荐菜单）、fallback 顺序调整、Provider Key 状态检查与撤销。
-- P1 能力中心：在当前单列设计上恢复快速对比、多模型圆桌、深度研究、文件 / 本地上下文搜索、Tools / MCP 管理入口；快速对比从模型 checkbox 墙收敛为“选择模型”弹窗（搜索 + 最多勾选 3 个 + 默认 / 跨服务商 / 同名模型快捷组合）+ 2-3 个模型槽位 + 工具开关 + 结果摘要，结果卡会显示模型来源，并区分真实调用与本地预览 fallback。
+- P1 能力中心：在当前单列设计上恢复快速对比、多模型圆桌、深度研究、文件 / 本地上下文搜索、工具管理（内置工具 / MCP）入口；快速对比从模型 checkbox 墙收敛为“选择模型”弹窗（搜索 + 最多勾选 3 个 + 默认 / 跨服务商 / 同名模型快捷组合）+ 2-3 个模型槽位 + 工具开关 + 结果摘要，结果卡会显示模型来源，并区分真实调用与本地预览 fallback。
+- 能力编排可见性（2026-05-30）：普通对话消费 `orchestration` annotation，在 assistant 消息下方展示自动联网原因、搜索工具、查询数、预读数和引用要求；当编排判断为 `deep_research_suggest` 时提供「转为深度研究」入口并带入原用户问题。对话顶栏「运行记录」面板读取 `/v1/conversations/:id/run-events`，突出展示 `orchestration.plan`，用于审计“为什么自动联网 / 为什么建议深度研究”。Quick Compare / Roundtable 消费 `qc.orchestration` / `rt.orchestration`，在工具调用列表前展示同款摘要，避免用户只看到搜索结果却不知道为什么触发。
 - 偏好：主题（温暖 / 夜色 / 跟随系统）+ 密度（紧凑 / 常规 / 宽松）写入 `localStorage`，无后端依赖。
 - 系统原语（2026-05-29 新增）：`Dialog`（替代 `window.prompt` / `confirm`，含 prompt / confirm / alert + Esc 关闭 + 危险态色）、`Toast`（多 toast 队列 + 严重程度 + 自动消失）。`App.tsx` / `SettingsView · 通用` / 三个新面板都已切换。
 - 键盘与导航（2026-05-29 新增）：全局快捷键 `⌘/Ctrl+K` 命令面板（`CommandPalette`：搜索命令 / 切换模型 / 跳转对话，↑↓ 选择 · ↵ 执行 · esc 关闭）、`⌘/Ctrl+N` 新对话、`⌘/Ctrl+\` 收起 / 展开侧栏、`Esc` 停止流式输出（无弹层时）；侧栏搜索行内含可点击的 `⌘K` 入口提升可发现性。`App.tsx` 挂全局 keydown，桌面壳内 `⌘N` 可拦截，浏览器内以 `⌘K → 新对话` 兜底。
@@ -97,9 +98,9 @@ E2E 当前覆盖：
 - `e2e/chat-flow.spec.ts` — 真实 `/v1/chat` hermetic 流式闭环：发送消息 → 渲染回复 → 展示成本元信息 → 侧边栏历史加载；覆盖 Composer 模型选择器直接切换下一条消息模型且不跳转设置页
 - `e2e/p0-backend-capabilities.spec.ts` — P0 端到端旅程：多轮对话、run timeline、会话重命名 / 置顶、消息编辑截断重跑、分支、附件、Markdown 导出、失败恢复按钮，以及设置中心健康 / 推荐 / 探测 / 排序 / Key 状态。
 - `e2e/p1-feature-hub.spec.ts` — P1 多用户旅程：Quick Compare 对比 / 重试 / 采纳，圆桌创建 / 轮次 / 总结 / 回填 / 导出，深度研究创建 / 修订 / 启动 / 暂停 / 恢复 / 取消 / 导出，文件搜索 / 读取，工具调用 / 会话覆盖，MCP 添加 / 运行时 / 刷新 / 删除；另生成能力中心桌面与移动端视觉截图。
-- `e2e/visual-verify.spec.ts` — 16 张屏幕截图（empty + sidebar collapsed + 设置三 tab + Provider 编辑 dialog + 完成态聊天 + capability route + tool trace + 暗色主题 + 密度 comfy 等），写入 `test-results/visual/`
+- `e2e/visual-verify.spec.ts` — 覆盖 empty、sidebar collapsed、设置三 tab、Provider 编辑 dialog、完成态聊天、capability route、tool trace、编排提示 / 运行记录、暗色主题、密度 comfy 等截图，写入 `test-results/visual/`
 - `e2e/visual-journey.spec.ts`（2026-05-29 新增 / 当日扩展）— 29 张端到端用户旅程截图，三个 spec 分工：
   - **journey: bootstrap → configure → chat → … → dark**：单 Provider 配置全链路（01-20）
   - **journey: 多 toast 队列 + dialog 键盘可达**（21-22）
   - **journey: 多 Provider · 多模型 已配置状态**（23-29）— 通过 `seedMultiProviderStack()` 写入 3 个 Provider（OpenAI 兼容 / OpenRouter 聚合 / 本地 Ollama）+ 4 个模型（GPT-4o mini / Claude 3.5 Sonnet / DeepSeek V3 / Qwen 2.5 14B），截图覆盖：composer 默认模型胶囊、设置·模型多卡布局、设置·Provider 三家并列、切换默认模型、快速对比模型槽位、Cost 面板多模型分布、Sidebar 折叠态品牌字。证明多模型路径真的能呈现，而不只是单 Mock Provider 的浅验证。
-- 品牌识别字一律 **「织」**（zhī，对应多模型如多线交织）：favicon.svg / `<title>` / Sidebar brand-mark · brand-name / EmptyState greeting-glyph / ChatView avatar-mark。Sidebar 展开态显示「织 Taori / Qī · 多模型本地 AI 助手」完整品牌。`apps/web/public/favicon.svg` 是暖纸感 ink 底 + paper 字 + terracotta 描边角点。
+- 品牌识别字一律 **「织」**（zhī，对应多模型如多线交织）：favicon.svg / `<title>` / Sidebar brand-mark · brand-name / EmptyState greeting-glyph / ChatView avatar-mark。Sidebar 展开态显示「织 Taori / 多模型本地 AI 助手」完整品牌。`apps/web/public/favicon.svg` 是暖纸感 ink 底 + paper 字 + terracotta 描边角点。

@@ -3,7 +3,7 @@ import { buildServer } from '../src/server.js';
 import { openDb } from '../src/db/index.js';
 import { ControlClient } from '../src/control/client.js';
 import { MemoryStore } from '../src/keystore.js';
-import { ConversationsRepo, FilesRepo, MessagesRepo, ProvidersRepo, ModelsRepo, RunEventsRepo } from '../src/db/repos/index.js';
+import { ConversationsRepo, FilesRepo, MemoriesRepo, MessagesRepo, ProvidersRepo, ModelsRepo, RunEventsRepo } from '../src/db/repos/index.js';
 import type { FastifyInstance } from 'fastify';
 import os from 'node:os';
 import path from 'node:path';
@@ -283,6 +283,234 @@ describe('chat M1.2', () => {
     expect(asst.content).toBe('Hello world');
     expect(asst.status).toBe('complete');
     expect(asst.model_id).toBe(model.id);
+  });
+
+  it('upstream-path: pre-searches current local questions before provider streaming', async () => {
+    const provRepo = new ProvidersRepo(db);
+    const modRepo = new ModelsRepo(db);
+    const provider = provRepo.create({
+      name: 'OpenRouter',
+      type: 'openrouter',
+      base_url: 'https://openrouter.example.com/api/v1',
+      api_key: 'sk-test-web-context',
+    });
+    await keystore.write(provider.api_key_ref!, 'sk-test-web-context');
+    const model = modRepo.create({
+      provider_id: provider.id,
+      model_name: 'web-aware-model',
+      capability: 'chat',
+      display_name: 'Web Aware',
+      supports_tools: true,
+    });
+
+    const sseBody =
+      `data: ${JSON.stringify({ id: '1', object: 'chat.completion.chunk', created: 1, model: 'm', choices: [{ index: 0, delta: { role: 'assistant', content: '已结合搜索结果。' }, finish_reason: null }] })}\n\n` +
+      `data: ${JSON.stringify({ id: '1', object: 'chat.completion.chunk', created: 1, model: 'm', choices: [{ index: 0, delta: {}, finish_reason: 'stop' }], usage: { prompt_tokens: 20, completion_tokens: 5, total_tokens: 25 } })}\n\n` +
+      `data: [DONE]\n\n`;
+    const providerBodies: Array<{ messages?: Array<{ role?: string; content?: string }> }> = [];
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async (url, init) => {
+      const asText = String(url);
+      const hostname = new URL(asText).hostname;
+      if (hostname === 'html.duckduckgo.com' || hostname === 'duckduckgo.com') {
+        return new Response(
+          `<!doctype html><html><body>
+            <a class="result__a" href="https://example.com/sz-admission">深圳升学报名建议</a>
+            <a class="result__snippet">深圳初升高报名、分数线与学校选择测试结果。</a>
+          </body></html>`,
+          { status: 200, headers: { 'content-type': 'text/html; charset=utf-8' } },
+        );
+      }
+      if (hostname === 'example.com') {
+        return new Response(
+          `<!doctype html><html><head><title>深圳升学报名建议</title></head><body>
+            <h1>深圳升学报名建议</h1>
+            <p>坂田、初升高、模拟考试 522 分与报名策略的确定性测试页面。</p>
+          </body></html>`,
+          { status: 200, headers: { 'content-type': 'text/html; charset=utf-8' } },
+        );
+      }
+      expect(hostname).toBe('openrouter.example.com');
+      providerBodies.push(JSON.parse(String(init?.body ?? '{}')));
+      return new Response(sseBody, {
+        status: 200,
+        headers: { 'content-type': 'text/event-stream' },
+      });
+    });
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/v1/chat',
+      headers: { authorization: `Bearer ${bearer}`, 'content-type': 'application/json' },
+      payload: {
+        model_id: model.id,
+        messages: [{ role: 'user', content: '深圳初升高，模拟考试522分，家住坂田，如果要报名，什么建议？' }],
+      },
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect(fetchSpy).toHaveBeenCalled();
+    expect(res.payload).toContain('"type":"orchestration"');
+    expect(res.payload).toContain('"reason":"high_stakes_current"');
+    expect(res.payload).toContain('"external_info":"web_search_fetch"');
+    expect(res.payload).toContain('"cite_required":true');
+    expect(res.payload).toContain('"tool":"builtin.web_search"');
+    expect(res.payload).toContain('预搜索网页');
+    const sentMessages = providerBodies[0]?.messages ?? [];
+    expect(sentMessages.some((message) =>
+      message.role === 'system' &&
+      String(message.content ?? '').includes('系统已经按本轮编排计划完成联网预搜索') &&
+      String(message.content ?? '').includes('深圳初升高'),
+    )).toBe(true);
+    const meta = JSON.parse(res.payload.split('\n').find((line) => line.startsWith('8:'))!.slice(2))[0] as { conversation_id: string };
+    const events = new RunEventsRepo(db).listByConversation(meta.conversation_id);
+    expect(events.some((event) => event.kind === 'orchestration.plan' && event.payload?.reason === 'high_stakes_current')).toBe(true);
+    expect(events.some((event) => event.kind === 'tool.completed' && event.payload?.tool === 'builtin.web_fetch')).toBe(true);
+    expect(events.some((event) => event.kind === 'tool.completed' && event.payload?.preflight === true)).toBe(true);
+    const contextEvent = events.find((event) => event.kind === 'context.snapshot');
+    const sources = contextEvent?.payload?.context_sources as Array<{ type: string; active: boolean; plan?: { reason?: string } }> | undefined;
+    expect(sources?.some((source) => source.type === 'web_search' && source.active)).toBe(true);
+    expect(sources?.some((source) => source.type === 'orchestration' && source.plan?.reason === 'high_stakes_current')).toBe(true);
+  });
+
+  it('upstream-path: pre-searches current questions even when the model cannot call tools', async () => {
+    const provRepo = new ProvidersRepo(db);
+    const modRepo = new ModelsRepo(db);
+    const provider = provRepo.create({
+      name: 'OpenRouter',
+      type: 'openrouter',
+      base_url: 'https://openrouter.example.com/api/v1',
+      api_key: 'sk-test-web-context-no-tools',
+    });
+    await keystore.write(provider.api_key_ref!, 'sk-test-web-context-no-tools');
+    const model = modRepo.create({
+      provider_id: provider.id,
+      model_name: 'plain-chat-model',
+      capability: 'chat',
+      display_name: 'Plain Chat',
+      supports_tools: false,
+    });
+
+    const sseBody =
+      `data: ${JSON.stringify({ id: '1', object: 'chat.completion.chunk', created: 1, model: 'm', choices: [{ index: 0, delta: { role: 'assistant', content: '已结合深圳新闻搜索结果。' }, finish_reason: null }] })}\n\n` +
+      `data: ${JSON.stringify({ id: '1', object: 'chat.completion.chunk', created: 1, model: 'm', choices: [{ index: 0, delta: {}, finish_reason: 'stop' }], usage: { prompt_tokens: 20, completion_tokens: 5, total_tokens: 25 } })}\n\n` +
+      `data: [DONE]\n\n`;
+    const providerBodies: Array<{ messages?: Array<{ role?: string; content?: string }> }> = [];
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async (url, init) => {
+      const asText = String(url);
+      const hostname = new URL(asText).hostname;
+      if (hostname === 'html.duckduckgo.com' || hostname === 'duckduckgo.com') {
+        return new Response(
+          `<!doctype html><html><body>
+            <a class="result__a" href="https://example.com/sz-news">深圳最新新闻</a>
+            <a class="result__snippet">深圳新闻测试搜索结果。</a>
+          </body></html>`,
+          { status: 200, headers: { 'content-type': 'text/html; charset=utf-8' } },
+        );
+      }
+      expect(hostname).toBe('openrouter.example.com');
+      providerBodies.push(JSON.parse(String(init?.body ?? '{}')));
+      return new Response(sseBody, {
+        status: 200,
+        headers: { 'content-type': 'text/event-stream' },
+      });
+    });
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/v1/chat',
+      headers: { authorization: `Bearer ${bearer}`, 'content-type': 'application/json' },
+      payload: {
+        model_id: model.id,
+        messages: [{ role: 'user', content: '深圳最新的新闻' }],
+      },
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect(fetchSpy).toHaveBeenCalled();
+    expect(res.payload).toContain('"tool":"builtin.web_search"');
+    const sentMessages = providerBodies[0]?.messages ?? [];
+    expect(sentMessages.some((message) =>
+      message.role === 'system' &&
+      String(message.content ?? '').includes('系统已经按本轮编排计划完成联网预搜索') &&
+      String(message.content ?? '').includes('不要声称自己无法获取实时或最新信息') &&
+      String(message.content ?? '').includes('深圳最新的新闻'),
+    )).toBe(true);
+  });
+
+  it('upstream-path: uses the preferred search tool in the orchestration plan', async () => {
+    const provRepo = new ProvidersRepo(db);
+    const modRepo = new ModelsRepo(db);
+    const provider = provRepo.create({
+      name: 'OpenRouter',
+      type: 'openrouter',
+      base_url: 'https://openrouter.example.com/api/v1',
+      api_key: 'sk-test-preferred-search',
+    });
+    await keystore.write(provider.api_key_ref!, 'sk-test-preferred-search');
+    const model = modRepo.create({
+      provider_id: provider.id,
+      model_name: 'search-pref-model',
+      capability: 'chat',
+      display_name: 'Search Pref',
+      supports_tools: false,
+    });
+    const conversation = new ConversationsRepo(db).create({ title: '搜索偏好' });
+    const memories = new MemoriesRepo(db);
+    memories.set('session', conversation.id, 'default_search_tool', 'builtin.web_search');
+
+    const sseBody =
+      `data: ${JSON.stringify({ id: '1', object: 'chat.completion.chunk', created: 1, model: 'm', choices: [{ index: 0, delta: { role: 'assistant', content: 'OK' }, finish_reason: null }] })}\n\n` +
+      `data: ${JSON.stringify({ id: '1', object: 'chat.completion.chunk', created: 1, model: 'm', choices: [{ index: 0, delta: {}, finish_reason: 'stop' }], usage: { prompt_tokens: 20, completion_tokens: 5, total_tokens: 25 } })}\n\n` +
+      `data: [DONE]\n\n`;
+    const providerBodies: Array<{ messages?: Array<{ role?: string; content?: string }> }> = [];
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (url, init) => {
+      const asText = String(url);
+      const hostname = new URL(asText).hostname;
+      if (hostname === 'html.duckduckgo.com' || hostname === 'duckduckgo.com') {
+        return new Response(
+          `<!doctype html><html><body>
+            <a class="result__a" href="https://example.com/taori">Taori 多模型助手</a>
+            <a class="result__snippet">关于 Taori 的测试搜索结果。</a>
+          </body></html>`,
+          { status: 200, headers: { 'content-type': 'text/html; charset=utf-8' } },
+        );
+      }
+      if (hostname === 'example.com') {
+        return new Response(
+          `<!doctype html><html><head><title>Example Domain</title></head><body>
+            <h1>Example Domain</h1>
+            <p>This page is a deterministic Taori test fixture for orchestration web_fetch.</p>
+          </body></html>`,
+          { status: 200, headers: { 'content-type': 'text/html; charset=utf-8' } },
+        );
+      }
+      providerBodies.push(JSON.parse(String(init?.body ?? '{}')));
+      return new Response(sseBody, {
+        status: 200,
+        headers: { 'content-type': 'text/event-stream' },
+      });
+    });
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/v1/chat',
+      headers: { authorization: `Bearer ${bearer}`, 'content-type': 'application/json' },
+      payload: {
+        conversation_id: conversation.id,
+        model_id: model.id,
+        messages: [{ role: 'user', content: '请查一下 Taori 的最新资料并给出来源' }],
+      },
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect(providerBodies[0]?.messages?.some((message) =>
+      message.role === 'system' &&
+      String(message.content ?? '').includes('web_page 1') &&
+      String(message.content ?? '').includes('Example Domain'),
+    )).toBe(true);
+    const events = new RunEventsRepo(db).listByConversation(conversation.id);
+    const plan = events.find((event) => event.kind === 'orchestration.plan')?.payload as { searchToolName?: string; externalInfo?: string } | undefined;
+    expect(plan).toMatchObject({ searchToolName: 'builtin.web_search', externalInfo: 'web_search_fetch' });
   });
 
   it('rejects a model whose provider is disabled before creating chat messages', async () => {

@@ -1,5 +1,5 @@
 import { expect, test } from '@playwright/test';
-import { clearAllData, seedMockChatModel, sidecarJson } from './test-api';
+import { clearAllData, seedLongConversation, seedMockChatModel, sidecarJson } from './test-api';
 
 test('chat journey: multi-turn reply, cost metadata, markdown, and history restore', async ({ page }) => {
   const modelName = 'Qwen Chat';
@@ -53,6 +53,113 @@ test('chat journey: multi-turn reply, cost metadata, markdown, and history resto
   await page.getByTestId('message-cost-toggle').last().click();
   await expect(page.locator('.msg-cost-details').last()).toContainText('输入');
   await expect(page.locator('.msg-cost-details').last()).toContainText('单价');
+});
+
+test('chat journey: high-frequency streaming remains responsive', async ({ page }) => {
+  await clearAllData();
+  const { modelId } = await seedMockChatModel('Streaming Stress');
+
+  await page.route('**/v1/chat', async (route) => {
+    const body = route.request().postDataJSON() as { model_id?: string };
+    const chunks = Array.from({ length: 240 }, (_, index) => `0:${JSON.stringify(`片段${index} `)}`);
+    await route.fulfill({
+      status: 200,
+      headers: { 'content-type': 'text/plain; charset=utf-8' },
+      body: [
+        `8:[{"type":"meta","conversation_id":"conv_stream_stress","message_id":"msg_stream_stress","model_id":"${body.model_id ?? modelId}","run_id":"run_stream_stress"}]`,
+        ...chunks,
+        'd:{"finishReason":"stop","usage":{"promptTokens":5,"completionTokens":240}}',
+        '',
+      ].join('\n'),
+    });
+  });
+
+  await page.goto('/');
+  await page.getByTestId('composer-textarea').fill('模拟高频小片段流式输出');
+  await page.getByTestId('composer-send').click();
+  await expect(page.locator('.msg.ai')).toContainText('片段239', { timeout: 10_000 });
+  await expect(page.getByTestId('composer-textarea')).toBeEditable();
+  await expect(page.locator('.msg.ai p').first()).toContainText('片段0');
+});
+
+test('chat journey: long conversations mount a bounded message window', async ({ page }) => {
+  await clearAllData();
+  const { modelId } = await seedMockChatModel('Long Window Chat');
+  await seedLongConversation({
+    conversationId: 'conv_long_window',
+    title: '长对话窗口化验证',
+    modelId,
+    messageCount: 140,
+  });
+
+  await page.goto('/');
+  await page.locator('.chat-row', { hasText: '长对话窗口化验证' }).first().click();
+
+  await expect(page.locator('.msg')).toHaveCount(80);
+  await expect(page.getByTestId('message-window-notice')).toContainText('已收起 60 条历史');
+  await expect(page.locator('.msg', { hasText: '长对话第 1 条' })).toHaveCount(0);
+  await expect(page.locator('.msg', { hasText: '长对话第 140 条' })).toBeVisible();
+  await expect(page.getByTestId('composer-textarea')).toBeEditable();
+
+  await page.getByTestId('message-load-earlier').click();
+  await expect(page.locator('.msg')).toHaveCount(140);
+  await expect(page.locator('.msg', { hasText: '长对话第 1 条' })).toBeVisible();
+  await expect(page.getByTestId('message-window-notice')).toHaveCount(0);
+});
+
+test('chat visual: short user messages keep a natural bubble width', async ({ page }) => {
+  await clearAllData();
+  await seedMockChatModel('Short Bubble Chat');
+
+  await page.goto('/');
+  await page.getByTestId('composer-textarea').fill('最新的深圳新闻');
+  await page.getByTestId('composer-send').click();
+  const bubble = page.locator('.msg.user .bubble', { hasText: '最新的深圳新闻' }).first();
+  await expect(bubble).toBeVisible();
+  await expect.poll(async () => bubble.evaluate((node) => {
+    const rect = node.getBoundingClientRect();
+    return { width: rect.width, height: rect.height };
+  })).toMatchObject({
+    width: expect.any(Number),
+    height: expect.any(Number),
+  });
+  const box = await bubble.boundingBox();
+  expect(box?.width ?? 0).toBeGreaterThan(120);
+  expect(box?.height ?? 0).toBeLessThan(70);
+});
+
+test('chat journey: history supports bulk delete', async ({ page }) => {
+  await clearAllData();
+  await seedMockChatModel('Bulk History Chat');
+
+  await page.goto('/');
+  await page.getByTestId('composer-textarea').fill('批量删除临时对话 A');
+  await page.getByTestId('composer-send').click();
+  await expect(page.locator('.msg.ai', { hasText: '[M0 mock]' })).toBeVisible({ timeout: 10_000 });
+
+  await page.getByRole('button', { name: '新对话' }).first().click();
+  await page.getByTestId('composer-textarea').fill('批量删除临时对话 B');
+  await page.getByTestId('composer-send').click();
+  await expect(page.locator('.msg.ai', { hasText: '[M0 mock]' }).last()).toBeVisible({ timeout: 10_000 });
+
+  await expect.poll(async () => {
+    const data = await sidecarJson<{ conversations: Array<{ id: string }> }>('/v1/conversations');
+    return data.conversations.length;
+  }).toBe(2);
+
+  await page.getByTestId('history-manage').click();
+  await page.getByTestId('history-select-all').click();
+  await expect(page.getByText('已选 2 个')).toBeVisible();
+  await page.getByTestId('history-bulk-delete').click();
+  await expect(page.getByTestId('app-dialog')).toContainText('删除 2 个对话');
+  await page.getByTestId('app-dialog-ok').click();
+  await expect(page.locator('.toast').filter({ hasText: '已删除 2 个对话' })).toBeVisible();
+  await expect(page.getByText('还没有对话。')).toBeVisible({ timeout: 10_000 });
+
+  await expect.poll(async () => {
+    const data = await sidecarJson<{ conversations: Array<{ id: string }> }>('/v1/conversations');
+    return data.conversations.length;
+  }).toBe(0);
 });
 
 test('chat journey: composer model switcher selects the next chat model directly', async ({ page }) => {
@@ -208,7 +315,11 @@ test('chat journey: Enter during Chinese IME composition does not send', async (
   await textarea.dispatchEvent('compositionend');
   await textarea.fill('你好');
   await textarea.press('Enter');
+  await expect(page.locator('.msg.user')).toHaveCount(0);
+  await expect(textarea).toHaveValue('你好');
 
+  await page.waitForTimeout(160);
+  await textarea.press('Enter');
   await expect(page.locator('.msg.user', { hasText: '你好' })).toBeVisible();
   await expect(page.locator('.msg.ai', { hasText: '[M0 mock]' })).toBeVisible({ timeout: 10_000 });
 });
@@ -263,4 +374,36 @@ test('chat journey: tool call trace is visible and the chat can continue', async
   await expect(page.locator('.msg.user', { hasText: '继续给我一个下一步建议' })).toBeVisible();
   await expect(page.locator('.msg.ai', { hasText: '沿用上一轮工具结果' })).toBeVisible({ timeout: 10_000 });
   await expect(page.locator('.msg.ai')).toHaveCount(2);
+});
+
+test('chat journey: orchestration notice explains automatic search and routes to research', async ({ page }) => {
+  await clearAllData();
+  await seedMockChatModel('Orchestration Chat');
+  const objective = '系统研究 2026 年桌面 AI 助手市场格局、主要玩家、BYOK 用户需求、工具调用趋势、成本透明体验、失败兜底设计、个人知识库整合和商业化机会，输出一份可执行产品建议与分阶段路线图。';
+
+  await page.goto('/');
+  await page.getByTestId('composer-textarea').fill(objective);
+  await page.getByTestId('composer-send').click();
+
+  await expect(page.getByTestId('orchestration-notice')).toContainText('问题适合深度研究', { timeout: 10_000 });
+  await expect(page.getByTestId('orchestration-notice')).toContainText('建议深度研究');
+  await expect(page.getByTestId('orchestration-notice')).toContainText('要求引用来源');
+  await expect.poll(async () => {
+    const data = await sidecarJson<{ conversations: Array<{ id: string }> }>('/v1/conversations');
+    const conversationId = data.conversations[0]?.id;
+    if (!conversationId) return [];
+    const events = await sidecarJson<{ data: { events: Array<{ kind: string }> } }>(
+      `/v1/conversations/${conversationId}/run-events?limit=80`,
+    );
+    return events.data.events.map((event) => event.kind);
+  }).toContain('orchestration.plan');
+  await page.getByTestId('open-run-timeline').click();
+  await expect(page.getByTestId('run-timeline-panel')).toBeVisible();
+  await expect(page.getByTestId('run-event').filter({ hasText: '能力编排计划' }).first()).toContainText('问题适合深度研究');
+  await expect(page.getByTestId('run-event').filter({ hasText: '能力编排计划' }).first()).toContainText('建议深度研究');
+  await page.getByTestId('run-timeline-close').click();
+  await expect(page.getByTestId('run-timeline-panel')).toHaveCount(0);
+  await page.getByRole('button', { name: '转为深度研究' }).click();
+  await expect(page.getByTestId('research-panel')).toBeVisible();
+  await expect(page.getByTestId('research-objective')).toHaveValue(objective);
 });

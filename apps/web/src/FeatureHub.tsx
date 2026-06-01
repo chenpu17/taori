@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import type { Model, Provider } from '@taori/shared';
+import type { Model, OrchestrationAnnotation, Provider } from '@taori/shared';
 import { Icon } from './Icon';
 import {
   adoptQuickCompareOutput,
@@ -57,7 +57,7 @@ import { CostPanel } from './feature/CostPanel';
 import { TemplatesPanel } from './feature/TemplatesPanel';
 import { MemoryPanel } from './feature/MemoryPanel';
 
-type FeatureTab =
+export type FeatureTab =
   | 'compare'
   | 'roundtable'
   | 'research'
@@ -77,6 +77,10 @@ interface FeatureToolTrace {
   duration_ms?: number;
 }
 
+type FeatureOrchestration = Omit<OrchestrationAnnotation, 'type'> & {
+  type: 'orchestration' | 'qc.orchestration' | 'rt.orchestration';
+};
+
 interface QuickCompareOutputView extends QuickCompareOutput {
   execution_mode?: QuickCompareExecutionMode;
   preview_reason?: QuickComparePreviewReason | null;
@@ -94,6 +98,7 @@ interface FeatureHubProps {
   quickCompareModelIds: string[];
   onQuickCompareModelIdsChange: (ids: string[]) => void;
   onInsertComposer?: (text: string) => void;
+  initialPrompt?: string | null;
 }
 
 function describeError(error: unknown): string {
@@ -192,17 +197,71 @@ function firstDefined<T>(items: T[]): T | undefined {
   return items.find((item) => item != null);
 }
 
+function toolFriendlyName(name: string): string {
+  const lower = name.toLowerCase();
+  if (lower.includes('web_search')) return '联网搜索';
+  if (lower.includes('web_fetch')) return '读取网页';
+  if (lower.includes('file_search')) return '文件搜索';
+  if (lower.includes('file_read')) return '读取文件';
+  if (lower.includes('image')) return '图像工具';
+  if (lower.includes('mcp')) return name.replace(/^mcp\./, 'MCP · ');
+  return name.replace(/^builtin\./, '').replace(/_/g, ' ');
+}
+
+function toolCategory(name: string, capability: string): 'search' | 'file' | 'media' | 'other' {
+  const text = `${name} ${capability}`.toLowerCase();
+  if (text.includes('search') || text.includes('fetch') || text.includes('web')) return 'search';
+  if (text.includes('file') || text.includes('document')) return 'file';
+  if (text.includes('image') || text.includes('vision')) return 'media';
+  return 'other';
+}
+
+function toolCategoryLabel(category: ReturnType<typeof toolCategory>): string {
+  if (category === 'search') return '搜索与网页';
+  if (category === 'file') return '文件与本地上下文';
+  if (category === 'media') return '图像与多模态';
+  return '其他工具';
+}
+
+function toolStatusLabel(enabled: boolean): string {
+  return enabled ? '已启用' : '已关闭';
+}
+
 export function FeatureHub(props: FeatureHubProps): JSX.Element {
   const [tab, setTab] = useState<FeatureTab>(props.initialTab ?? 'compare');
-  const tabs: Array<{ id: FeatureTab; label: string; icon: Parameters<typeof Icon>[0]['name'] }> = [
-    { id: 'compare', label: '快速对比', icon: 'panel' },
-    { id: 'roundtable', label: '圆桌', icon: 'sparkle' },
-    { id: 'research', label: '深度研究', icon: 'book' },
-    { id: 'cost', label: '成本', icon: 'flame' },
-    { id: 'templates', label: '模板 / 人格', icon: 'pen' },
-    { id: 'memory', label: '记忆', icon: 'palette' },
-    { id: 'files', label: '文件', icon: 'folder' },
-    { id: 'tools', label: 'Tools / MCP', icon: 'bolt' },
+  useEffect(() => {
+    setTab(props.initialTab ?? 'compare');
+  }, [props.initialTab]);
+
+  const tabGroups: Array<{ label: string; tabs: Array<{ id: FeatureTab; label: string; icon: Parameters<typeof Icon>[0]['name']; note: string }> }> = [
+    {
+      label: '做决策',
+      tabs: [
+        { id: 'compare', label: '快速对比', icon: 'panel', note: '同题多答' },
+        { id: 'roundtable', label: '圆桌', icon: 'sparkle', note: '共识与分歧' },
+      ],
+    },
+    {
+      label: '做研究',
+      tabs: [
+        { id: 'research', label: '深度研究', icon: 'book', note: '计划到报告' },
+        { id: 'files', label: '文件', icon: 'folder', note: '本地上下文' },
+      ],
+    },
+    {
+      label: '个性化',
+      tabs: [
+        { id: 'templates', label: '模板 / 人格', icon: 'pen', note: '常用提示' },
+        { id: 'memory', label: '记忆', icon: 'palette', note: '偏好可控' },
+      ],
+    },
+    {
+      label: '系统',
+      tabs: [
+        { id: 'cost', label: '成本', icon: 'flame', note: '每分钱可见' },
+        { id: 'tools', label: '工具管理', icon: 'bolt', note: '内置工具 / MCP' },
+      ],
+    },
   ];
   return (
     <>
@@ -211,20 +270,30 @@ export function FeatureHub(props: FeatureHubProps): JSX.Element {
       </div>
       <div className="feature-shell scroll">
         <div className="feature-tabs" role="tablist" aria-label="P1 能力">
-          {tabs.map((item) => (
-            <button
-              key={item.id}
-              type="button"
-              role="tab"
-              aria-selected={tab === item.id}
-              aria-controls={`feature-panel-${item.id}`}
-              className={tab === item.id ? 'active' : ''}
-              onClick={() => setTab(item.id)}
-              data-testid={`feature-tab-${item.id}`}
-            >
-              <Icon name={item.icon} size={14} />
-              {item.label}
-            </button>
+          {tabGroups.map((group) => (
+            <div className="feature-tab-group" key={group.label}>
+              <div className="feature-tab-group-label">{group.label}</div>
+              <div className="feature-tab-group-buttons">
+                {group.tabs.map((item) => (
+                  <button
+                    key={item.id}
+                    type="button"
+                    role="tab"
+                    aria-selected={tab === item.id}
+                    aria-controls={`feature-panel-${item.id}`}
+                    className={tab === item.id ? 'active' : ''}
+                    onClick={() => setTab(item.id)}
+                    data-testid={`feature-tab-${item.id}`}
+                  >
+                    <Icon name={item.icon} size={14} />
+                    <span>
+                      <strong>{item.label}</strong>
+                      <small>{item.note}</small>
+                    </span>
+                  </button>
+                ))}
+              </div>
+            </div>
           ))}
         </div>
         {tab === 'compare' && <QuickComparePanel {...props} panelId="feature-panel-compare" />}
@@ -269,6 +338,47 @@ function ToolTraceList({ traces }: { traces: FeatureToolTrace[] }): JSX.Element 
       ))}
     </div>
   );
+}
+
+function orchestrationReasonText(reason: FeatureOrchestration['reason']): string {
+  switch (reason) {
+    case 'explicit_search':
+      return '明确要求搜索，已自动联网';
+    case 'freshness_required':
+      return '依赖最新信息，已自动联网';
+    case 'evidence_required':
+      return '需要来源依据，已自动联网';
+    case 'high_stakes_current':
+      return '涉及报名、政策或高风险时效信息，已自动联网';
+    case 'deep_research_candidate':
+      return '适合深度研究，已补充网页上下文';
+    case 'local_context_available':
+      return '已优先考虑本地上下文';
+    default:
+      return '按输入内容自动选择能力';
+  }
+}
+
+function OrchestrationNotice({ plan }: { plan: FeatureOrchestration }): JSX.Element {
+  const detailParts: string[] = [];
+  if (plan.external_info === 'web_search_fetch') detailParts.push('搜索并预读网页');
+  else if (plan.external_info === 'web_search') detailParts.push('搜索网页');
+  else if (plan.external_info === 'deep_research_suggest') detailParts.push('建议深度研究');
+  if (plan.search_tool_name) detailParts.push(plan.search_tool_name);
+  if (plan.query_count > 0) detailParts.push(`${plan.query_count} 个查询`);
+  if (plan.fetch_top_k > 0) detailParts.push(`预读 ${plan.fetch_top_k} 条`);
+  if (plan.cite_required) detailParts.push('要求引用来源');
+  return (
+    <div className="orchestration-notice feature-orchestration" data-testid="feature-orchestration-notice">
+      <Icon name="search" size={13} />
+      <span>{orchestrationReasonText(plan.reason)}</span>
+      {detailParts.length > 0 && <em>{detailParts.join(' · ')}</em>}
+    </div>
+  );
+}
+
+function stopAbortController(controller: AbortController): () => void {
+  return () => controller.abort();
 }
 
 function QuickComparePanel(props: FeatureHubProps & { panelId?: string }): JSX.Element {
@@ -318,7 +428,7 @@ function QuickComparePanel(props: FeatureHubProps & { panelId?: string }): JSX.E
     }
     return ids;
   }, [chatModels]);
-  const [prompt, setPrompt] = useState('比较三种实现方案的取舍。');
+  const [prompt, setPrompt] = useState(props.initialPrompt?.trim() || '比较三种实现方案的取舍。');
   const initialSelectedIds = useMemo(() => {
     const remembered = props.quickCompareModelIds.filter((id) => modelById.has(id)).slice(0, 3);
     const fill = defaultSlotIds.filter((id) => !remembered.includes(id)).slice(0, 3 - remembered.length);
@@ -330,7 +440,12 @@ function QuickComparePanel(props: FeatureHubProps & { panelId?: string }): JSX.E
   const [compare, setCompare] = useState<QuickCompareRun | null>(null);
   const [outputs, setOutputs] = useState<QuickCompareOutputView[]>([]);
   const [toolTraces, setToolTraces] = useState<FeatureToolTrace[]>([]);
+  const [orchestration, setOrchestration] = useState<FeatureOrchestration | null>(null);
   const [running, setRunning] = useState(false);
+  const pendingDeltaRef = useRef<QuickCompareAnnotation[]>([]);
+  const deltaFrameRef = useRef<number | null>(null);
+  const streamStopRef = useRef<(() => void) | null>(null);
+  const streamTokenRef = useRef(0);
   const availableSlotCount = Math.min(3, Math.max(2, chatModels.length));
   const selectedModels = selectedIds.map((id) => modelById.get(id)).filter((model): model is Model => Boolean(model));
   const visibleSlotIds = Array.from({ length: availableSlotCount }, (_, index) => selectedIds[index] ?? '');
@@ -338,6 +453,7 @@ function QuickComparePanel(props: FeatureHubProps & { panelId?: string }): JSX.E
   const fastestOutput = firstDefined([...completedOutputs].sort((a, b) => (a.duration_ms ?? Number.POSITIVE_INFINITY) - (b.duration_ms ?? Number.POSITIVE_INFINITY)));
   const longestOutput = firstDefined([...completedOutputs].sort((a, b) => b.content.length - a.content.length));
   const failedOutputs = outputs.filter((output) => output.status === 'failed');
+  const estimatedIntensity = toolsEnabled || selectedModels.length >= 3 ? '中' : '低';
 
   useEffect(() => {
     setSelectedIds((current) => {
@@ -360,6 +476,12 @@ function QuickComparePanel(props: FeatureHubProps & { panelId?: string }): JSX.E
     const next = [...new Set(modelIds.filter((id) => modelById.has(id)))].slice(0, 3);
     setSelectedIds(next);
     props.onQuickCompareModelIdsChange(next);
+  }
+
+  function presetReason(kind: 'default' | 'providers' | 'sameName'): string {
+    if (kind === 'providers') return '跨服务商可以避开单家限流，也更容易看出回答风格差异。';
+    if (kind === 'sameName') return '同名模型适合比较不同平台的稳定性、延迟和计费表现。';
+    return '默认组合优先选择当前可用模型，适合快速得到多个候选答案。';
   }
 
   function updateSlot(slotIndex: number, modelId: string): void {
@@ -475,6 +597,8 @@ function QuickComparePanel(props: FeatureHubProps & { panelId?: string }): JSX.E
             },
             ...current.filter((trace) => trace.key !== key),
           ].slice(0, 8));
+        } else if (item.type === 'qc.orchestration') {
+          setOrchestration({ ...item, type: 'qc.orchestration' });
         } else if (item.type === 'qc.done') {
           setCompare((currentCompare) => currentCompare ? {
             ...currentCompare,
@@ -487,18 +611,71 @@ function QuickComparePanel(props: FeatureHubProps & { panelId?: string }): JSX.E
     });
   }
 
+  function isCurrentStream(token: number): boolean {
+    return streamTokenRef.current === token;
+  }
+
+  function stopActiveStream(): void {
+    streamTokenRef.current += 1;
+    streamStopRef.current?.();
+    streamStopRef.current = null;
+    cancelPendingDeltas();
+  }
+
+  function flushPendingDeltas(): void {
+    if (deltaFrameRef.current != null) {
+      window.cancelAnimationFrame(deltaFrameRef.current);
+      deltaFrameRef.current = null;
+    }
+    const items = pendingDeltaRef.current;
+    pendingDeltaRef.current = [];
+    if (items.length > 0) updateFromAnnotations(items);
+  }
+
+  function cancelPendingDeltas(): void {
+    if (deltaFrameRef.current != null) {
+      window.cancelAnimationFrame(deltaFrameRef.current);
+      deltaFrameRef.current = null;
+    }
+    pendingDeltaRef.current = [];
+  }
+
+  function updateFromStreamAnnotations(items: QuickCompareAnnotation[]): void {
+    const deltas = items.filter((item) => item.type === 'qc.participant_delta');
+    const immediate = items.filter((item) => item.type !== 'qc.participant_delta');
+    if (immediate.length > 0) {
+      flushPendingDeltas();
+      updateFromAnnotations(immediate);
+    }
+    if (deltas.length === 0) return;
+    pendingDeltaRef.current = [...pendingDeltaRef.current, ...deltas];
+    if (deltaFrameRef.current == null) {
+      deltaFrameRef.current = window.requestAnimationFrame(flushPendingDeltas);
+    }
+  }
+
+  useEffect(() => () => {
+    stopActiveStream();
+  }, []);
+
   async function start(): Promise<void> {
     const ids = selectedIds.filter((id) => modelById.has(id)).slice(0, 3);
     if (ids.length < 2) {
       props.onError('Quick Compare 至少需要两个聊天模型。');
       return;
     }
+    stopActiveStream();
+    const streamToken = streamTokenRef.current + 1;
+    streamTokenRef.current = streamToken;
+    const abortController = new AbortController();
+    streamStopRef.current = stopAbortController(abortController);
     setRunning(true);
     setCompare(null);
     setOutputs([]);
     setToolTraces([]);
+    setOrchestration(null);
     try {
-      await streamQuickCompare(
+      const stop = await streamQuickCompare(
         {
           conversation_id: props.activeConversationId ?? undefined,
           participant_configs: ids.map((modelId) => ({
@@ -509,18 +686,31 @@ function QuickComparePanel(props: FeatureHubProps & { panelId?: string }): JSX.E
           confirmed_cost: true,
         },
         {
-          onAnnotation: updateFromAnnotations,
+          onAnnotation: (items) => {
+            if (isCurrentStream(streamToken)) updateFromStreamAnnotations(items);
+          },
           onDone: () => {
+            if (!isCurrentStream(streamToken)) return;
+            flushPendingDeltas();
+            streamStopRef.current = null;
             setRunning(false);
             props.onToast('Quick Compare 已完成。');
           },
           onError: (error) => {
+            if (!isCurrentStream(streamToken)) return;
+            cancelPendingDeltas();
+            streamStopRef.current = null;
             setRunning(false);
             props.onError(describeError(error));
           },
         },
+        { signal: abortController.signal },
       );
+      if (isCurrentStream(streamToken)) streamStopRef.current = stop;
+      else stop();
     } catch (error) {
+      if (!isCurrentStream(streamToken)) return;
+      streamStopRef.current = null;
       setRunning(false);
       props.onError(describeError(error));
     }
@@ -528,6 +718,8 @@ function QuickComparePanel(props: FeatureHubProps & { panelId?: string }): JSX.E
 
   async function adopt(output: QuickCompareOutput): Promise<void> {
     if (!compare) return;
+    stopActiveStream();
+    setRunning(false);
     try {
       const result = await adoptQuickCompareOutput(compare.id, output.id);
       props.onToast('已采纳候选回复。');
@@ -539,24 +731,42 @@ function QuickComparePanel(props: FeatureHubProps & { panelId?: string }): JSX.E
 
   async function retry(output: QuickCompareOutput): Promise<void> {
     if (!compare) return;
+    stopActiveStream();
+    const streamToken = streamTokenRef.current + 1;
+    streamTokenRef.current = streamToken;
+    const abortController = new AbortController();
+    streamStopRef.current = stopAbortController(abortController);
     setRunning(true);
     try {
-      await streamQuickCompareRetry(
+      const stop = await streamQuickCompareRetry(
         compare.id,
         { output_id: output.id, confirmed_cost: true },
         {
-          onAnnotation: updateFromAnnotations,
+          onAnnotation: (items) => {
+            if (isCurrentStream(streamToken)) updateFromStreamAnnotations(items);
+          },
           onDone: () => {
+            if (!isCurrentStream(streamToken)) return;
+            flushPendingDeltas();
+            streamStopRef.current = null;
             setRunning(false);
             props.onToast('候选已重试。');
           },
           onError: (error) => {
+            if (!isCurrentStream(streamToken)) return;
+            cancelPendingDeltas();
+            streamStopRef.current = null;
             setRunning(false);
             props.onError(describeError(error));
           },
         },
+        { signal: abortController.signal },
       );
+      if (isCurrentStream(streamToken)) streamStopRef.current = stop;
+      else stop();
     } catch (error) {
+      if (!isCurrentStream(streamToken)) return;
+      streamStopRef.current = null;
       setRunning(false);
       props.onError(describeError(error));
     }
@@ -575,6 +785,20 @@ function QuickComparePanel(props: FeatureHubProps & { panelId?: string }): JSX.E
       </div>
       <div className="compare-composer">
         <textarea className="feature-textarea" value={prompt} onChange={(event) => setPrompt(event.target.value)} data-testid="quick-compare-prompt" />
+        <div className="compare-run-preview" data-testid="quick-compare-run-preview">
+          <div>
+            <span className="summary-label">预计强度</span>
+            <strong>{estimatedIntensity}</strong>
+          </div>
+          <div>
+            <span className="summary-label">将调用</span>
+            <strong>{selectedModels.length || 0} 个模型 · 1 轮</strong>
+          </div>
+          <div>
+            <span className="summary-label">成本提醒</span>
+            <strong>{toolsEnabled ? '可能更高' : '较可控'}</strong>
+          </div>
+        </div>
         <div className="compare-options">
           <label className="compare-toggle">
             <input
@@ -605,6 +829,41 @@ function QuickComparePanel(props: FeatureHubProps & { panelId?: string }): JSX.E
             data-testid="quick-compare-open-picker"
           >
             选择模型
+          </button>
+        </div>
+        <div className="compare-strategies" aria-label="推荐组合">
+          <button
+            type="button"
+            className="strategy-chip"
+            onClick={() => {
+              applySelection(defaultSlotIds);
+              props.onToast(presetReason('default'));
+            }}
+            disabled={running || defaultSlotIds.length < 2}
+          >
+            稳妥组合
+          </button>
+          <button
+            type="button"
+            className="strategy-chip"
+            onClick={() => {
+              applySelection(distinctProviderSlotIds);
+              props.onToast(presetReason('providers'));
+            }}
+            disabled={running || distinctProviderSlotIds.length < 2}
+          >
+            跨服务商
+          </button>
+          <button
+            type="button"
+            className="strategy-chip"
+            onClick={() => {
+              applySelection(duplicateNameSlotIds);
+              props.onToast(presetReason('sameName'));
+            }}
+            disabled={running || duplicateNameSlotIds.length < 2}
+          >
+            同名模型
           </button>
         </div>
       </div>
@@ -676,6 +935,7 @@ function QuickComparePanel(props: FeatureHubProps & { panelId?: string }): JSX.E
           </div>
         </div>
       )}
+      {orchestration && <OrchestrationNotice plan={orchestration} />}
       {toolTraces.length > 0 && (
         <div className="feature-card" data-testid="quick-compare-tool-traces">
           <h3>工具调用</h3>
@@ -704,7 +964,13 @@ function QuickComparePanel(props: FeatureHubProps & { panelId?: string }): JSX.E
                   未联网调用模型：{previewReasonLabel(output.preview_reason)}
                 </p>
               )}
-              {output.error_message ? <p className="err">{quickCompareErrorMessage(output, model, props.providers)}</p> : renderMarkdown(output.content || '等待输出…')}
+              {output.error_message ? (
+                <p className="err">{quickCompareErrorMessage(output, model, props.providers)}</p>
+              ) : output.status === 'streaming' ? (
+                <pre className="streaming-plain cursor-blink">{output.content || '等待输出…'}</pre>
+              ) : (
+                renderMarkdown(output.content || '等待输出…')
+              )}
               <div className="compare-meta">
                 <span>{output.execution_mode === 'local_preview' ? '执行：本地预览' : '执行：真实调用'}</span>
                 {output.first_token_ms != null && <span>首字 {output.first_token_ms}ms</span>}
@@ -894,13 +1160,18 @@ function QuickCompareModelPickerDialog(props: {
 }
 
 function RoundtablePanel(props: FeatureHubProps & { panelId?: string }): JSX.Element {
-  const [topic, setTopic] = useState('这个产品下一步该优先做什么？');
+  const [topic, setTopic] = useState(props.initialPrompt?.trim() || '这个产品下一步该优先做什么？');
   const [mode, setMode] = useState<'auto' | 'fast' | 'deep'>('auto');
   const [roundtable, setRoundtable] = useState<Roundtable | null>(null);
   const [messages, setMessages] = useState<RoundtableMessage[]>([]);
   const [summaryText, setSummaryText] = useState('');
   const [toolTraces, setToolTraces] = useState<FeatureToolTrace[]>([]);
+  const [orchestration, setOrchestration] = useState<FeatureOrchestration | null>(null);
   const [running, setRunning] = useState(false);
+  const pendingRoundtableRef = useRef<RoundtableAnnotation[]>([]);
+  const roundtableFrameRef = useRef<number | null>(null);
+  const streamStopRef = useRef<(() => void) | null>(null);
+  const streamTokenRef = useRef(0);
 
   function applyAnnotations(items: RoundtableAnnotation[]): void {
     let activeRound = roundtable?.current_round ? roundtable.current_round + 1 : 1;
@@ -971,6 +1242,8 @@ function RoundtablePanel(props: FeatureHubProps & { panelId?: string }): JSX.Ele
           },
           ...current.filter((trace) => trace.key !== key),
         ].slice(0, 8));
+      } else if (item.type === 'rt.orchestration') {
+        setOrchestration({ ...item, type: 'rt.orchestration' });
       } else if (item.type === 'rt.summary_delta') {
         setSummaryText((current) => `${current}${item.text_chunk}`);
       } else if (item.type === 'rt.summary_done') {
@@ -979,7 +1252,55 @@ function RoundtablePanel(props: FeatureHubProps & { panelId?: string }): JSX.Ele
     }
   }
 
+  function isCurrentStream(token: number): boolean {
+    return streamTokenRef.current === token;
+  }
+
+  function stopActiveStream(): void {
+    streamTokenRef.current += 1;
+    streamStopRef.current?.();
+    streamStopRef.current = null;
+    cancelPendingRoundtable();
+  }
+
+  function flushPendingRoundtable(): void {
+    if (roundtableFrameRef.current != null) {
+      window.cancelAnimationFrame(roundtableFrameRef.current);
+      roundtableFrameRef.current = null;
+    }
+    const items = pendingRoundtableRef.current;
+    pendingRoundtableRef.current = [];
+    if (items.length > 0) applyAnnotations(items);
+  }
+
+  function cancelPendingRoundtable(): void {
+    if (roundtableFrameRef.current != null) {
+      window.cancelAnimationFrame(roundtableFrameRef.current);
+      roundtableFrameRef.current = null;
+    }
+    pendingRoundtableRef.current = [];
+  }
+
+  function applyStreamAnnotations(items: RoundtableAnnotation[]): void {
+    const deltas = items.filter((item) => item.type === 'rt.participant_delta' || item.type === 'rt.summary_delta');
+    const immediate = items.filter((item) => item.type !== 'rt.participant_delta' && item.type !== 'rt.summary_delta');
+    if (immediate.length > 0) {
+      flushPendingRoundtable();
+      applyAnnotations(immediate);
+    }
+    if (deltas.length === 0) return;
+    pendingRoundtableRef.current = [...pendingRoundtableRef.current, ...deltas];
+    if (roundtableFrameRef.current == null) {
+      roundtableFrameRef.current = window.requestAnimationFrame(flushPendingRoundtable);
+    }
+  }
+
+  useEffect(() => () => {
+    stopActiveStream();
+  }, []);
+
   async function create(): Promise<void> {
+    stopActiveStream();
     setRunning(true);
     try {
       const created = await createRoundtable({
@@ -996,6 +1317,7 @@ function RoundtablePanel(props: FeatureHubProps & { panelId?: string }): JSX.Ele
       setMessages([]);
       setSummaryText('');
       setToolTraces([]);
+      setOrchestration(null);
       props.onToast('圆桌已创建。');
     } catch (error) {
       props.onError(describeError(error));
@@ -1006,23 +1328,41 @@ function RoundtablePanel(props: FeatureHubProps & { panelId?: string }): JSX.Ele
 
   async function runRound(): Promise<void> {
     if (!roundtable) return;
+    stopActiveStream();
+    const streamToken = streamTokenRef.current + 1;
+    streamTokenRef.current = streamToken;
+    const abortController = new AbortController();
+    streamStopRef.current = stopAbortController(abortController);
     setRunning(true);
     try {
-      await streamRoundtableRound(roundtable.id, {
-        onAnnotation: applyAnnotations,
+      const stop = await streamRoundtableRound(roundtable.id, {
+        onAnnotation: (items) => {
+          if (isCurrentStream(streamToken)) applyStreamAnnotations(items);
+        },
         onDone: () => {
+          if (!isCurrentStream(streamToken)) return;
+          flushPendingRoundtable();
+          streamStopRef.current = null;
           setRunning(false);
           void getRoundtable(roundtable.id).then((detail) => {
+            if (!isCurrentStream(streamToken)) return;
             setRoundtable(detail.roundtable);
             setMessages(detail.messages);
           }).catch(() => undefined);
         },
         onError: (error) => {
+          if (!isCurrentStream(streamToken)) return;
+          cancelPendingRoundtable();
+          streamStopRef.current = null;
           setRunning(false);
           props.onError(describeError(error));
         },
-      });
+      }, { signal: abortController.signal });
+      if (isCurrentStream(streamToken)) streamStopRef.current = stop;
+      else stop();
     } catch (error) {
+      if (!isCurrentStream(streamToken)) return;
+      streamStopRef.current = null;
       setRunning(false);
       props.onError(describeError(error));
     }
@@ -1030,20 +1370,37 @@ function RoundtablePanel(props: FeatureHubProps & { panelId?: string }): JSX.Ele
 
   async function summarize(): Promise<void> {
     if (!roundtable) return;
+    stopActiveStream();
+    const streamToken = streamTokenRef.current + 1;
+    streamTokenRef.current = streamToken;
+    const abortController = new AbortController();
+    streamStopRef.current = stopAbortController(abortController);
     setRunning(true);
     try {
-      await streamRoundtableSummarize(roundtable.id, {
-        onAnnotation: applyAnnotations,
+      const stop = await streamRoundtableSummarize(roundtable.id, {
+        onAnnotation: (items) => {
+          if (isCurrentStream(streamToken)) applyStreamAnnotations(items);
+        },
         onDone: () => {
+          if (!isCurrentStream(streamToken)) return;
+          flushPendingRoundtable();
+          streamStopRef.current = null;
           setRunning(false);
           props.onToast('圆桌总结已生成。');
         },
         onError: (error) => {
+          if (!isCurrentStream(streamToken)) return;
+          cancelPendingRoundtable();
+          streamStopRef.current = null;
           setRunning(false);
           props.onError(describeError(error));
         },
-      });
+      }, { signal: abortController.signal });
+      if (isCurrentStream(streamToken)) streamStopRef.current = stop;
+      else stop();
     } catch (error) {
+      if (!isCurrentStream(streamToken)) return;
+      streamStopRef.current = null;
       setRunning(false);
       props.onError(describeError(error));
     }
@@ -1114,25 +1471,36 @@ function RoundtablePanel(props: FeatureHubProps & { panelId?: string }): JSX.Ele
                 <strong>参与者 {message.participant_index + 1}</strong>
                 <span className={`status-chip ${message.status}`}>{message.status}</span>
               </div>
-              {message.error_message ? <p className="err">{message.error_message}</p> : renderMarkdown(message.content)}
+              {message.error_message ? (
+                <p className="err">{message.error_message}</p>
+              ) : message.status === 'streaming' ? (
+                <pre className="streaming-plain cursor-blink">{message.content || '等待输出…'}</pre>
+              ) : (
+                renderMarkdown(message.content)
+              )}
             </article>
           ))}
         </div>
       )}
+      {orchestration && <OrchestrationNotice plan={orchestration} />}
       {toolTraces.length > 0 && (
         <div className="feature-card" data-testid="roundtable-tool-traces">
           <h3>工具调用</h3>
           <ToolTraceList traces={toolTraces} />
         </div>
       )}
-      {summaryText && <div className="feature-card" data-testid="roundtable-summary">{renderMarkdown(summaryText)}</div>}
+      {summaryText && (
+        <div className="feature-card" data-testid="roundtable-summary">
+          {running ? <pre className="streaming-plain cursor-blink">{summaryText}</pre> : renderMarkdown(summaryText)}
+        </div>
+      )}
     </section>
   );
 }
 
 function ResearchPanel(props: FeatureHubProps & { panelId?: string }): JSX.Element {
   const [title, setTitle] = useState('AI 助手市场趋势');
-  const [objective, setObjective] = useState('研究桌面 AI 助手在 2026 年的机会、风险和代表产品。');
+  const [objective, setObjective] = useState(props.initialPrompt?.trim() || '研究桌面 AI 助手在 2026 年的机会、风险和代表产品。');
   const [sessions, setSessions] = useState<ResearchSession[]>([]);
   const [detail, setDetail] = useState<ResearchDetail | null>(null);
   const [feedback, setFeedback] = useState('聚焦个人开发者和 BYOK 用户。');
@@ -1312,12 +1680,16 @@ function ToolsPanel(props: FeatureHubProps & { panelId?: string }): JSX.Element 
   const [effectiveTools, setEffectiveTools] = useState<EffectiveTool[]>([]);
   const [health, setHealth] = useState<ToolHealthRow[]>([]);
   const [mcpServers, setMcpServers] = useState<McpServer[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [loaded, setLoaded] = useState(false);
   const [mcpName, setMcpName] = useState('Local notes MCP');
   const [mcpCommand, setMcpCommand] = useState('node');
   const [invokeInput, setInvokeInput] = useState('{"prompt":"blue poster"}');
   const [invokeResult, setInvokeResult] = useState('');
+  const [debugOpen, setDebugOpen] = useState(false);
 
   async function refresh(): Promise<void> {
+    setLoading(true);
     try {
       const [toolRows, effectiveRows, healthRows, servers] = await Promise.all([
         listTools(),
@@ -1329,10 +1701,17 @@ function ToolsPanel(props: FeatureHubProps & { panelId?: string }): JSX.Element 
       setEffectiveTools(effectiveRows);
       setHealth(healthRows);
       setMcpServers(servers);
+      setLoaded(true);
     } catch (error) {
       props.onError(describeError(error));
+    } finally {
+      setLoading(false);
     }
   }
+
+  useEffect(() => {
+    void refresh();
+  }, [props.activeConversationId]);
 
   async function addMcp(): Promise<void> {
     try {
@@ -1345,75 +1724,159 @@ function ToolsPanel(props: FeatureHubProps & { panelId?: string }): JSX.Element 
   }
 
   const healthByTool = new Map(health.map((row) => [row.tool_name, row]));
+  const displayTools = effectiveTools.length > 0 ? effectiveTools : tools;
+  const enabledCount = displayTools.filter((tool) => ('effective_enabled' in tool ? tool.effective_enabled : tool.enabled)).length;
+  const mcpToolCount = mcpServers.reduce((sum, server) => sum + server.tools_count, 0);
+  const groupedTools = displayTools.reduce(
+    (groups, tool) => {
+      const category = toolCategory(tool.name, tool.capability);
+      groups[category].push(tool);
+      return groups;
+    },
+    { search: [], file: [], media: [], other: [] } as Record<'search' | 'file' | 'media' | 'other', Array<Tool | EffectiveTool>>,
+  );
+
   return (
     <section className="feature-panel" data-testid="tools-panel" {...panelProps(props.panelId)}>
       <div className="feature-header">
         <div>
-          <h2>Tools / MCP</h2>
-          <p>查看内置工具、会话覆盖、健康状态，并管理本地 MCP server。</p>
+          <h2>工具管理</h2>
+          <p>决定 AI 可以使用哪些能力：搜索网页、读取文件、调用本地 MCP。支持工具调用的模型才会实际使用这些工具。</p>
         </div>
-        <button type="button" className="btn-primary" onClick={() => void refresh()} data-testid="tools-refresh">刷新工具</button>
+        <button type="button" className="btn-primary" onClick={() => void refresh()} disabled={loading} data-testid="tools-refresh">
+          {loading ? '正在加载' : '刷新工具'}
+        </button>
       </div>
-      <div className="tool-grid">
-        {(effectiveTools.length > 0 ? effectiveTools : tools).map((tool) => {
-          const effective = 'effective_enabled' in tool ? tool.effective_enabled : tool.enabled;
-          const row = healthByTool.get(tool.name);
-          return (
-            <article className="feature-card" key={tool.name} data-testid={`tool-row-${tool.name}`}>
-              <div className="feature-row">
-                <strong>{tool.name}</strong>
-                <span className={`status-chip ${effective ? 'complete' : 'failed'}`}>{effective ? 'enabled' : 'disabled'}</span>
-              </div>
-              <p>{tool.description}</p>
-              <div className="compare-meta">
-                <span>{tool.capability}</span>
-                <span>{tool.source}</span>
-                {row && <span>{row.calls_24h} 调用 / {row.failures_24h} 失败</span>}
-              </div>
-              <div className="inline-toolbar">
-                <button type="button" className="btn-quiet" onClick={() => void setToolEnabled(tool.name, !tool.enabled).then(() => refresh())}>
-                  {tool.enabled ? '全局关闭' : '全局开启'}
-                </button>
-                {props.activeConversationId && (
-                  <button
-                    type="button"
-                    className="btn-quiet"
-                    onClick={() => void setSessionToolEnabled(tool.name, props.activeConversationId!, effective ? false : true).then(() => refresh())}
-                    data-testid={`tool-session-toggle-${tool.name}`}
-                  >
-                    会话覆盖
-                  </button>
-                )}
-                <button
-                  type="button"
-                  className="btn-quiet"
-                  onClick={() => {
-                    let parsed: unknown = {};
-                    try {
-                      parsed = JSON.parse(invokeInput);
-                    } catch {
-                      parsed = { text: invokeInput };
-                    }
-                    void invokeTool({ name: tool.name, input: parsed, conversation_id: props.activeConversationId }).then((result) => {
-                      setInvokeResult(JSON.stringify(result, null, 2));
-                    }).catch((error) => props.onError(describeError(error)));
-                  }}
-                  data-testid={`tool-invoke-${tool.name}`}
-                >
-                  调用
-                </button>
-              </div>
-            </article>
-          );
-        })}
+
+      <div className="tool-overview">
+        <div>
+          <span className="summary-label">全局可用</span>
+          <strong>{loading && displayTools.length === 0 ? '加载中' : `${enabledCount}/${displayTools.length}`}</strong>
+        </div>
+        <div>
+          <span className="summary-label">当前会话</span>
+          <strong>{props.activeConversationId ? '可单独覆盖' : '未进入会话'}</strong>
+        </div>
+        <div>
+          <span className="summary-label">MCP</span>
+          <strong>{mcpServers.length} 个 Server · {mcpToolCount} 个工具</strong>
+        </div>
       </div>
-      <textarea className="feature-textarea small" value={invokeInput} onChange={(event) => setInvokeInput(event.target.value)} data-testid="tool-invoke-input" />
-      {invokeResult && <pre className="feature-pre" data-testid="tool-invoke-result">{invokeResult}</pre>}
-      <div className="feature-card">
-        <h3>MCP Server</h3>
+
+      <div className="tool-scope-note">
+        <Icon name="bolt" size={14} />
+        <span>全局开关影响之后的任务；会话覆盖只影响当前对话。Quick Compare 和圆桌也会遵守这里的工具状态。</span>
+      </div>
+
+      {loaded && displayTools.length === 0 && (
+        <div className="feature-card tool-empty" data-testid="tools-empty">
+          <strong>未发现可用工具</strong>
+          <p>当前后端没有返回内置工具或 MCP 工具。你可以先刷新，或在下方添加 MCP Server 后重新加载。</p>
+        </div>
+      )}
+
+      {(['search', 'file', 'media', 'other'] as const).map((category) => {
+        const items = groupedTools[category];
+        if (items.length === 0) return null;
+        return (
+          <section className="tool-section" key={category}>
+            <div className="tool-section-head">
+              <h3>{toolCategoryLabel(category)}</h3>
+              <span>{items.length} 个能力</span>
+            </div>
+            <div className="tool-grid">
+              {items.map((tool) => {
+                const effective = 'effective_enabled' in tool ? tool.effective_enabled : tool.enabled;
+                const row = healthByTool.get(tool.name);
+                const hasSessionOverride = 'session_enabled' in tool && tool.session_enabled != null;
+                return (
+                  <article className="tool-card" key={tool.name} data-testid={`tool-row-${tool.name}`}>
+                    <div className="tool-card-head">
+                      <div>
+                        <strong>{toolFriendlyName(tool.name)}</strong>
+                        <code>{tool.name}</code>
+                      </div>
+                      <span className={`status-chip ${effective ? 'complete' : 'failed'}`}>
+                        {toolStatusLabel(effective)}
+                        <span className="sr-only">{effective ? ' enabled' : ' disabled'}</span>
+                      </span>
+                    </div>
+                    <p>{tool.description}</p>
+                    <div className="tool-meta-row">
+                      <span>{tool.source === 'builtin' ? '内置工具' : tool.source}</span>
+                      <span>{tool.capability}</span>
+                      {row ? (
+                        <span>{row.calls_24h} 次调用 · {row.failures_24h} 次失败</span>
+                      ) : (
+                        <span>暂无健康记录</span>
+                      )}
+                      {hasSessionOverride && <span className="tool-override">本会话已覆盖</span>}
+                    </div>
+                    <div className="tool-actions">
+                      <button type="button" className="btn-quiet" onClick={() => void setToolEnabled(tool.name, !tool.enabled).then(() => refresh())}>
+                        {tool.enabled ? '全局关闭' : '全局开启'}
+                      </button>
+                      {props.activeConversationId && (
+                        <button
+                          type="button"
+                          className="btn-quiet"
+                          onClick={() => void setSessionToolEnabled(tool.name, props.activeConversationId!, effective ? false : true).then(() => refresh())}
+                          data-testid={`tool-session-toggle-${tool.name}`}
+                        >
+                          {effective ? '本会话关闭' : '本会话开启'}
+                        </button>
+                      )}
+                      <button
+                        type="button"
+                        className="btn-quiet debug-action"
+                        onClick={() => {
+                          setDebugOpen(true);
+                          let parsed: unknown = {};
+                          try {
+                            parsed = JSON.parse(invokeInput);
+                          } catch {
+                            parsed = { text: invokeInput };
+                          }
+                          void invokeTool({ name: tool.name, input: parsed, conversation_id: props.activeConversationId }).then((result) => {
+                            setInvokeResult(JSON.stringify(result, null, 2));
+                          }).catch((error) => props.onError(describeError(error)));
+                        }}
+                        data-testid={`tool-invoke-${tool.name}`}
+                      >
+                        调试调用
+                      </button>
+                    </div>
+                  </article>
+                );
+              })}
+            </div>
+          </section>
+        );
+      })}
+
+      <div className="mcp-panel feature-card">
+        <div className="mcp-panel-head">
+          <div>
+            <h3>高级 MCP</h3>
+            <p>接入本机 MCP Server，让支持工具调用的模型使用你的本地服务。</p>
+          </div>
+          <span className="status-chip preview">高级</span>
+        </div>
+        <div className="mcp-presets" aria-label="MCP 预设">
+          <button type="button" className="preset-pill soft" onClick={() => setMcpName('Local files MCP')}>本地文件</button>
+          <button type="button" className="preset-pill soft" onClick={() => setMcpName('GitHub MCP')}>GitHub</button>
+          <button type="button" className="preset-pill soft" onClick={() => setMcpName('Notion MCP')}>Notion</button>
+          <button type="button" className="preset-pill soft" onClick={() => setMcpName('Custom MCP')}>自定义</button>
+        </div>
         <div className="form-grid two">
-          <input value={mcpName} onChange={(event) => setMcpName(event.target.value)} data-testid="mcp-name" />
-          <input value={mcpCommand} onChange={(event) => setMcpCommand(event.target.value)} data-testid="mcp-command" />
+          <label>
+            <span>MCP 名称</span>
+            <input value={mcpName} onChange={(event) => setMcpName(event.target.value)} data-testid="mcp-name" />
+          </label>
+          <label>
+            <span>启动命令</span>
+            <input value={mcpCommand} onChange={(event) => setMcpCommand(event.target.value)} data-testid="mcp-command" />
+          </label>
         </div>
         <div className="inline-toolbar">
           <button type="button" className="btn-quiet" onClick={() => void addMcp()} data-testid="mcp-create">添加 MCP</button>
@@ -1422,7 +1885,7 @@ function ToolsPanel(props: FeatureHubProps & { panelId?: string }): JSX.Element 
           {mcpServers.map((server) => (
             <div key={server.id} className="feature-list-row" data-testid={`mcp-server-${server.id}`}>
               <strong>{server.name}</strong>
-              <span>{server.health_status} · {server.tools_count} tools</span>
+              <span>{server.health_status} · {server.tools_count} 个工具</span>
               <span className="inline-toolbar">
                 <button type="button" className="btn-quiet" onClick={() => void refreshMcpServer(server.id).then(() => refresh())} data-testid={`mcp-refresh-${server.id}`}>刷新</button>
                 <button type="button" className="btn-quiet" onClick={() => void restartMcpServer(server.id).then(() => refresh())} data-testid={`mcp-restart-${server.id}`}>重启</button>
@@ -1433,6 +1896,13 @@ function ToolsPanel(props: FeatureHubProps & { panelId?: string }): JSX.Element 
           ))}
         </div>
       </div>
+
+      <details className="tool-debug" open={debugOpen} onToggle={(event) => setDebugOpen(event.currentTarget.open)}>
+        <summary>调试工具调用</summary>
+        <p>这里用于开发和排查工具输入输出；日常使用时，模型会在对话、对比或圆桌中自动调用工具。</p>
+        <textarea className="feature-textarea small" value={invokeInput} onChange={(event) => setInvokeInput(event.target.value)} data-testid="tool-invoke-input" />
+        {invokeResult && <pre className="feature-pre" data-testid="tool-invoke-result">{invokeResult}</pre>}
+      </details>
     </section>
   );
 }

@@ -35,6 +35,30 @@ export const ContextSnapshotAnnotationSchema = z.object({
 });
 export type ContextSnapshotAnnotation = z.infer<typeof ContextSnapshotAnnotationSchema>;
 
+export const OrchestrationAnnotationSchema = z.object({
+  type: z.literal('orchestration'),
+  message_id: z.string().nullable().optional(),
+  conversation_id: z.string().nullable().optional(),
+  run_id: z.string().nullable().optional(),
+  reason: z.enum([
+    'none',
+    'explicit_search',
+    'freshness_required',
+    'evidence_required',
+    'high_stakes_current',
+    'deep_research_candidate',
+    'local_context_available',
+  ]),
+  external_info: z.enum(['none', 'web_search', 'web_search_fetch', 'deep_research_suggest']),
+  local_context: z.enum(['none', 'file_search']),
+  search_tool_name: z.string().nullable(),
+  query_count: z.number().int().nonnegative(),
+  fetch_top_k: z.number().int().nonnegative(),
+  cite_required: z.boolean(),
+  allow_model_tool_use: z.boolean(),
+});
+export type OrchestrationAnnotation = z.infer<typeof OrchestrationAnnotationSchema>;
+
 export const ConversationProfileSchema = z.object({
   conversation_id: z.string(),
   title: z.string().nullable(),
@@ -78,6 +102,7 @@ export type AgentRunKind = z.infer<typeof AgentRunKindSchema>;
 export const RunEventKindSchema = z.enum([
   'turn.started',
   'context.snapshot',
+  'orchestration.plan',
   'context.file_chunks',
   'context.compacted',
   'file.search',

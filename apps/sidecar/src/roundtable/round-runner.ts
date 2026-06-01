@@ -40,6 +40,9 @@ import { classifyProviderError } from '../providers/registry.js';
 import type { CapabilityBus } from '../bus/index.js';
 import { applyPreferredSearchToolSelection, MAX_STEPS_DEFAULT, MAX_STEPS_WITH_WEB_TOOLS } from '../chat/upstream-tools.js';
 import { createChatModel } from '../providers/chat-model.js';
+import { buildChatOrchestrationPlan } from '../orchestration/context-router.js';
+import { buildWebSearchMessage, executeWebPreflight, type WebSearchContextResult } from '../orchestration/web-context.js';
+import { buildOrchestrationAnnotation } from '../orchestration/annotation.js';
 
 export interface RoundRunnerDeps {
   modelsRepo: ModelsRepo;
@@ -102,12 +105,15 @@ function buildPromptForParticipant(args: {
   round: 1 | 2;
   priorRoundMessages: RoundtableMessageRow[];
   participants: Participant[];
+  webSearchContext?: WebSearchContextResult | null;
 }): { system: string; prompt: string } {
   const sys = `${args.participant.persona_prompt}\n\n${
     args.round === 1 ? SYSTEM_PREAMBLE_R1 : SYSTEM_PREAMBLE_R2
   }`;
+  const webContext = buildWebSearchMessage(args.webSearchContext).message?.content;
+  const webPrompt = webContext ? `\n\n${webContext}` : '';
   if (args.round === 1) {
-    return { system: sys, prompt: `话题：${args.topic}` };
+    return { system: sys, prompt: `话题：${args.topic}${webPrompt}` };
   }
   // round 2 — inject all round 1 contents (互见)
   const r1Lines = args.priorRoundMessages
@@ -121,7 +127,7 @@ function buildPromptForParticipant(args: {
     .join('\n\n');
   return {
     system: sys,
-    prompt: `话题：${args.topic}\n\n第一轮发言：\n${r1Lines}`,
+    prompt: `话题：${args.topic}${webPrompt}\n\n第一轮发言：\n${r1Lines}`,
   };
 }
 
@@ -281,6 +287,43 @@ function buildToolsForParticipant(args: {
   };
 }
 
+function emitRoundtablePreflightTrace(args: {
+  stream: PassThrough;
+  round: 1 | 2;
+  messageRows: Map<number, RoundtableMessageRow>;
+  search: WebSearchContextResult | null;
+}): void {
+  if (!args.search?.results.length) return;
+  for (const [participantIndex, msgRow] of args.messageRows.entries()) {
+    for (const [index, page] of (args.search.fetchedPages ?? []).entries()) {
+      writeAnnotation(args.stream, [{
+        type: 'rt.tool_trace',
+        participant_index: participantIndex,
+        round: args.round,
+        call_id: `${msgRow.id}:pre_web_fetch:${index}`,
+        tool: 'builtin.web_fetch',
+        label: '预读取网页',
+        event: 'finish',
+        input: page.url,
+        ok: true,
+        output: page.title,
+      }]);
+    }
+    writeAnnotation(args.stream, [{
+      type: 'rt.tool_trace',
+      participant_index: participantIndex,
+      round: args.round,
+      call_id: `${msgRow.id}:pre_web_search`,
+      tool: args.search.toolName,
+      label: '预搜索网页',
+      event: 'finish',
+      input: args.search.query,
+      ok: true,
+      output: `返回 ${args.search.results.length} 条结果`,
+    }]);
+  }
+}
+
 interface ParticipantRunResult {
   index: number;
   ok: boolean;
@@ -301,6 +344,7 @@ async function runOneParticipant(
   model: Model,
   provider: Provider,
   apiKey: string,
+  webSearchContext: WebSearchContextResult | null,
 ): Promise<ParticipantRunResult> {
   const startedAt = Date.now();
   const { system, prompt } = buildPromptForParticipant({
@@ -309,6 +353,7 @@ async function runOneParticipant(
     round,
     priorRoundMessages,
     participants,
+    webSearchContext,
   });
 
   let accumulated = '';
@@ -649,6 +694,64 @@ export async function runRound(
     }
   }
 
+  const orchestrationPlan = buildChatOrchestrationPlan({
+    bus: deps.bus,
+    memoriesRepo: deps.memoriesRepo as never,
+    conversationId: rt.conversation_id,
+    userText: rt.topic,
+    hasConversationFiles: false,
+  });
+  deps.runEvents?.append({
+    kind: 'orchestration.plan',
+    status: 'completed',
+    label: '圆桌能力编排计划',
+    summary: orchestrationPlan.reason,
+    payload: {
+      ...orchestrationPlan,
+      run_kind: 'roundtable',
+      roundtable_id: rt.id,
+      round,
+      retry: isRetry,
+    },
+  });
+  writeAnnotation(stream, [{
+    ...buildOrchestrationAnnotation(orchestrationPlan, {
+      messageId: null,
+      conversationId: rt.conversation_id,
+      runId: deps.runEvents?.runId ?? null,
+    }),
+    type: 'rt.orchestration',
+    roundtable_id: rt.id,
+    round,
+    retry: isRetry,
+  }]);
+  const webSearchContext = await executeWebPreflight({
+    bus: deps.bus,
+    appendRunEvent: (input) => deps.runEvents?.append({
+      kind: input.kind,
+      status: input.status,
+      label: input.label,
+      summary: input.summary,
+      payload: input.payload,
+      message_id: input.message_id,
+    }),
+    runId: deps.runEvents?.runId ?? `roundtable:${rt.id}`,
+    conversationId: rt.conversation_id,
+    messageId: null,
+    sourceUserMessageId: null,
+    plan: orchestrationPlan,
+    canFetch: true,
+    searchLabel: '圆桌预搜索网页',
+    fetchLabel: '圆桌预读取网页',
+    log: deps.log,
+  });
+  emitRoundtablePreflightTrace({
+    stream,
+    round,
+    messageRows: msgRowsByIndex,
+    search: webSearchContext,
+  });
+
   // Resolve model + key for each participant up front. If a model can't be
   // resolved we mark its row as failed immediately and skip the network call.
   const tasks = indicesToRun.map(async (i) => {
@@ -745,6 +848,7 @@ export async function runRound(
       model,
       provider,
       apiKey,
+      webSearchContext,
     );
   });
 

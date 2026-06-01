@@ -41,6 +41,13 @@ Scope: Taori 全系统
 
 ## 5. 最近变化
 
+- 2026-05-30 [Sidecar · 基础能力编排内核第一至三阶段]：
+  - `apps/sidecar`：新增内部 `src/orchestration/context-router.ts` 与 `src/orchestration/web-context.ts`，普通聊天、Quick Compare 主路径 / 重试、Roundtable 轮次在上下文组装前生成 `OrchestrationPlan`，统一判断外部信息 / 本地上下文 / 首选搜索工具 / 引用需求 / 深度研究候选；计划写入 `run_events(kind='orchestration.plan')`，普通聊天同步进入 `context.snapshot`。
+  - `apps/sidecar`：普通聊天、Quick Compare 与 Roundtable 的联网增强由关键词补丁升级为编排驱动；高时效或需要证据的问题会先预搜索，再按计划预读取网页正文片段并注入上游模型，相关步骤通过 `tool_trace` / `qc.tool_trace` / `rt.tool_trace` 和 run events 透明展示。
+  - `packages/shared`：`RunEventKindSchema` additive 增加 `orchestration.plan`；新增 `OrchestrationAnnotation`，Quick Compare / Roundtable 流事件 additive 增加 `qc.orchestration` / `rt.orchestration`，用于 Renderer 展示自动联网原因、搜索工具、查询数、预读数与引用要求；无数据库 migration。
+  - `apps/web`：普通聊天、Quick Compare 与 Roundtable 展示编排摘要，明确“为什么自动联网 / 是否要求引用”；普通聊天在 `deep_research_suggest` 时可一键转入深度研究并带入原用户问题；对话顶栏「运行记录」读取已有 `/v1/conversations/:id/run-events` 并高亮 `orchestration.plan`，不新增状态来源；HTTP 请求方式不变。
+  - `apps/desktop`：无代码或部署语义变化。
+  - 架构提案见 `docs/architecture/36-capability-orchestration-kernel-proposal.md`；该内核是请求内能力路由，不等同于 P7 用户可编辑工作流 DAG。
 - 2026-05-30 [Sidecar · 服务商停用后端门禁与自动标题成本收敛]：
   - `apps/sidecar`：Provider `enabled=false` 成为真实模型调用后端硬门禁，覆盖 `/v1/chat`、continue/recover、Quick Compare 自动选择 / 显式选择 / 重试；停用服务商下的模型不会再被旧前端状态、恢复路径或直接 API 调用绕过。
   - `apps/sidecar`：LLM 自动标题默认关闭，首轮标题默认保持本地截断；只有 `memories` 有效值 `auto_title_llm_enabled === 'true'` 时才会尝试 best-effort LLM 标题升级，且跳过已停用服务商。

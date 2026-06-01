@@ -67,6 +67,7 @@ export function registerDiagnosticsRoute(
       'generated_image_to_vision_understanding',
       'web_fetch_tool_from_chat',
       'web_search_tool_from_chat',
+      'orchestration_plan_for_external_info',
       'mcp_tool_from_ordinary_chat',
       'real_context_window_and_compact_context_recover',
       'real_skip_tool_recovery',

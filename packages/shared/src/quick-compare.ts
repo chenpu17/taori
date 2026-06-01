@@ -4,6 +4,7 @@ import {
   ChatMessageSchema,
   ErrorClassificationSchema,
 } from './schemas.js';
+import { OrchestrationAnnotationSchema } from './agent.js';
 
 export const QuickCompareStatusSchema = z.enum([
   'running',
@@ -91,6 +92,11 @@ export const QuickCompareAnnotationSchema = z.discriminatedUnion('type', [
     conversation_id: z.string(),
     run_id: z.string(),
     model_ids: z.array(z.string()),
+  }),
+  OrchestrationAnnotationSchema.extend({
+    type: z.literal('qc.orchestration'),
+    compare_id: z.string(),
+    output_id: z.string().nullable().optional(),
   }),
   z.object({
     type: z.literal('qc.participant_start'),

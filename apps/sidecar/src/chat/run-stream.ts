@@ -23,6 +23,9 @@ import { scheduleAutoTitle } from './auto-title.js';
 import { applyContextWindow, type ContextWindowStats } from './context-window.js';
 import { getVisibleToolNames } from './upstream-tools.js';
 import type { StreamObserver } from './protocol.js';
+import type { OrchestrationPlan } from '../orchestration/context-router.js';
+import type { WebSearchContextResult } from '../orchestration/web-context.js';
+import { buildOrchestrationAnnotation } from '../orchestration/annotation.js';
 
 export interface ProduceCtx {
   runId: string;
@@ -66,6 +69,8 @@ export interface ProduceCtx {
   filesRepo: FilesRepo | null;
   runEventsRepo: RunEventsRepo;
   fileContextSnippets?: FileSearchResult[];
+  webSearchContext?: WebSearchContextResult | null;
+  orchestrationPlan?: OrchestrationPlan | null;
   contextWindowStats?: ContextWindowStats;
 }
 
@@ -220,6 +225,15 @@ export function buildContextSnapshot(ctx: ProduceCtx): Record<string, unknown> {
     disabled_tool_names: disabledToolNames,
     context_sources: [
       {
+        type: 'orchestration',
+        label: ctx.orchestrationPlan
+          ? `编排：${ctx.orchestrationPlan.reason}`
+          : '未生成编排计划',
+        scope: 'request',
+        active: Boolean(ctx.orchestrationPlan && ctx.orchestrationPlan.reason !== 'none'),
+        plan: ctx.orchestrationPlan ?? null,
+      },
+      {
         type: 'model',
         label: ctx.modelNameSnapshot,
         scope: 'request',
@@ -259,6 +273,15 @@ export function buildContextSnapshot(ctx: ProduceCtx): Record<string, unknown> {
         scope: 'request',
         active: Boolean(ctx.fileContextSnippets?.length),
       },
+      {
+        type: 'web_search',
+        label: ctx.webSearchContext?.results.length
+          ? `已预搜索 ${ctx.webSearchContext.results.length} 条网页结果` +
+            (ctx.webSearchContext.fetchedPages?.length ? `，读取 ${ctx.webSearchContext.fetchedPages.length} 页` : '')
+          : '未预搜索网页',
+        scope: 'request',
+        active: Boolean(ctx.webSearchContext?.results.length),
+      },
     ],
     context_window: ctx.contextWindowStats ?? null,
   };
@@ -281,6 +304,17 @@ export function emitMetaAndContextSnapshot(
   );
   const contextSnapshot = buildContextSnapshot(ctx);
   stream.write(`8:${JSON.stringify([contextSnapshot])}\n`);
+  if (ctx.orchestrationPlan) {
+    stream.write(
+      `8:${JSON.stringify([
+        buildOrchestrationAnnotation(ctx.orchestrationPlan, {
+          messageId: ctx.messageId,
+          conversationId: ctx.conversationId,
+          runId: ctx.runId,
+        }),
+      ])}\n`,
+    );
+  }
   recordRunEvent(ctx, {
     kind: 'context.snapshot',
     status: 'completed',

@@ -39,6 +39,9 @@ import { pickQuickCompareModels } from '../quick-compare/model-picker.js';
 import type { CapabilityBus } from '../bus/index.js';
 import { createChatModel, resolveThinkingConfig } from '../providers/chat-model.js';
 import { assertProviderRunnableForModel } from '../models/eligibility.js';
+import { buildChatOrchestrationPlan } from '../orchestration/context-router.js';
+import { buildWebSearchMessage, executeWebPreflight, type WebSearchContextResult } from '../orchestration/web-context.js';
+import { buildOrchestrationAnnotation } from '../orchestration/annotation.js';
 
 function writeAnnotation(stream: PassThrough, annotations: QuickCompareAnnotation[]): void {
   writeAnnotationPart(stream, annotations);
@@ -62,14 +65,17 @@ function buildCompareMessages(args: {
   requestMessages: Array<{ role: 'user' | 'assistant' | 'system'; content: string }>;
   personaPrompt: string | null;
   attachments?: ChatAttachment[];
+  webSearchContext?: WebSearchContextResult | null;
 }): Array<{ role: 'user' | 'assistant' | 'system'; content: string }> {
   const system = [
     args.personaPrompt,
     '你正在参加 Taori Quick Compare。请独立给出高质量回答，不要提及其他候选模型。回答要直接、可执行、避免空话。',
   ].filter(Boolean).join('\n\n');
+  const webSearchMessage = buildWebSearchMessage(args.webSearchContext).message;
   const messages = system
     ? [{ role: 'system' as const, content: system }, ...args.requestMessages]
     : [...args.requestMessages];
+  if (webSearchMessage) messages.splice(system ? 1 : 0, 0, webSearchMessage);
   const notice = attachmentNotice(args.attachments);
   if (!notice) return messages;
   const lastUserIndex = messages.map((message) => message.role).lastIndexOf('user');
@@ -79,6 +85,46 @@ function buildCompareMessages(args: {
       ? { ...message, content: `${message.content}${notice}` }
       : message,
   );
+}
+
+function emitQuickComparePreflightTrace(args: {
+  stream: PassThrough;
+  outputs: Array<{ id: string; participant_index: number; model_id: string }>;
+  search: WebSearchContextResult | null;
+}): void {
+  if (!args.search?.results.length) return;
+  for (const output of args.outputs) {
+    for (const [index, page] of (args.search.fetchedPages ?? []).entries()) {
+      writeAnnotation(args.stream, [{
+        type: 'qc.tool_trace',
+        output_id: output.id,
+        index: output.participant_index,
+        model_id: output.model_id,
+        event: 'finish',
+        call_id: `${output.id}:pre_web_fetch:${index}`,
+        tool: 'builtin.web_fetch',
+        label: '预读取网页',
+        input: page.url,
+        ok: true,
+        output: page.title,
+        duration_ms: undefined,
+      }]);
+    }
+    writeAnnotation(args.stream, [{
+      type: 'qc.tool_trace',
+      output_id: output.id,
+      index: output.participant_index,
+      model_id: output.model_id,
+      event: 'finish',
+      call_id: `${output.id}:pre_web_search`,
+      tool: args.search.toolName,
+      label: '预搜索网页',
+      input: args.search.query,
+      ok: true,
+      output: `返回 ${args.search.results.length} 条结果`,
+      duration_ms: undefined,
+    }]);
+  }
 }
 
 function estimateCompareCostUsd(models: Model[], inputText: string): number {
@@ -646,6 +692,27 @@ export function registerQuickCompareRoute(app: FastifyInstance, deps: BuildServe
         estimated_cost_usd: estimatedCostUsd,
       },
     });
+    const orchestrationPlan = buildChatOrchestrationPlan({
+      bus: deps.bus,
+      memoriesRepo,
+      conversationId: conversation.id,
+      userText: userMessage.content,
+      hasConversationFiles: Boolean(body.attachments?.length),
+    });
+    appendRunEvent(req.log, runEventsRepo, {
+      run_id: runId,
+      conversation_id: conversation.id,
+      message_id: sourceUserMessage.id,
+      kind: 'orchestration.plan',
+      status: 'completed',
+      label: 'Quick Compare 能力编排计划',
+      summary: orchestrationPlan.reason,
+      payload: {
+        ...orchestrationPlan,
+        run_kind: 'quick_compare',
+        compare_id: compare.id,
+      },
+    });
 
     const dataStream = openDataStream(req.headers.origin, reply);
     writeAnnotation(dataStream.stream, [{
@@ -655,14 +722,41 @@ export function registerQuickCompareRoute(app: FastifyInstance, deps: BuildServe
       run_id: runId,
       model_ids: selectedModels.map((model) => model.id),
     }]);
-
-    const messages = buildCompareMessages({
-      requestMessages: body.messages,
-      personaPrompt,
-      attachments: body.attachments,
-    });
+    writeAnnotation(dataStream.stream, [{
+      ...buildOrchestrationAnnotation(orchestrationPlan, {
+        messageId: sourceUserMessage.id,
+        conversationId: conversation.id,
+        runId,
+      }),
+      type: 'qc.orchestration',
+      compare_id: compare.id,
+    }]);
 
     void (async () => {
+      const webSearchContext = await executeWebPreflight({
+        bus: deps.bus,
+        runEventsRepo,
+        runId,
+        conversationId: conversation.id,
+        messageId: sourceUserMessage.id,
+        sourceUserMessageId: sourceUserMessage.id,
+        plan: orchestrationPlan,
+        canFetch: toolPolicy['builtin.web_fetch'] === true,
+        searchLabel: 'Quick Compare 预搜索网页',
+        fetchLabel: 'Quick Compare 预读取网页',
+        log: req.log,
+      });
+      emitQuickComparePreflightTrace({
+        stream: dataStream.stream,
+        outputs,
+        search: webSearchContext,
+      });
+      const messages = buildCompareMessages({
+        requestMessages: body.messages,
+        personaPrompt,
+        attachments: body.attachments,
+        webSearchContext,
+      });
       const providers = selectedModels.map((model) =>
         model.provider_id ? providersRepo.get(model.provider_id) : null,
       );
@@ -893,6 +987,38 @@ export function registerQuickCompareRoute(app: FastifyInstance, deps: BuildServe
       run_id: compare.run_id,
       model_ids: compare.model_ids,
     }]);
+    const orchestrationPlan = buildChatOrchestrationPlan({
+      bus: deps.bus,
+      memoriesRepo,
+      conversationId: compare.conversation_id,
+      userText: prompt,
+      hasConversationFiles: false,
+    });
+    appendRunEvent(req.log, runEventsRepo, {
+      run_id: compare.run_id,
+      conversation_id: compare.conversation_id,
+      message_id: compare.source_user_message_id,
+      kind: 'orchestration.plan',
+      status: 'completed',
+      label: 'Quick Compare 重试能力编排计划',
+      summary: orchestrationPlan.reason,
+      payload: {
+        ...orchestrationPlan,
+        run_kind: 'quick_compare_retry',
+        compare_id: compare.id,
+        output_id: target.id,
+      },
+    });
+    writeAnnotation(dataStream.stream, [{
+      ...buildOrchestrationAnnotation(orchestrationPlan, {
+        messageId: compare.source_user_message_id,
+        conversationId: compare.conversation_id,
+        runId: compare.run_id,
+      }),
+      type: 'qc.orchestration',
+      compare_id: compare.id,
+      output_id: target.id,
+    }]);
     let apiKey: string | null = null;
     let previewReason: QuickComparePreviewReason | null = provider ? null : 'provider_missing';
     if (provider?.type === 'ollama') {
@@ -909,6 +1035,24 @@ export function registerQuickCompareRoute(app: FastifyInstance, deps: BuildServe
       previewReason = 'api_key_missing';
     }
     void (async () => {
+      const webSearchContext = await executeWebPreflight({
+        bus: deps.bus,
+        runEventsRepo,
+        runId: compare.run_id,
+        conversationId: compare.conversation_id,
+        messageId: compare.source_user_message_id,
+        sourceUserMessageId: compare.source_user_message_id,
+        plan: orchestrationPlan,
+        canFetch: toolPolicy['builtin.web_fetch'] === true,
+        searchLabel: 'Quick Compare 重试预搜索网页',
+        fetchLabel: 'Quick Compare 重试预读取网页',
+        log: req.log,
+      });
+      emitQuickComparePreflightTrace({
+        stream: dataStream.stream,
+        outputs: [target],
+        search: webSearchContext,
+      });
       const result = await runCompareParticipant({
         stream: dataStream.stream,
         signal: dataStream.abortController.signal,
@@ -921,7 +1065,11 @@ export function registerQuickCompareRoute(app: FastifyInstance, deps: BuildServe
         provider,
         apiKey,
         previewReason,
-        messages: [{ role: 'user', content: prompt }],
+        messages: buildCompareMessages({
+          requestMessages: [{ role: 'user', content: prompt }],
+          personaPrompt: null,
+          webSearchContext,
+        }),
         sourceUserMessageId: compare.source_user_message_id,
         bus: deps.bus,
         toolPolicy: participantToolPolicy,

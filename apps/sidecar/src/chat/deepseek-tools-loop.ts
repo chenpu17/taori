@@ -370,6 +370,7 @@ export async function produceDeepSeekUpstreamStream(
   const upstream = buildUpstreamMessages(ctx);
   ctx.contextWindowStats = upstream.stats;
   emitMetaAndContextSnapshot(stream, ctx);
+  emitPreflightWebSearchTrace(stream, ctx, observer);
 
   try {
     recordRunEvent(ctx, {
@@ -548,4 +549,39 @@ export async function produceDeepSeekUpstreamStream(
   } finally {
     stream.end();
   }
+}
+
+function emitPreflightWebSearchTrace(
+  stream: PassThrough,
+  ctx: ProduceCtx,
+  observer?: StreamObserver,
+): void {
+  const search = ctx.webSearchContext;
+  if (!search?.results.length) return;
+  for (const [index, page] of (search.fetchedPages ?? []).entries()) {
+    writeAnnotationPart(stream, [{
+      type: 'tool_trace',
+      message_id: ctx.messageId,
+      event: 'finish',
+      call_id: `${ctx.messageId}:pre_web_fetch:${index}`,
+      tool: 'builtin.web_fetch',
+      label: '预读取网页',
+      input: page.url,
+      ok: true,
+      output: page.title,
+      duration_ms: null,
+    }], observer);
+  }
+  writeAnnotationPart(stream, [{
+    type: 'tool_trace',
+    message_id: ctx.messageId,
+    event: 'finish',
+    call_id: `${ctx.messageId}:pre_web_search`,
+    tool: search.toolName,
+    label: '预搜索网页',
+    input: search.query,
+    ok: true,
+    output: `返回 ${search.results.length} 条结果`,
+    duration_ms: null,
+  }], observer);
 }

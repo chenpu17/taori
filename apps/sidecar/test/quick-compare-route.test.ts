@@ -11,6 +11,7 @@ import {
   ModelsRepo,
   ProvidersRepo,
   QuickCompareRepo,
+  RunEventsRepo,
 } from '../src/db/repos/index.js';
 import { MemoryStore } from '../src/keystore.js';
 
@@ -98,7 +99,12 @@ describe('quick compare route', () => {
     const match = /"compare_id":"([^"]+)"/.exec(res.body);
     expect(match?.[1]).toBeTruthy();
     const outputs = qcRepo.listOutputs(match![1]!);
-    expect(outputs).toHaveLength(3);
+    const expectedOutputCount = Array.isArray(payload?.model_ids)
+      ? payload.model_ids.length
+      : Array.isArray(payload?.participant_configs)
+        ? payload.participant_configs.length
+        : 3;
+    expect(outputs).toHaveLength(expectedOutputCount);
     expect(outputs.every((output) => output.status === 'complete')).toBe(true);
     expect(outputs.map((output) => output.content)).toEqual(
       expect.arrayContaining([expect.stringContaining('Quick Compare 本地预览')]),
@@ -365,6 +371,183 @@ describe('quick compare route', () => {
     expect(deepseekCalls).toBe(2);
     expect(res.body).toContain('DeepSeek quick compare answer.');
     expect(res.body).toContain('"type":"qc.tool_trace"');
+  }, 15000);
+
+  it('pre-searches current questions before quick compare participants stream', async () => {
+    const providers = new ProvidersRepo(db);
+    const provider = providers.create({
+      name: 'OpenRouter',
+      type: 'openrouter',
+      base_url: 'https://openrouter.example.com/api/v1',
+      api_key: 'sk-qc-web-context',
+    });
+    await keystore.write(provider.api_key_ref!, 'sk-qc-web-context');
+    const model = modelsRepo.create({
+      provider_id: provider.id,
+      model_name: 'qc-web-context',
+      display_name: 'QC Web Context',
+      capability: 'chat',
+      supports_tools: false,
+    });
+    const providerBodies: Array<{ messages?: Array<{ role?: string; content?: string }> }> = [];
+    const sseBody =
+      `data: ${JSON.stringify({ id: '1', object: 'chat.completion.chunk', created: 1, model: 'm', choices: [{ index: 0, delta: { role: 'assistant', content: '已结合预搜索。' }, finish_reason: null }] })}\n\n` +
+      `data: ${JSON.stringify({ id: '1', object: 'chat.completion.chunk', created: 1, model: 'm', choices: [{ index: 0, delta: {}, finish_reason: 'stop' }], usage: { prompt_tokens: 20, completion_tokens: 5, total_tokens: 25 } })}\n\n` +
+      `data: [DONE]\n\n`;
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (url, init) => {
+      const asText = String(url);
+      const hostname = new URL(asText).hostname;
+      if (hostname === 'html.duckduckgo.com' || hostname === 'duckduckgo.com') {
+        return new Response(
+          `<!doctype html><html><body>
+            <a class="result__a" href="https://example.com/sz-admission">深圳升学报名建议</a>
+            <a class="result__snippet">深圳初升高报名与分数线测试结果。</a>
+          </body></html>`,
+          { status: 200, headers: { 'content-type': 'text/html; charset=utf-8' } },
+        );
+      }
+      if (hostname === 'example.com') {
+        return new Response(
+          `<!doctype html><html><head><title>深圳升学报名建议</title></head><body>
+            <h1>深圳升学报名建议</h1>
+            <p>坂田、初升高、模拟考试 522 分与报名策略的确定性测试页面。</p>
+          </body></html>`,
+          { status: 200, headers: { 'content-type': 'text/html; charset=utf-8' } },
+        );
+      }
+      expect(hostname).toBe('openrouter.example.com');
+      providerBodies.push(JSON.parse(String(init?.body ?? '{}')));
+      return new Response(sseBody, {
+        status: 200,
+        headers: { 'content-type': 'text/event-stream' },
+      });
+    });
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/v1/quick-compare',
+      headers: { ...auth, 'content-type': 'application/json' },
+      payload: {
+        model_ids: [model.id, models[0]],
+        participant_configs: [
+          { model_id: model.id, tool_names: [] },
+          { model_id: models[0], tool_names: [] },
+        ],
+        messages: [{ role: 'user', content: '深圳初升高，模拟考试522分，家住坂田，如果要报名，什么建议？' }],
+      },
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect(res.body).toContain('"type":"qc.orchestration"');
+    expect(res.body).toContain('"reason":"high_stakes_current"');
+    expect(res.body).toContain('"external_info":"web_search_fetch"');
+    expect(res.body).toContain('"cite_required":true');
+    expect(res.body).toContain('"type":"qc.tool_trace"');
+    expect(res.body).toContain('预搜索网页');
+    const sentMessages = providerBodies[0]?.messages ?? [];
+    expect(sentMessages.some((message) =>
+      message.role === 'system' &&
+      String(message.content ?? '').includes('系统已经按本轮编排计划完成联网预搜索') &&
+      String(message.content ?? '').includes('深圳初升高') &&
+      String(message.content ?? '').includes('web_page 1'),
+    )).toBe(true);
+    const compareId = /"compare_id":"([^"]+)"/.exec(res.body)?.[1];
+    expect(compareId).toBeTruthy();
+    const compare = qcRepo.getRun(compareId!);
+    expect(compare).toBeTruthy();
+    const events = new RunEventsRepo(db).listByRun(compare!.run_id);
+    expect(events.some((event) =>
+      event.kind === 'orchestration.plan' &&
+      event.payload?.run_kind === 'quick_compare' &&
+      event.payload?.reason === 'high_stakes_current',
+    )).toBe(true);
+    expect(events.some((event) => event.kind === 'tool.completed' && event.payload?.preflight === true)).toBe(true);
+  }, 15000);
+
+  it('pre-searches current questions before retrying a quick compare output', async () => {
+    const providers = new ProvidersRepo(db);
+    const provider = providers.create({
+      name: 'OpenRouter',
+      type: 'openrouter',
+      base_url: 'https://openrouter.example.com/api/v1',
+      api_key: 'sk-qc-retry-web-context',
+    });
+    const model = modelsRepo.create({
+      provider_id: provider.id,
+      model_name: 'qc-retry-web-context',
+      display_name: 'QC Retry Web Context',
+      capability: 'chat',
+      supports_tools: false,
+    });
+    const { compareId } = await createCompare({
+      model_ids: [model.id, models[0]],
+      participant_configs: [
+        { model_id: model.id, tool_names: [] },
+        { model_id: models[0], tool_names: [] },
+      ],
+      messages: [{ role: 'user', content: '深圳初升高，模拟考试522分，家住坂田，如果要报名，什么建议？' }],
+    });
+    await keystore.write(provider.api_key_ref!, 'sk-qc-retry-web-context');
+    const output = qcRepo.listOutputs(compareId).find((item) => item.model_id === model.id)!;
+    const providerBodies: Array<{ messages?: Array<{ role?: string; content?: string }> }> = [];
+    const sseBody =
+      `data: ${JSON.stringify({ id: '1', object: 'chat.completion.chunk', created: 1, model: 'm', choices: [{ index: 0, delta: { role: 'assistant', content: '重试已结合预搜索。' }, finish_reason: null }] })}\n\n` +
+      `data: ${JSON.stringify({ id: '1', object: 'chat.completion.chunk', created: 1, model: 'm', choices: [{ index: 0, delta: {}, finish_reason: 'stop' }], usage: { prompt_tokens: 20, completion_tokens: 5, total_tokens: 25 } })}\n\n` +
+      `data: [DONE]\n\n`;
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (url, init) => {
+      const asText = String(url);
+      const hostname = new URL(asText).hostname;
+      if (hostname === 'html.duckduckgo.com' || hostname === 'duckduckgo.com') {
+        return new Response(
+          `<!doctype html><html><body>
+            <a class="result__a" href="https://example.com/sz-retry-admission">深圳升学重试报名建议</a>
+            <a class="result__snippet">深圳初升高重试搜索结果。</a>
+          </body></html>`,
+          { status: 200, headers: { 'content-type': 'text/html; charset=utf-8' } },
+        );
+      }
+      if (hostname === 'example.com') {
+        return new Response(
+          `<!doctype html><html><head><title>深圳升学重试报名建议</title></head><body>
+            <h1>深圳升学重试报名建议</h1>
+            <p>坂田、初升高与报名策略的 Quick Compare retry 测试页面。</p>
+          </body></html>`,
+          { status: 200, headers: { 'content-type': 'text/html; charset=utf-8' } },
+        );
+      }
+      expect(hostname).toBe('openrouter.example.com');
+      providerBodies.push(JSON.parse(String(init?.body ?? '{}')));
+      return new Response(sseBody, {
+        status: 200,
+        headers: { 'content-type': 'text/event-stream' },
+      });
+    });
+
+    const retryRes = await app.inject({
+      method: 'POST',
+      url: `/v1/quick-compare/${compareId}/retry`,
+      headers: { ...auth, 'content-type': 'application/json' },
+      payload: { output_id: output.id },
+    });
+
+    expect(retryRes.statusCode).toBe(200);
+    expect(retryRes.body).toContain('"type":"qc.orchestration"');
+    expect(retryRes.body).toContain('"reason":"high_stakes_current"');
+    expect(retryRes.body).toContain('"type":"qc.tool_trace"');
+    expect(retryRes.body).toContain('预搜索网页');
+    const sentMessages = providerBodies[0]?.messages ?? [];
+    expect(sentMessages.some((message) =>
+      message.role === 'system' &&
+      String(message.content ?? '').includes('系统已经按本轮编排计划完成联网预搜索') &&
+      String(message.content ?? '').includes('web_page 1'),
+    )).toBe(true);
+    const compare = qcRepo.getRun(compareId)!;
+    const events = new RunEventsRepo(db).listByRun(compare.run_id);
+    expect(events.some((event) =>
+      event.kind === 'orchestration.plan' &&
+      event.payload?.run_kind === 'quick_compare_retry' &&
+      event.payload?.output_id === output.id,
+    )).toBe(true);
   }, 15000);
 
   it('uses DeepSeek tool loop for hosted deepseek-v4 models on compatible providers', async () => {
